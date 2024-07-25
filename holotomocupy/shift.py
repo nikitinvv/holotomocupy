@@ -24,8 +24,9 @@ def S(psi, shift=0):
     res = psi.copy()
     if np.all(shift == 0):
         return res
-    p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))
-    n = psi.shape[-1]
+    p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))    
+    # res = ndimage.zoom(res,(1,2,2),order=0)    
+    n = res.shape[-1]    
     res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), 'symmetric')
     x = cp.fft.fftfreq(2*n).astype('float32')
     [x, y] = cp.meshgrid(x, x)
@@ -37,7 +38,7 @@ def S(psi, shift=0):
 
 @gpu_batch
 def ST(psi, shift=0):
-    """ Adjoint 2D shift operator (-shift)
+    """ 2D shift operator
     
     Parameters
     ----------
@@ -55,8 +56,9 @@ def ST(psi, shift=0):
     res = psi.copy()
     if np.all(shift == 0):
         return res
-    p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))
-    n = psi.shape[-1]
+    p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))    
+    # res = ndimage.zoom(res,(1,2,2),order=0)    
+    n = res.shape[-1]    
     res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), 'symmetric')
     x = cp.fft.fftfreq(2*n).astype('float32')
     [x, y] = cp.meshgrid(x, x)
@@ -66,27 +68,27 @@ def ST(psi, shift=0):
     return res
 
 
-# @gpu_batch
-# def S(psi, shift=0):
-#     """Shift operator"""
-#     res = psi.copy()
-#     if np.all(shift==0):
-#         return res
-#     p = cp.pad(shift,(0,res.shape[0]-shift.shape[0]))
-#     for k in range(p.shape[0]):
-#         res[k] = ndimage.shift(res[k], p[k], order=2, mode='nearest', prefilter=True)
-#     return res
+@gpu_batch
+def S0(psi, shift=0,order=2):
+    """Shift operator"""
+    res = psi.copy()
+    if np.all(shift==0):
+        return res
+    p = cp.pad(shift,(0,res.shape[0]-shift.shape[0]))
+    for k in range(p.shape[0]):
+        res[k] = ndimage.shift(res[k], p[k], order=order, mode='nearest', prefilter=True)
+    return res
 
-# @gpu_batch
-# def ST(psi, shift=0):
-#     """Adjoint Shift operator"""
-#     res = psi.copy()
-#     if np.all(shift==0):
-#         return res
-#     p = cp.pad(-shift,(0,res.shape[0]-shift.shape[0]))
-#     for k in range(p.shape[0]):
-#         res[k] = ndimage.shift(res[k], p[k], order=2, mode='nearest', prefilter=True)
-#     return res
+@gpu_batch
+def ST0(psi, shift=0,order=2):
+    """Adjoint Shift operator"""
+    res = psi.copy()
+    if np.all(shift==0):
+        return res
+    p = cp.pad(-shift,(0,res.shape[0]-shift.shape[0]))
+    for k in range(p.shape[0]):
+        res[k] = ndimage.shift(res[k], p[k], order=order, mode='nearest', prefilter=True)
+    return res
 
 def _upsampled_dft(data, ups,
                    upsample_factor=1, axis_offsets=None):
@@ -190,14 +192,20 @@ def registration_shift(src_image, target_image, upsample_factor=1, space="real")
     return shifts
 
 # import tifffile
-# # a = tifffile.imread('../tests/data/delta-chip-192.tiff')
+# a = tifffile.imread('../../tmp/holotomocupy/examples_synthetic/data/delta-chip-192.tiff')
 # # # a = tifffile.imread('/data/vnikitin/modeling/r_256_32_4/r00256.tiff')
-# a = tifffile.imread('/data/vnikitin/modeling/ref_3d_ald_256_0.tiff')
-# a = a-1j*a
-# shift = np.array(np.random.random([a.shape[0], 2]), dtype='float32')*6
-# b = S(a, shift)
-# # aa = S(b, -shift)
+# # a = tifffile.imread('/data/vnikitin/modeling/ref_3d_ald_256_0.tiff')
+# a[:] = 0
+# a[:,5:17,5:17] = 1
+# a[:,11:17,11:17] = 2
 
+# a = a-1j*a
+# shift = np.array(np.random.random([a.shape[0], 2]), dtype='float32')*0+0.5
+# b = S0(a, shift, 3)
+# aa = ST0(b, shift, 3)
+# bb = S(aa, shift)
+
+# print(cp.linalg.norm(a-aa))
 # #b = Sa
 # shift_rec = registration_shift(b,a,upsample_factor=1000)
 # print(shift_rec)
@@ -212,7 +220,7 @@ def registration_shift(src_image, target_image, upsample_factor=1, space="real")
 
 # import matplotlib.pyplot as plt
 # plt.figure()
-# plt.imshow(b[b.shape[0]//2].real,cmap='gray')
+# plt.imshow(aa[b.shape[0]//2,:20,:20].real,cmap='gray',vmax=2)
 # plt.colorbar()
 # plt.savefig('t.png')
 

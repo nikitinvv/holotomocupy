@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import dxchange
 
 
-def mshow(a, show, **args):
+def mshow(a, show=True, **args):
     """Plot the 2D array, handling arrays on GPU      
 
     Parameters
@@ -25,7 +25,7 @@ def mshow(a, show, **args):
     plt.show()
 
 
-def mshow_complex(a, show, **args):
+def mshow_complex(a, show=True, **args):
     """Plot the 2D array in the rectangular representation with the real and imag parts, 
     handling arrays on GPU   
 
@@ -50,7 +50,7 @@ def mshow_complex(a, show, **args):
     plt.show()
 
 
-def mshow_polar(a, show, **args):
+def mshow_polar(a, show=True, **args):
     """Plot the 2D array in the polar representation with the absolute value and phase,
     handling arrays on GPU       
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[ ]:
 
 
 import numpy as np
@@ -16,81 +16,72 @@ from holotomocupy.utils import *
 import holotomocupy.chunking as chunking
 from holotomocupy.proc import linear, dai_yuan
 import sys
-
+# get_ipython().system('jupyter nbconvert --to script rec_reprojection.ipynb')
 # get_ipython().run_line_magic('matplotlib', 'inline')
 
 
 # # Init data sizes and parametes of the PXM of ID16A
 
-# In[2]:
+# In[ ]:
 
 
 n = 256  # object size in each dimension
 
 ntheta = 180  # number of angles (rotations)
-noise = True
+noise = 0
+npos = 1
 
-
-# ntheta = int(sys.argv[1])  # number of angles (rotations)
-# noise = sys.argv[2]=='True'
+npos = int(sys.argv[1])  # number of angles (rotations)
+noise = int(sys.argv[2])#sys.argv[2]=='True'
 # z1p = float(sys.argv[3])  # positions of the code and the probe for reconstruction
+
 
 center = n/2 # rotation axis
 theta = cp.linspace(0, np.pi, ntheta,endpoint=False).astype('float32')  # projection angles
 
-npos = int(sys.argv[1])  # number of code positions
-detector_pixelsize = 3e-6*0.5
+detector_pixelsize = 3e-6/2
 energy = 33.35  # [keV] xray energy
 wavelength = 1.2398419840550367e-09/energy  # [m] wave length
 
 focusToDetectorDistance = 1.28  # [m]
 sx0 = 3.7e-4
 z1 = np.array([4.584e-3, 4.765e-3, 5.488e-3, 6.9895e-3])[:npos]-sx0
-z1p = z1[0]
 z2 = focusToDetectorDistance-z1
 distances = (z1*z2)/focusToDetectorDistance
 magnifications = focusToDetectorDistance/z1
 voxelsize = detector_pixelsize/magnifications[0]*2048/n  # object voxel size
-norm_magnifications = magnifications/magnifications[0]
 # scaled propagation distances due to magnified probes
-distances = distances*norm_magnifications**2
-
-z2p = z1-np.tile(z1p, len(z1))
 # magnification when propagating from the probe plane to the detector
-magnifications2 = z1/z1p
+magnifications2 = z1/z1[0]
+distances = distances/magnifications2**2
 # propagation distances after switching from the point source wave to plane wave,
-distances2 = (z1p*z2p)/(z1p+z2p)
-norm_magnifications2 = magnifications2/(z1p/z1[0])  # normalized magnifications
-# scaled propagation distances due to magnified probes
-distances2 = distances2*norm_magnifications2**2
-distances2 = distances2*(z1p/z1)**2
+distances2 = (z1-z1[0])/magnifications2
 
 # allow padding if there are shifts of the probe
 pad = n//8
 # sample size after demagnification
 ne = n+2*pad
-
 show = False
-
-flg = f'{n}_{ntheta}_{npos}_{z1p:.2e}_{noise}4_conv'
+flg = f'{n}_{ntheta}_{npos}_{z1[0]:.2e}_{noise}_conv'
 # allow padding if there are shifts of the probe
 # sample size after demagnification
-ne = int(np.ceil((n+2*pad)/norm_magnifications[-1]/8))*8  # make multiple of 8
+ne = int(np.ceil((n+2*pad)*magnifications2[-1]/8))*8  # make multiple of 8
 print(distances+distances2)
+print(distances2)
 
 
 # ## Read data
 
-# In[3]:
+# In[ ]:
 
 
 data00 = np.zeros([ntheta, npos, n, n], dtype='float32')
 ref0 = np.zeros([1, npos, n, n], dtype='float32')
-print(f'/data2/vnikitin/coded_apertures_new/data/data_{0}_{flg}.tiff')
+print(f'/data2/vnikitin/coded_apertures_new3/data/data_{0}_{flg}.tiff')
 for k in range(npos):
-    data00[:, k] = read_tiff(f'/data2/vnikitin/coded_apertures_new/data/data_{k}_{flg}.tiff')[:ntheta]
+    data00[:, k] = read_tiff(f'/data2/vnikitin/coded_apertures_new3/data/data_{k}_{flg}.tiff')[:ntheta]
 for k in range(npos):
-    ref0[:, k] = read_tiff(f'/data2/vnikitin/coded_apertures_new/data/ref_{k}_{flg}.tiff')[:]
+    ref0[:, k] = read_tiff(f'/data2/vnikitin/coded_apertures_new3/data/ref_{k}_{flg}.tiff')[:]
 
 
 # # Construct operators
@@ -102,7 +93,7 @@ for k in range(npos):
 # 
 # 
 
-# In[4]:
+# In[ ]:
 
 
 @gpu_batch
@@ -122,7 +113,7 @@ def fwd_holo(psi, prb):
         
         # scale object        
         if ne != n:
-            psir = M(psir, norm_magnifications[i]*ne/(n+2*pad), n+2*pad)                
+            psir = M(psir, 1/magnifications2[i]*ne/(n+2*pad), n+2*pad)                
         
         # multiply the ill and object
         psir *= prbr
@@ -153,7 +144,7 @@ def adj_holo(data, prb):
 
         # scale object
         if ne != n:
-            psir = MT(psir, norm_magnifications[j]*ne/(n+2*pad), ne)
+            psir = MT(psir, 1/magnifications2[j]*ne/(n+2*pad), ne)
         # object shift for each acquisition
         psi += psir
     return psi
@@ -179,7 +170,7 @@ print(f'{cp.sum(a*cp.conj(a))}==\n{cp.sum(a*cp.conj(c))/ntheta/ne}')
 
 # ### Propagate the code to the detector and divide all data by it
 
-# In[5]:
+# In[ ]:
 
 
 psi = cp.ones([ntheta,ne,ne],dtype='complex64')
@@ -192,19 +183,19 @@ rdata = data00/d/ref0
 mshow((rdata)[0,0],show)
 
 
-# In[6]:
+# In[ ]:
 
 
 # distances should not be normalized
-distances_pag = (distances/norm_magnifications**2)[:npos]
+distances_pag = (distances*magnifications2**2)[:npos]
 recMultiPaganin = np.exp(1j*multiPaganin(rdata,
-                         distances_pag, wavelength, voxelsize,  150, 1e-12))
+                         distances_pag, wavelength, voxelsize,  100, 1e-12))
 mshow(np.angle(recMultiPaganin[0]),show)
 
 
 # #### Exponential and logarithm functions for the Transmittance function
 
-# In[7]:
+# In[ ]:
 
 
 def exptomo(psi):
@@ -220,7 +211,7 @@ def logtomo(psi):
     return res
 
 
-# In[8]:
+# In[ ]:
 
 
 @gpu_batch
@@ -264,7 +255,7 @@ arr3 = adj_holo0(arr2)
 print(f'{np.sum(prb1*np.conj(arr3))}==\n{np.sum(arr2*np.conj(arr2))}')
 
 
-# In[9]:
+# In[ ]:
 
 
 # def line_search(minf, gamma, fu, fd):
@@ -321,7 +312,7 @@ print(f'{np.sum(prb1*np.conj(arr3))}==\n{np.sum(arr2*np.conj(arr2))}')
 
 # # Reprojection
 
-# In[10]:
+# In[ ]:
 
 
 def line_search(minf, gamma, fu, fd):
@@ -443,16 +434,16 @@ def reproject(data, psi, prb, u, pars):
             mshow_polar(psi[0],show)            
             mshow_complex(u[:,ne//2+ne//4+2,:],show)            
             mshow_polar(prb[0],show)
-            dxchange.write_tiff(u.real.get(),f'/data2/vnikitin/coded_apertures_new/ur_{flg}/{m:03}.tiff',overwrite=True)
-            dxchange.write_tiff(u[:,ne//2+ne//4+2,ne//4:-ne//4].real.get(),f'/data2/vnikitin/coded_apertures_new/u_{flg}/{m:03}.tiff',overwrite=True)
-            dxchange.write_tiff(cp.angle(psi).get(),f'/data2/vnikitin/coded_apertures_new/psi_{flg}/{m:03}.tiff',overwrite=True)
+            dxchange.write_tiff(u.real.get(),f'/data2/vnikitin/coded_apertures_new3/ur_{flg}/{m:03}.tiff',overwrite=True)
+            dxchange.write_tiff(u[:,ne//2+ne//4+3,ne//4:-ne//4].real.get(),f'/data2/vnikitin/coded_apertures_new3/u_{flg}/{m:03}.tiff',overwrite=True)
+            dxchange.write_tiff(cp.angle(psi).get(),f'/data2/vnikitin/coded_apertures_new3/psi_{flg}/{m:03}.tiff',overwrite=True)
                                 
         if m%pars['err_step']==0:                        
             fpsi = fwd_holo(psi,prb)
             err = minf(fpsi)
             conv[1,m] = err
             print(f"{m}) Fidelity: {conv[1,m]:.4e}")            
-            np.save(f'/data2/vnikitin/coded_apertures_new/conv_{flg}',conv)
+            np.save(f'/data2/vnikitin/coded_apertures_new3/conv_{flg}',conv)
         
     return u, psi, conv
 
@@ -474,11 +465,11 @@ def reproject(data, psi, prb, u, pars):
 # pars = {'niter': 10000, 'titer': 4, 'hiter':4, 'err_step': 4, 
 #         'vis_step': 32, 'gammapsi': 0.5, 'gammaprb': 0.5, 'gammau': 0.5,
 #         'upd_prb': False}
-# rec_prb = np.load(f'/data2/vnikitin/coded_apertures_new/data/prb_{flg}.npy')#[:, :npos]
+# rec_prb = np.load(f'/data2/vnikitin/coded_apertures_new3/data/prb_{flg}.npy')#[:, :npos]
 # urec, conv = reproject(data, psirec, rec_prb, urec, pars)
 
 
-# In[13]:
+# In[ ]:
 
 
 def line_search_ext(minf, gamma, fu, fu0, fd, fd0):
@@ -600,23 +591,23 @@ def admm(data, psi, prb, h, lamd, u, pars):
         # lambda update
         lamd += rho * (h-psi)        
 
-        if m%pars['vis_step']==0:
+        if m%pars['vis_step']==0:# or m<64:
             mshow_polar(psi[0],show)            
-            mshow_complex(u[:,ne//2+ne//4+2,ne//4:-ne//4],show)            
+            mshow_complex(u[:,ne//2+ne//4+3,ne//4:-ne//4],show)            
             # mshow_complex(u[:,ne//2+ne//4+2,ne//4:-ne//4]-u0[:,ne//2+2,:],show)            
             # mshow_polar(prb[0],show)         
-            dxchange.write_tiff(u.real.get(),f'/data2/vnikitin/coded_apertures_new/ur_{flg}/{m:03}.tiff',overwrite=True)
-            dxchange.write_tiff(u[:,ne//2+ne//4+2,ne//4:-ne//4].real.get(),f'/data2/vnikitin/coded_apertures_new/u_{flg}/{m:03}.tiff',overwrite=True)
-            #dxchange.write_tiff(cp.angle(psi).get(),f'/data2/vnikitin/coded_apertures_new/psi_{flg}/{m:03}.tiff',overwrite=True)
+            # dxchange.write_tiff(u.real.get(),f'/data2/vnikitin/coded_apertures_new3/ur_{flg}/{m:03}.tiff',overwrite=True)
+            dxchange.write_tiff(u[:,ne//2+ne//4+3,ne//4:-ne//4].real.get(),f'/data2/vnikitin/coded_apertures_new3/u_{flg}/{m:03}.tiff',overwrite=True)
+            #dxchange.write_tiff(cp.angle(psi).get(),f'/data2/vnikitin/coded_apertures_new3/psi_{flg}/{m:03}.tiff',overwrite=True)
             
             
-        # Lagrangians difference between two iterations
-        if m%pars['err_step']==0:            
-            lagr = take_lagr_gpu(psi, prb, data, h, lamd,rho)
-            err[m,0] = lagr[-1]
-            err[m,1] = cp.linalg.norm(u[:,ne//4:-ne//4,ne//4:-ne//4]-u0)**2/cp.linalg.norm(u0)**2
-            print("%d/%d) rho=%f, %.2e %.2e %.2e, Sum: %.2e, err: %.3e" %(m, pars['niter'], rho, *lagr, err[m,1]))
-            np.save(f'/data2/vnikitin/coded_apertures_new/conv_{flg}',err.get())
+        # # Lagrangians difference between two iterations
+        # if m%pars['err_step']==0:            
+        #     lagr = take_lagr_gpu(psi, prb, data, h, lamd,rho)
+        #     err[m,0] = lagr[-1]
+        #     err[m,1] = cp.linalg.norm(u[:,ne//4:-ne//4,ne//4:-ne//4]-u0)**2/cp.linalg.norm(u0)**2
+        #     print("%d/%d) rho=%f, %.2e %.2e %.2e, Sum: %.2e, err: %.3e" %(m, pars['niter'], rho, *lagr, err[m,1]))
+        #     np.save(f'/data2/vnikitin/coded_apertures_new3/conv_{flg}',err.get())
         
     return u, psi
 
@@ -636,9 +627,9 @@ h  = psirec.copy()
 data = cp.array(data00)
 # rec_prb = cp.array(rec_prb0)
 # prb initial guess
-rec_prb = np.load(f'/data2/vnikitin/coded_apertures_new/data/prb_{flg}.npy')#[:, :npos]
+rec_prb = np.load(f'/data2/vnikitin/coded_apertures_new3/data/prb_{flg}.npy')#[:, :npos]
 # admm
-pars = {'niter': 10000, 'titer': 4, 'hiter':4, 'err_step': 4, 'vis_step': 32, 
+pars = {'niter': 2001, 'titer': 4, 'hiter':4, 'err_step': 4, 'vis_step': 1, 
         'gammapsi': 0.5,'gammaprb': 0.5, 'gammau': 0.5, 'upd_prb': False}
 urec, psirec = admm(data, psirec, rec_prb, h, lamd, urec, pars)
 

@@ -74,7 +74,7 @@ def R(obj, theta, rotation_axis):
     sino = cp.fft.ifft(w*cp.fft.fft(sino))
     # normalization for the unity test
     sino /= cp.float32(4*n)    
-    return sino
+    return sino/np.sqrt(n*ntheta)
 
 
 @gpu_batch
@@ -123,7 +123,8 @@ def RT(sino, theta, rotation_axis):
     # STEP4: unpadding, multiplication by phi
     fde = fde[:, n//2:3*n//2, n//2:3*n//2]*phi
     fde /= cp.float32(n)  # normalization for the unity test
-    return fde
+    
+    return fde/np.sqrt(n*ntheta)
 
 # import matplotlib.pyplot as plt
 # sinogram = np.load("sinogram.npy").swapaxes(0,1)# sinogram.npy is saved as projections

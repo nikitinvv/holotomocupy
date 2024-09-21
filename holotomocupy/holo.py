@@ -23,7 +23,7 @@ def _adj_pad(fpad):
 
 
 @gpu_batch
-def G(f, wavelength, voxelsize, z):
+def G(f, wavelength, voxelsize, z, ptype='constant'):
     """Fresnel transform
 
     Parameters
@@ -48,14 +48,21 @@ def G(f, wavelength, voxelsize, z):
     [fx, fy] = cp.meshgrid(fx, fx)
     fP = cp.exp(-1j*cp.pi*wavelength*z*(fx**2+fy**2))
     ff = f.copy()
-    ff = _fwd_pad(ff)
+    if ptype=='symmetric':
+        ff = _fwd_pad(ff)
+    else:
+        ff = cp.pad(ff,((0,0),(n//2,n//2),(n//2,n//2)))
     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
-    ff = _adj_pad(ff)
+    if ptype=='symmetric':
+        ff = _adj_pad(ff)
+    else:
+        ff = ff[:,n//2:-n//2,n//2:-n//2]
+    
     return ff
 
 
 @gpu_batch
-def GT(f, wavelength, voxelsize, z):
+def GT(f, wavelength, voxelsize, z, ptype='constant'):
     """Adjoint Fresnel transform (propagation with -z distance)
 
     Parameters
@@ -79,10 +86,16 @@ def GT(f, wavelength, voxelsize, z):
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
     fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
-    ff = f.copy()
-    ff = _fwd_pad(ff)
+    ff= f.copy()
+    if ptype=='symmetric':
+        ff = _fwd_pad(ff)
+    else:
+        ff = cp.pad(ff,((0,0),(n//2,n//2),(n//2,n//2)))
     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
-    ff = _adj_pad(ff)
+    if ptype=='symmetric':
+        ff = _adj_pad(ff)
+    else:
+        ff = ff[:,n//2:-n//2,n//2:-n//2]
     return ff
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[49]:
+# In[1]:
 
 
 import numpy as np
@@ -14,17 +14,17 @@ from holotomocupy.magnification import M
 from holotomocupy.shift import S
 from holotomocupy.utils import *
 import sys
-# get_ipython().run_line_magic('matplotlib', 'inline')
+get_ipython().run_line_magic('matplotlib', 'inline')
 
 np.random.seed(10)
-# get_ipython().system('jupyter nbconvert --to script modeling.ipynb')
+get_ipython().system('jupyter nbconvert --to script modeling.ipynb')
 
 
 # 
 
 # # Init data sizes and parametes of the PXM of ID16A
 
-# In[50]:
+# In[2]:
 
 
 n = 256  # object size in each dimension
@@ -33,8 +33,9 @@ ntheta = 180  # number of angles (rotations)
 noise = 0
 npos = 3
 
-npos = int(sys.argv[1])  # number of angles (rotations)
-noise = int(sys.argv[2])#sys.argv[2]=='True'
+# npos = int(sys.argv[1])  # number of angles (rotations)
+# noise = int(sys.argv[2])#sys.argv[2]=='True'
+# z1p = float(sys.argv[3])  # positions of the code and the probe for reconstruction
 
 
 center = n/2 # rotation axis
@@ -73,7 +74,7 @@ print(distances2)
 
 # ## Read real and imaginary parts of the refractive index u = delta+i beta
 
-# In[51]:
+# In[3]:
 
 
 from scipy import ndimage
@@ -129,7 +130,7 @@ from scipy import ndimage
 # np.save('data/u', u0)
 
 
-u = np.load('data/u.npy').astype('complex64')
+u = np.load('data/uc.npy').astype('complex64')
 u = np.pad(u,((ne//2-n//2,ne//2-n//2),(ne//2-n//2,ne//2-n//2),(ne//2-n//2,ne//2-n//2)))
 
 mshow_complex(u[:, ne//2],show)
@@ -138,7 +139,7 @@ mshow_complex(u[ne//2],show)
 
 # ## Compute tomographic projection data via the Fourier based method, $\mathcal{R}u$:
 
-# In[52]:
+# In[4]:
 
 
 print(center,u.shape)
@@ -149,7 +150,7 @@ mshow_complex(Ru[0])
 
 # ## Convert it to the transmittance function $e^{\frac{2\pi j}{\lambda} \mathcal{R} u }$
 
-# In[53]:
+# In[5]:
 
 
 psi = np.exp(2*np.pi*1j/wavelength*voxelsize*Ru)
@@ -159,7 +160,7 @@ mshow_polar(psi[0])
 
 # ## Read a reference image previously recovered by the NFP (Near-field ptychogarphy) method at ID16A. 
 
-# In[54]:
+# In[6]:
 
 
 # !wget -nc https://g-110014.fd635.8443.data.globus.org/holotomocupy/examples_synthetic/data/prb_id16a/prb_abs_2048.tiff -P ../data/prb_id16a
@@ -183,7 +184,7 @@ mshow_polar(prb[0])
 
 # # Smooth the probe, the loaded one is too noisy
 
-# In[55]:
+# In[7]:
 
 
 v = np.arange(-(n+2*pad)//2,(n+2*pad)//2)/(n+2*pad)
@@ -201,7 +202,7 @@ mshow_polar(prb[0])
 # ### Compute holographic projections for all angles and all distances
 # #### $d=\left|\mathcal{G}_{z_j}((\mathcal{G}_{z'_j}S_{s'_{kj}}q)(M_j S_{s_{kj}}\psi_k))\right|_2^2$, and reference data $d^r=\left|\mathcal{G}_{z'_j}S_{s^r_{j}}q\right|$
 
-# In[56]:
+# In[8]:
 
 
 from holotomocupy.chunking import gpu_batch
@@ -250,14 +251,14 @@ fref = fwd_holo0(prb)
 
 # ### Take squared absolute value to simulate data on the detector and a reference image
 
-# In[57]:
+# In[9]:
 
 
 data = np.abs(fpsi)**2
 ref = np.abs(fref)**2
 
 
-# In[58]:
+# In[10]:
 
 
 mshow(data[0,0],show)
@@ -274,7 +275,7 @@ if noise>0:
 
 # ### Visualize data
 
-# In[59]:
+# In[11]:
 
 
 for k in range(npos):
@@ -283,7 +284,7 @@ for k in range(npos):
 
 # ### Visualize reference images
 
-# In[60]:
+# In[12]:
 
 
 for k in range(npos):
@@ -292,7 +293,7 @@ for k in range(npos):
 
 # ### Save data, reference images
 
-# In[61]:
+# In[13]:
 
 
 print(f'/data2/vnikitin/coded_apertures_new3/data/data_{k}_{flg}')
@@ -303,7 +304,7 @@ for k in range(len(distances)):
 np.save(f'/data2/vnikitin/coded_apertures_new3/data/prb_{flg}', prb)
 
 
-# In[62]:
+# In[14]:
 
 
 # from matplotlib_scalebar.scalebar import ScaleBar
@@ -360,7 +361,7 @@ np.save(f'/data2/vnikitin/coded_apertures_new3/data/prb_{flg}', prb)
 
 
 
-# In[63]:
+# In[15]:
 
 
 # from matplotlib_scalebar.scalebar import ScaleBar
@@ -408,7 +409,7 @@ np.save(f'/data2/vnikitin/coded_apertures_new3/data/prb_{flg}', prb)
 
 
 
-# In[64]:
+# In[16]:
 
 
 # from matplotlib_scalebar.scalebar import ScaleBar

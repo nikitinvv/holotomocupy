@@ -101,6 +101,7 @@ def MT(f, magnification=1, ne=None):
     mua = cp.array([mu], dtype='float32')
     magnificationa = cp.array([magnification], dtype='float32')
     fde = cp.zeros([ntheta, 2*m+2*ne, 2*m+2*ne], dtype='complex64')
+    f = cp.ascontiguousarray(f)
     gather_mag_kernel((int(cp.ceil(n/32)), int(cp.ceil(n/32)), ntheta),
                       (32, 32, 1), (f, fde, magnificationa, m, mua, n, ne, ntheta, 1))
     wrapadj_kernel((int(cp.ceil((2 * ne + 2 * m)/32)),

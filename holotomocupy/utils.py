@@ -111,3 +111,17 @@ def read_tiff(name, **args):
     
     a = dxchange.read_tiff(name, **args)[:]
     return a
+
+def reprod(a,b):
+    return a.real*b.real+a.imag*b.imag
+
+def redot(a,b,axis=None):    
+    res = np.sum(reprod(a,b),axis=axis)        
+    return res
+
+def improd(a,b):
+    return -a.real*b.imag+a.imag*b.real
+
+def imdot(a,b,axis=None):    
+    res = np.sum(improd(a,b),axis=axis)        
+    return res

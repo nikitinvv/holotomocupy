@@ -1,5 +1,5 @@
 import cupy as cp
-from .cuda_kernels import pad_kernel
+from .cuda_kernels import pad_kernel, pad_sym_kernel
 from .chunking import gpu_batch
 
 
@@ -74,13 +74,10 @@ def G(f, wavelength, voxelsize, z, ptype='constant'):
         v[:n//2] = cp.sin(cp.linspace(0,1,n//2)*cp.pi/2)
         v[-n//2:] = cp.cos(cp.linspace(0,1,n//2)*cp.pi/2)
         v = cp.outer(v,v)
-        ff *= v*2
+        ff *= v*2        
     else:
         ff = cp.pad(ff,((0,0),(n//2,n//2),(n//2,n//2)))
     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
-    # if ptype=='symmetric':
-    #     ff = _adj_pad(ff)
-    # else:
     ff = ff[:,n//2:-n//2,n//2:-n//2]
     
     return ff
@@ -112,32 +109,37 @@ def GT(f, wavelength, voxelsize, z, ptype='constant'):
     [fx, fy] = cp.meshgrid(fx, fx)
     fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
     ff= f.copy()
-    # if ptype=='symmetric':
-    #     ff = _fwd_pad(ff)
-    # else:
+    
     ff = cp.pad(ff,((0,0),(n//2,n//2),(n//2,n//2)))
     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
     if ptype=='symmetric':
-        # import matplotlib.pyplot as plt
-        # plt.imshow(ff[0].real.get())
-        # plt.show()
         v = cp.ones(2*n,dtype='float32')
         v[:n//2] = cp.sin(cp.linspace(0,1,n//2)*cp.pi/2)
         v[-n//2:] = cp.cos(cp.linspace(0,1,n//2)*cp.pi/2)
         v = cp.outer(v,v)
         ff*=v*2
-        # print(f'{cp.linalg.norm(ff-ff1)=}')
-        
-        # plt.imshow(ff[0].real.get()-ff1[0].real.get(),vmin=-0.001,vmax=0.001,cmap='gray')        
-        # plt.colorbar()
-        # plt.show()
-        # ff *= 2
-
         ff = _adj_pad(ff)
     else:
         ff = ff[:,n//2:-n//2,n//2:-n//2]
     return ff
 
+
+def _fwd_pad_sym(f,pad):
+    """Fwd data padding"""
+    [ntheta, n] = f.shape[:2]
+    fpad = cp.zeros([ntheta, n+2*pad, n+2*pad], dtype='complex64')
+    pad_sym_kernel((int(cp.ceil((n+2*pad)/32)), int(cp.ceil((n+2*pad)/32)), ntheta),
+               (32, 32, 1), (fpad, f, pad, n, n, ntheta, 0))
+    return fpad
+
+def _adj_pad_sym(fpad,pad):
+    """Fwd data padding"""
+    [ntheta, n] = fpad.shape[:2]
+    n-=2*pad
+    f = cp.zeros([ntheta, n, n], dtype='complex64')
+    pad_sym_kernel((int(cp.ceil((n+2*pad)/32)), int(cp.ceil((n+2*pad)/32)), ntheta),
+               (32, 32, 1), (fpad, f, pad, n, n, ntheta, 1))
+    return f
 
 # import matplotlib.pyplot as plt
 # import tifffile

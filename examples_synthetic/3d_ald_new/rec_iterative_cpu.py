@@ -551,7 +551,7 @@ def vis_debug(vars,i):
     dxchange.write_tiff(np.angle(vars['prb']),f'/data/vnikitin/phantoms/prbrec_angle{n}/{i:03}',overwrite=True)
     dxchange.write_tiff(np.abs(vars['psi']),f'/data/vnikitin/phantoms/urec_abs{n}/{i:03}',overwrite=True)
     dxchange.write_tiff(np.abs(vars['prb']),f'/data/vnikitin/phantoms/prbrec_abs{n}/{i:03}',overwrite=True)
-    np.save(f'/data/vnikitin/phantoms/shifts_rec{n}/{i:03}',shifts)
+    np.save(f'/data/vnikitin/phantoms/shifts_rec{n}_{i:03}',shifts)
     
 def err_debug(vars, grads, data):  
     (q,u,x) = (vars['prb'], vars['u'], vars['shift'])  

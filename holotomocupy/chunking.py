@@ -86,10 +86,10 @@ def gpu_batch(func):
 
 
 
-#####TO TRY WITh PINNED MEMORY
+# #####TO TRY WITh PINNED MEMORY
 
-#cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
-# streams for overlapping data transfers with computations
+# cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
+# #streams for overlapping data transfers with computations
 # stream1 = cp.cuda.Stream(non_blocking=False)
 # stream2 = cp.cuda.Stream(non_blocking=False)
 # stream3 = cp.cuda.Stream(non_blocking=False)
@@ -104,7 +104,7 @@ def gpu_batch(func):
 #     return src
 
 
-# def gpu_batch(func):
+# def gpu_batch2(func):
 #     #cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
 #     def inner(*args, **kwargs):
@@ -117,6 +117,8 @@ def gpu_batch(func):
 
 #         inp_gpu = []
 #         out_gpu = []
+#         inp_pinned = []
+#         out_pinned = []
 #         out = []
 
 #         ninp = 0
@@ -124,6 +126,8 @@ def gpu_batch(func):
 #             if isinstance(args[k], np.ndarray) and args[k].shape[0] == nn:
 #                 inp_gpu.append(
 #                     cp.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype))
+#                 inp_pinned.append(
+#                     pinned_array(np.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype)))
 #                 ninp += 1
 #             else:
 #                 break
@@ -140,6 +144,8 @@ def gpu_batch(func):
 #                         for j in range(nout):
 #                             out_gpu.append(
 #                                 cp.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
+#                             out_pinned.append(
+#                                 np.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
 #                             out.append(
 #                                 np.empty([nn, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
 #                     for j in range(nout):
@@ -147,30 +153,30 @@ def gpu_batch(func):
 #             if (k > 1):
 #                 with stream3:  # gpu->cpu copy
 #                     for j in range(nout):
-#                         # out_gpu[j][(k-2) % 2].get(out=out_pinned[j]
-#                         #                           [(k-2) % 2])  # contiguous copy, fast
-#                         st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
-#                         s = end-st
-#                         out_gpu[j][(k-2) % 2,:s].get(out=out[j][st:end])  # contiguous copy, fast
+#                         out_gpu[j][(k-2) % 2].get(out=out_pinned[j]
+#                                                   [(k-2) % 2])  # contiguous copy, fast
+#                         # st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
+#                         # s = end-st
+#                         # out_gpu[j][(k-2) % 2,:s].get(out=out_pinned[j][(k-2) % 2,st:end])  # contiguous copy, fast
 
 #             if (k < nchunk):
 #                 with stream1:  # cpu->gpu copy
 #                     st, end = k*chunk, min(nn, (k+1)*chunk)
 #                     s = end-st
 #                     for j in range(ninp):
-#                         # inp_pinned[j][k % 2, :s] = args[j][st:end]
-#                         # # contiguous copy, fast
-#                         # inp_gpu[j][k % 2].set(inp_pinned[j][k % 2])
+#                         inp_pinned[j][k % 2, :s] = args[j][st:end]
+#                         # contiguous copy, fast
+#                         inp_gpu[j][k % 2].set(inp_pinned[j][k % 2])
 #                         #inp_pinned[j][k % 2, :s] = args[j][st:end]
 #                         # contiguous copy, fast
-#                         inp_gpu[j][k % 2,:s].set(args[j][st:end])
+#                         # inp_gpu[j][k % 2,:s].set(args[j][st:end])
 
-#             # stream3.synchronize()
-#             # if (k > 1):
-#             #     st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
-#             #     s = end-st
-#             #     for j in range(nout):
-#             #         out[j][st:end] = out_pinned[j][(k-2) % 2, :s]
+#             stream3.synchronize()
+#             if (k > 1):
+#                 st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
+#                 s = end-st
+#                 for j in range(nout):
+#                     out[j][st:end] = out_pinned[j][(k-2) % 2, :s]
 
 #             stream1.synchronize()
 #             stream2.synchronize()
@@ -181,7 +187,7 @@ def gpu_batch(func):
 #     return inner
 
 
-# @gpu_batch(8)
+# @gpu_batch
 # def S(psi, shift):
 #     """Shift operator"""
 #     n = psi.shape[-1]
@@ -195,13 +201,35 @@ def gpu_batch(func):
 #     pp = cp.exp(-2*cp.pi*1j * (x*p[:, 1, None, None]+y*p[:, 0, None, None]))
 #     res = cp.fft.ifft2(pp*cp.fft.fft2(res))
 #     res = res[:,n//2:-n//2,n//2:-n//2]
-#     return [res,res]
+#     return res
 
+# @gpu_batch2
+# def S2(psi, shift):
+#     """Shift operator"""
+#     n = psi.shape[-1]
+#     p = shift.copy()#[st:end]
+#     res = psi.copy()
+#     # if p.shape[0]!=res.shape[0]:
+#         # res = cp.tile(res,(shift.shape[0],1,1))
+#     res = cp.pad(res,((0,0),(n//2,n//2),(n//2,n//2)),'symmetric')
+#     x = cp.fft.fftfreq(2*n).astype('float32')
+#     [x, y] = cp.meshgrid(x, x)
+#     pp = cp.exp(-2*cp.pi*1j * (x*p[:, 1, None, None]+y*p[:, 0, None, None]))
+#     res = cp.fft.ifft2(pp*cp.fft.fft2(res))
+#     res = res[:,n//2:-n//2,n//2:-n//2]
+#     return res
+
+# import tifffile
 # cp.random.seed(10)
-# a = tifffile.imread('../../tests/data/delta-chip-192.tiff')
-# a = a+1j*a/2
-# b = np.empty_like(a)
+# a = np.random.random([35,256,256])+1j*np.random.random([35,256,256])
+# a = a.astype('complex64')
 # shift = np.array(np.random.random([a.shape[0], 2]), dtype='float32')+3
+
+# b = S(a,shift)
+# print(np.linalg.norm(b))
+
+# b = S2(a,shift)
+# print(np.linalg.norm(b))
 
 
 # [b,b0] = S(a,shift)

@@ -77,11 +77,12 @@ center = ne/2  # rotation axis
 # In[3]:
 
 
-data = np.load(f'/data/vnikitin/data{n}.npy')
-ref = np.load(f'/data/vnikitin/ref{n}.npy')
-shifts = np.load(f'/data/vnikitin/shifts{n}.npy')
-shifts_ref = np.load(f'/data/vnikitin/shifts_ref{n}.npy')
-shifts_err = np.load(f'/data/vnikitin/shifts_err{n}.npy')
+data = np.load(f'/data/vnikitin/phantoms/data{n}.npy')
+ref = np.load(f'/data/vnikitin/phantoms/ref{n}.npy')
+shifts = np.load(f'/data/vnikitin/phantoms/shifts{n}.npy')
+shifts_ref = np.load(f'/data/vnikitin/phantoms/shifts_ref{n}.npy')
+shifts_err = np.load(f'/data/vnikitin/phantoms/shifts_err{n}.npy')
+
 
 shifts_correct = shifts.copy()
 shifts += shifts_err
@@ -545,11 +546,11 @@ def vis_debug(vars,i):
     mshow_complex(vars['u'][ne//2,ne//2-n//2:ne//2+n//2,ne//2-n//2:ne//2+n//2].real+1j*
                   vars['u'][ne//2-n//2:ne//2+n//2,ne//2,ne//2-n//2:ne//2+n//2].real,show)
     mshow_polar(vars['prb'][0],show)
-    dxchange.write_tiff(np.angle(vars['u'])[ne//2],f'/data/vnikitin/phantoms/urech_angle{n}/{i:03}',overwrite=True)
-    dxchange.write_tiff(np.angle(vars['u'])[:,ne//2],f'/data/vnikitin/phantoms/urecv_angle{n}/{i:03}',overwrite=True)
-    dxchange.write_tiff(np.angle(vars['u']),f'/data/vnikitin/phantoms/urec_angle{n}/{i:03}',overwrite=True)
+    dxchange.write_tiff(np.real(vars['u'])[ne//2],f'/data/vnikitin/phantoms/urech_re{n}/{i:03}',overwrite=True)
+    dxchange.write_tiff(np.real(vars['u'])[:,ne//2],f'/data/vnikitin/phantoms/urecv_re{n}/{i:03}',overwrite=True)
+    dxchange.write_tiff(np.real(vars['u']),f'/data/vnikitin/phantoms/urec_re{n}/{i:03}',overwrite=True)
     dxchange.write_tiff(np.angle(vars['prb']),f'/data/vnikitin/phantoms/prbrec_angle{n}/{i:03}',overwrite=True)
-    dxchange.write_tiff(np.abs(vars['psi']),f'/data/vnikitin/phantoms/urec_abs{n}/{i:03}',overwrite=True)
+    dxchange.write_tiff(np.real(vars['u']),f'/data/vnikitin/phantoms/urec_re{n}/{i:03}',overwrite=True)
     dxchange.write_tiff(np.abs(vars['prb']),f'/data/vnikitin/phantoms/prbrec_abs{n}/{i:03}',overwrite=True)
     np.save(f'/data/vnikitin/phantoms/shifts_rec{n}_{i:03}',shifts)
     

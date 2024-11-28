@@ -126,6 +126,10 @@ def RT(sino, theta, rotation_axis):
     
     return fde/np.sqrt(n*ntheta)
 
+
+@gpu_batch
+def exp1j(a):
+    return np.exp(1j*a)
 # import matplotlib.pyplot as plt
 # sinogram = np.load("sinogram.npy").swapaxes(0,1)# sinogram.npy is saved as projections
 # angles_rad = np.load("angles_rad.npy")[:]

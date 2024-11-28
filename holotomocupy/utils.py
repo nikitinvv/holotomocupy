@@ -2,7 +2,7 @@ import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
 import dxchange
-
+from .chunking import gpu_batch
 
 def mshow(a, show=False, **args):
     """Plot the 2D array, handling arrays on GPU      

@@ -5,7 +5,7 @@
 
 
 import numpy as np
-for n in [128,256,512,1024,2048]:
+for n in [2048]:
     print(n)
 
     ndist = 4

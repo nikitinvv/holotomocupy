@@ -41,6 +41,24 @@ def _adj_pad(fpad):
 #     ff= f.copy()
 #     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
 #     return ff
+def _G0(f, wavelength, voxelsize, z):
+    n = f.shape[-1]
+    fx = cp.fft.fftfreq(n, d=voxelsize).astype('float32')
+    [fx, fy] = cp.meshgrid(fx, fx)
+    fP = cp.exp(-1j*cp.pi*wavelength*z*(fx**2+fy**2))
+    ff = f.copy()
+    ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
+    return ff
+
+def _GT0(f, wavelength, voxelsize, z):
+    n = f.shape[-1]
+    fx = cp.fft.fftfreq(n, d=voxelsize).astype('float32')
+    [fx, fy] = cp.meshgrid(fx, fx)
+    fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
+    ff = f.copy()
+    ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
+    return ff
+
 
 @gpu_batch
 def G(f, wavelength, voxelsize, z, ptype='constant'):
@@ -62,7 +80,8 @@ def G(f, wavelength, voxelsize, z, ptype='constant'):
     ff : ndarray
         Propagated function
     """
-    
+    if ptype=='no':
+        return _G0(f,wavelength, voxelsize, z)
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
@@ -103,7 +122,8 @@ def GT(f, wavelength, voxelsize, z, ptype='constant'):
     ff : ndarray
         Propagated function
     """
-    
+    if ptype=='no':
+        return _GT0(f,wavelength, voxelsize, z)
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)

@@ -1,0 +1,51 @@
+astropy module not found
+olefile module not found
+The X11 connection broke (error 1). Did the X11 server die?
+234348297j)==
+(546838.4375+2.4191438114939956e-06j)
+(487748192-0.022764716297388077j)==
+(487746688-5.918190254305955e-06j)
+(196612544-11.759878158569336j)==
+(196623984-2.4817793473630445e-06j)
+(125552896-1.0791692733764648j)==
+(125553712+2.104204577335622e-05j)
+(259823088+10.034687995910645j)==
+(259823360-1.6024691262828128e-07j)
+0) gamma=0.5, err=1.14207e+07
+4) gamma=0.5, err=1.37827e+06
+8) gamma=0.5, err=6.84937e+05
+12) gamma=0.5, err=4.80758e+05
+16) gamma=0.5, err=4.12620e+05
+20) gamma=0.5, err=3.74329e+05
+24) gamma=0.5, err=3.55893e+05
+28) gamma=0.5, err=3.45937e+05
+32) gamma=0.5, err=3.43009e+05
+36) gamma=0.5, err=3.39944e+05
+40) gamma=0.5, err=3.37887e+05
+44) gamma=0.5, err=3.36357e+05
+48) gamma=0.5, err=3.34938e+05
+52) gamma=0.5, err=3.33437e+05
+56) gamma=0.5, err=3.32457e+05
+60) gamma=0.5, err=3.31688e+05
+64) gamma=0.5, err=3.31228e+05
+68) gamma=0.5, err=3.30902e+05
+0) gammaprb=0.5, err=6.63706e-01
+1) gammaprb=0.5, err=5.55687e-02
+2) gammaprb=0.5, err=5.05216e-02
+3) gammaprb=0.5, err=5.04156e-02
+gradient norms (prb, u, shift): 2002.86, 627.07, 308.53
+0) alpha=0.14672, err=1.40034e+06
+gradient norms (prb, u, shift): 568.01, 333.33, 479.71
+8) alpha=0.34611, err=6.84363e+05
+gradient norms (prb, u, shift): 223.55, 179.48, 313.74
+16) alpha=0.26837, err=3.04476e+05
+gradient norms (prb, u, shift): 145.13, 106.82, 265.10
+24) alpha=0.22678, err=1.76116e+05
+gradient norms (prb, u, shift): 100.21, 80.16, 206.30
+32) alpha=0.19902, err=1.10807e+05
+gradient norms (prb, u, shift): 78.35, 60.75, 194.53
+40) alpha=0.17632, err=7.21310e+04
+gradient norms (prb, u, shift): 65.31, 47.72, 152.26
+48) alpha=0.16821, err=4.90947e+04
+gradient norms (prb, u, shift): 55.74, 38.96, 117.97
+56) alpha=0.16573, err=3.48528e+04

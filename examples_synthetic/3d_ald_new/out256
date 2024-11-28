@@ -1,0 +1,138 @@
+astropy module not found
+olefile module not found
+(137217.296875+0j)==
+(137217.28125+0j)
+(136463.359375-0.0015817657113075256j)==
+(136463.359375-6.83443033722142e-07j)
+(60956240+0.00011191160592716187j)==
+(60956064+9.117127888202958e-07j)
+(24581694-3.326033592224121j)==
+(24581878+2.4649818897160003e-07j)
+(15726622-0.14255905151367188j)==
+(15726645-1.5595363947795704e-05j)
+(32480828-3.8989620208740234j)==
+(32480832-4.5306080664886395e-08j)
+0) gamma=0.5, err=1.58919e+06
+4) gamma=0.5, err=1.49885e+05
+8) gamma=0.5, err=5.95032e+04
+12) gamma=0.5, err=3.31037e+04
+16) gamma=0.5, err=2.35623e+04
+20) gamma=0.5, err=1.85392e+04
+24) gamma=0.5, err=1.61204e+04
+28) gamma=0.5, err=1.49199e+04
+32) gamma=0.5, err=1.44485e+04
+36) gamma=0.5, err=1.40615e+04
+40) gamma=0.5, err=1.37023e+04
+44) gamma=0.5, err=1.33715e+04
+48) gamma=0.5, err=1.31742e+04
+52) gamma=0.5, err=1.29551e+04
+56) gamma=0.5, err=1.28150e+04
+60) gamma=0.5, err=1.27258e+04
+64) gamma=0.5, err=1.26747e+04
+68) gamma=0.5, err=1.26350e+04
+0) gammaprb=0.5, err=2.55141e-03
+1) gammaprb=0.5, err=8.47681e-05
+2) gammaprb=0.5, err=8.09987e-05
+3) gammaprb=0.5, err=8.10016e-05
+gradient norms (prb, u, shift): 251.26, 194.65, 174.47
+0) alpha=0.25802, err=1.48374e+05
+gradient norms (prb, u, shift): 86.62, 107.47, 135.34
+8) alpha=0.40405, err=5.88024e+04
+gradient norms (prb, u, shift): 43.04, 52.01, 94.00
+16) alpha=0.31497, err=2.51160e+04
+gradient norms (prb, u, shift): 30.94, 33.95, 77.99
+24) alpha=0.27944, err=1.42912e+04
+gradient norms (prb, u, shift): 19.72, 22.55, 58.17
+32) alpha=0.27820, err=9.26821e+03
+gradient norms (prb, u, shift): 14.29, 17.38, 41.85
+40) alpha=0.24616, err=5.89497e+03
+gradient norms (prb, u, shift): 12.65, 14.36, 38.16
+48) alpha=0.23315, err=3.84247e+03
+gradient norms (prb, u, shift): 8.27, 9.99, 28.26
+56) alpha=0.25407, err=2.71662e+03
+gradient norms (prb, u, shift): 6.69, 7.93, 22.31
+64) alpha=0.23895, err=1.93387e+03
+gradient norms (prb, u, shift): 6.31, 7.08, 19.20
+72) alpha=0.23915, err=1.45133e+03
+gradient norms (prb, u, shift): 4.95, 5.74, 13.98
+80) alpha=0.26243, err=1.13515e+03
+gradient norms (prb, u, shift): 3.85, 4.40, 12.51
+88) alpha=0.23857, err=9.13069e+02
+gradient norms (prb, u, shift): 3.50, 3.92, 10.50
+96) alpha=0.24131, err=7.57181e+02
+gradient norms (prb, u, shift): 2.87, 3.29, 9.30
+104) alpha=0.23691, err=6.33389e+02
+gradient norms (prb, u, shift): 2.75, 3.16, 8.24
+112) alpha=0.23941, err=5.40018e+02
+gradient norms (prb, u, shift): 2.70, 3.07, 6.91
+120) alpha=0.25422, err=4.66590e+02
+gradient norms (prb, u, shift): 2.48, 2.80, 6.31
+128) alpha=0.25012, err=4.07586e+02
+gradient norms (prb, u, shift): 2.25, 2.57, 5.79
+136) alpha=0.25157, err=3.59009e+02
+gradient norms (prb, u, shift): 2.16, 2.44, 5.27
+144) alpha=0.25765, err=3.19431e+02
+gradient norms (prb, u, shift): 1.91, 2.17, 4.76
+152) alpha=0.25181, err=2.86584e+02
+gradient norms (prb, u, shift): 1.62, 1.81, 4.53
+160) alpha=0.24955, err=2.58903e+02
+gradient norms (prb, u, shift): 1.49, 1.66, 4.12
+168) alpha=0.24388, err=2.35535e+02
+gradient norms (prb, u, shift): 1.36, 1.55, 3.81
+176) alpha=0.25610, err=2.15138e+02
+gradient norms (prb, u, shift): 1.13, 1.26, 3.63
+184) alpha=0.24328, err=1.97841e+02
+gradient norms (prb, u, shift): 0.99, 1.11, 3.37
+192) alpha=0.24170, err=1.82669e+02
+gradient norms (prb, u, shift): 0.96, 1.05, 3.26
+200) alpha=0.23957, err=1.69249e+02
+gradient norms (prb, u, shift): 0.96, 1.07, 2.98
+208) alpha=0.25315, err=1.57489e+02
+gradient norms (prb, u, shift): 0.88, 0.98, 2.87
+216) alpha=0.25126, err=1.46939e+02
+gradient norms (prb, u, shift): 0.88, 0.99, 2.63
+224) alpha=0.25672, err=1.37504e+02
+gradient norms (prb, u, shift): 0.88, 1.00, 2.46
+232) alpha=0.26293, err=1.28908e+02
+gradient norms (prb, u, shift): 0.87, 0.97, 2.32
+240) alpha=0.27057, err=1.21099e+02
+gradient norms (prb, u, shift): 0.80, 0.91, 2.30
+248) alpha=0.25745, err=1.13940e+02
+gradient norms (prb, u, shift): 0.74, 0.81, 2.23
+256) alpha=0.25920, err=1.07349e+02
+gradient norms (prb, u, shift): 0.80, 0.90, 2.02
+264) alpha=0.27051, err=1.01268e+02
+gradient norms (prb, u, shift): 0.69, 0.76, 2.07
+272) alpha=0.25957, err=9.56460e+01
+gradient norms (prb, u, shift): 0.64, 0.69, 1.97
+280) alpha=0.25210, err=9.04912e+01
+gradient norms (prb, u, shift): 0.64, 0.73, 1.89
+288) alpha=0.25013, err=8.56685e+01
+gradient norms (prb, u, shift): 0.63, 0.72, 1.82
+296) alpha=0.27124, err=8.12156e+01
+gradient norms (prb, u, shift): 0.59, 0.65, 1.74
+304) alpha=0.26264, err=7.71037e+01
+gradient norms (prb, u, shift): 0.52, 0.57, 1.76
+312) alpha=0.24639, err=7.32953e+01
+gradient norms (prb, u, shift): 0.48, 0.54, 1.65
+320) alpha=0.26201, err=6.97716e+01
+gradient norms (prb, u, shift): 0.54, 0.59, 1.54
+328) alpha=0.28483, err=6.64648e+01
+gradient norms (prb, u, shift): 0.48, 0.51, 1.56
+336) alpha=0.24141, err=6.34562e+01
+gradient norms (prb, u, shift): 0.46, 0.52, 1.48
+344) alpha=0.25486, err=6.05917e+01
+gradient norms (prb, u, shift): 0.48, 0.53, 1.38
+352) alpha=0.28498, err=5.79382e+01
+gradient norms (prb, u, shift): 0.45, 0.49, 1.34
+360) alpha=0.26521, err=5.54788e+01
+gradient norms (prb, u, shift): 0.44, 0.49, 1.31
+368) alpha=0.25613, err=5.31733e+01
+gradient norms (prb, u, shift): 0.43, 0.48, 1.21
+376) alpha=0.28039, err=5.10030e+01
+gradient norms (prb, u, shift): 0.48, 0.55, 1.18
+384) alpha=0.25935, err=4.89581e+01
+gradient norms (prb, u, shift): 0.48, 0.55, 1.12
+392) alpha=0.26030, err=4.70747e+01
+gradient norms (prb, u, shift): 0.48, 0.55, 1.10
+400) alpha=0.25591, err=4.52964e+01

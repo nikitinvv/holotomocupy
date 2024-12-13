@@ -4,31 +4,15 @@ import numpy as np
 import cupyx.scipy.ndimage as ndimage
 from holotomocupy.chunking import gpu_batch
 
-@gpu_batch
-def remove_outliers(data, dezinger, dezinger_threshold):
-    """Remove outliers (dezinger)
-    Parameters
-    ----------
-    data : ndarray
-        Input 3D array
-    dezinger: int
-        Radius for the median filter
-    dezinger_threshold: float
-        Threshold for outliers
-    
-    Returns
-    -------
-    res : ndarray
-        Output array    
-    """
-    res = data.copy()
+import cupyx.scipy.ndimage as ndimage
+def remove_outliers(data, dezinger, dezinger_threshold):    
+    res=cp.array(data)
     if (int(dezinger) > 0):
         w = int(dezinger)
-        # print(data.shape)
-        fdata = ndimage.median_filter(data, [1,w, w])
-        res[:] = cp.where(cp.logical_and(
-            data > fdata, (data - fdata) > dezinger_threshold), fdata, data)
-    return res
+        fdata = ndimage.median_filter(res, [1,w, w])
+        print('Affected pixels:',np.sum(np.abs(res-fdata)>fdata*dezinger_threshold))
+        res[:] = np.where(np.abs(res-fdata)>fdata*dezinger_threshold, fdata, res)
+    return res.get()
 
 @gpu_batch
 def linear(x,y,a,b):

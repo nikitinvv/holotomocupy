@@ -19,7 +19,7 @@ def mshow(a, show=False, **args):
 
     if isinstance(a, cp.ndarray):
         a = a.get()
-    fig, axs = plt.subplots(1, 1, figsize=(3, 3))
+    fig, axs = plt.subplots(1, 1, figsize=(5, 5))
     im = axs.imshow(a, cmap='gray', **args)
     fig.colorbar(im, fraction=0.046, pad=0.04)
     plt.show()
@@ -40,7 +40,7 @@ def mshow_complex(a, show=False, **args):
         return
     if isinstance(a, cp.ndarray):
         a = a.get()
-    fig, axs = plt.subplots(1, 2, figsize=(9, 3))
+    fig, axs = plt.subplots(1, 2, figsize=(15, 5))
     im = axs[0].imshow(a.real, cmap='gray', **args)
     axs[0].set_title('real')
     fig.colorbar(im, fraction=0.046, pad=0.04)
@@ -65,7 +65,7 @@ def mshow_polar(a, show=False, **args):
         return
     if isinstance(a, cp.ndarray):
         a = a.get()
-    fig, axs = plt.subplots(1, 2, figsize=(9, 3))
+    fig, axs = plt.subplots(1, 2, figsize=(15, 5))
     im = axs[0].imshow(np.abs(a), cmap='gray', **args)
     axs[0].set_title('abs')
     fig.colorbar(im, fraction=0.046, pad=0.04)

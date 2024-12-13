@@ -5,7 +5,7 @@ from .chunking import gpu_batch
 
 
 @gpu_batch
-def S(psi, shift=0, ptype='constant'):
+def S(psi, shift=0, **kwargs):
     """ 2D shift operator
     
     Parameters
@@ -27,17 +27,17 @@ def S(psi, shift=0, ptype='constant'):
     p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))    
     # res = ndimage.zoom(res,(1,2,2),order=0)    
     n = res.shape[-1]    
-    #res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), ptype)
-    x = cp.fft.fftfreq(n).astype('float32')
+    res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), **kwargs)
+    x = cp.fft.fftfreq(2*n).astype('float32')
     [y, x] = cp.meshgrid(x, x)
     pp = cp.exp(-2*cp.pi*1j * (y*p[:, 1, None, None]+x*p[:, 0, None, None]))
     res = cp.fft.ifft2(pp*cp.fft.fft2(res))
-    #res = res[:, n//2:-n//2, n//2:-n//2]
+    res = res[:, n//2:-n//2, n//2:-n//2]
     return res
 
 
 @gpu_batch
-def ST(psi, shift=0,ptype='constant'):
+def ST(psi, shift=0, **kwargs):
     """ 2D shift operator
     
     Parameters
@@ -59,12 +59,12 @@ def ST(psi, shift=0,ptype='constant'):
     p = cp.pad(shift, (0, res.shape[0]-shift.shape[0]))    
     # res = ndimage.zoom(res,(1,2,2),order=0)    
     n = res.shape[-1]    
-    #res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), ptype)
-    x = cp.fft.fftfreq(n).astype('float32')
+    res = cp.pad(res, ((0, 0), (n//2, n//2), (n//2, n//2)), **kwargs)
+    x = cp.fft.fftfreq(2*n).astype('float32')
     [y, x] = cp.meshgrid(x, x)
     pp = cp.exp(2*cp.pi*1j * (y*p[:, 1, None, None]+x*p[:, 0, None, None]))
     res = cp.fft.ifft2(pp*cp.fft.fft2(res))
-    #res = res[:, n//2:-n//2, n//2:-n//2]
+    res = res[:, n//2:-n//2, n//2:-n//2]
     return res
 
 

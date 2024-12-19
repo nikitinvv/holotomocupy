@@ -106,8 +106,9 @@ extern "C" __global__ void gather_mag(float2 *g, float2 *f, float *magnification
 
   coeff0 = M_PI / mu[0];
   coeff1 = -M_PI * M_PI / mu[0];
-  x0 = -(tx - n / 2) / (float)n / magnification[0];
-  y0 = -(ty - n / 2) / (float)n / magnification[0];
+  float s =  - (magnification[0]-1)*0.5-magnification[0]*(n/(float)ne-1)*0.5;
+  x0 = -(tx - n / 2 + s) / (float)n / magnification[0];
+  y0 = -(ty - n / 2 + s) / (float)n / magnification[0];
 
   if (x0 >= 0.5f)
     x0 = 0.5f - 1e-5;

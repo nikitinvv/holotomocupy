@@ -55,7 +55,7 @@ def M(f, magnification=1, n=None):
     fde = cp.fft.fft2(f*c2dfftshift0)*c2dfftshift0
     # adjoint USFFT2D
     fde = fde*phi
-
+    
     fde = cp.pad(fde, ((0, 0), (ne//2, ne//2), (ne//2, ne//2)))
     fde = cp.fft.fft2(fde*c2dfftshift)*c2dfftshift
     fde = cp.pad(fde, ((0, 0), (m, m), (m, m)))

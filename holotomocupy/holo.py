@@ -61,7 +61,7 @@ def _GT0(f, wavelength, voxelsize, z):
 
 
 @gpu_batch
-def G(f, wavelength, voxelsize, z, ptype='constant'):
+def G(f, wavelength, voxelsize, z,ptype='constant',fP=None):
     """Fresnel transform
 
     Parameters
@@ -85,7 +85,8 @@ def G(f, wavelength, voxelsize, z, ptype='constant'):
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
-    fP = cp.exp(-1j*cp.pi*wavelength*z*(fx**2+fy**2))
+    if fP is None:
+        fP = cp.exp(-1j*cp.pi*wavelength*z*(fx**2+fy**2))
     ff = f.copy()
     if ptype=='symmetric':
         ff = _fwd_pad(ff)
@@ -103,7 +104,7 @@ def G(f, wavelength, voxelsize, z, ptype='constant'):
 
 
 @gpu_batch
-def GT(f, wavelength, voxelsize, z, ptype='constant'):
+def GT(f, wavelength, voxelsize, z, ptype='constant',fP=None):
     """Adjoint Fresnel transform (propagation with -z distance)
 
     Parameters
@@ -127,7 +128,8 @@ def GT(f, wavelength, voxelsize, z, ptype='constant'):
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
-    fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
+    if fP is None:
+        fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
     ff= f.copy()
     
     ff = cp.pad(ff,((0,0),(n//2,n//2),(n//2,n//2)))

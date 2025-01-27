@@ -13,32 +13,24 @@ import time
 from holotomocupy.utils import *
 
 
-# In[ ]:
+# In[2]:
 
 
-prb_opt = sys.argv[1]=='True'
-pos_opt = sys.argv[2]=='True'
-noise = sys.argv[3]=='True'
-method = sys.argv[4]
+show = False
+domain = sys.argv[1]
+size_v = int(sys.argv[2])#48
+size_1 = int(sys.argv[3])#164# 144
+pad = int(sys.argv[4])
 niter = int(sys.argv[5])
-gpu = int(sys.argv[6])
 
-# prb_opt = True
-# pos_opt = True
-# noise = False
-# method = 'BH-CG'
-# niter = 4096
-# gpu = 0
+gpu = int(sys.argv[6])
 cp.cuda.Device(gpu).use()
 
-cpag = 5e-3
-show = False
-
-n = 1024  # object size in each dimension
-pad = 0 # pad for the reconstructed probe
+n = 2048  # object size in each dimension
+# pad = n//8 # pad for the reconstructed probe
 npos = 16 # total number of positions
-z1 = 4.267e-3 # [m] position of the sample
-detector_pixelsize = 3.0e-6
+z1 = -17.75e-3 # [m] position of the CA
+detector_pixelsize = 3.03751e-6
 energy = 33.35  # [keV] xray energy
 wavelength = 1.24e-09/energy  # [m] wave length
 focusToDetectorDistance = 1.28  # [m]
@@ -48,32 +40,98 @@ magnification = focusToDetectorDistance/z1
 voxelsize = np.abs(detector_pixelsize/magnification)  # object voxel size
 
 extra = 8
-nobj = n+n//8
+nobj = 3072+512+2*pad
 nprb = n+2*pad
 npatch = nprb+2*extra
 
-path = f'/data/vnikitin/paper/near_field'
-path_out = f'/data/vnikitin/paper/near_field/rec0'
+flg = f'{domain}_{size_v}_{size_1}_{pad}_sym'
+
+path = f'/data/vnikitin/ESRF/ID16A/20240924/SiemensLH/code2um_nfp18x18_01'
+path_out = f'/data/vnikitin/ESRF/ID16A/20240924_rec2/SiemensLH/code2um_nfp18x18_01'
 
 
 # In[3]:
 
 
+from holotomocupy.holo import G,GT
+# def Lop(psi):
+    
+#     ff = G(psi,wavelength, voxelsize, distance, mpad)
+#     ff = ff[:,pad:nprb-pad,pad:nprb-pad]
+#     return ff
+
+# def LTop(psi):
+#     ff = cp.pad(psi,((0,0),(pad,pad),(pad,pad)))        
+#     ff = GT(ff,wavelength, voxelsize, distance, mpad)
+#     return ff
+
 def Lop(psi):
-    fx = cp.fft.fftfreq(nprb, d=voxelsize).astype('float32')
-    [fx, fy] = cp.meshgrid(fx, fx)
-    fP = cp.exp(-1j*cp.pi*wavelength*distance*(fx**2+fy**2))
-    ff = cp.fft.ifft2(cp.fft.fft2(psi)*fP)
-    ff = ff[:,pad:nprb-pad,pad:nprb-pad]
-    return ff
+    data = cp.zeros([psi.shape[0], n, n], dtype='complex64')
+    for k in range(psi.shape[0]):
+        ff = G(psi[k:k+1],wavelength, voxelsize, distance, 'symmetric')
+        data[k:k+1] = ff[:,pad:nprb-pad,pad:nprb-pad]
+    return data
 
 def LTop(psi):
-    fx = cp.fft.fftfreq(nprb, d=voxelsize).astype('float32')
-    [fx, fy] = cp.meshgrid(fx, fx)
-    fP = cp.exp(1j*cp.pi*wavelength*distance*(fx**2+fy**2))
-    ff = cp.pad(psi,((0,0),(pad,pad),(pad,pad)))    
-    ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
-    return ff
+    data = cp.zeros([psi.shape[0], n+2*pad, n+2*pad], dtype='complex64')
+    for k in range(psi.shape[0]):
+        ff = cp.pad(psi[k:k+1],((0,0),(pad,pad),(pad,pad)))        
+        data[k:k+1] = GT(ff,wavelength, voxelsize, distance, 'symmetric')
+    return data
+
+def L2op(psi):
+    data = cp.zeros([npos, n, n], dtype='complex64')
+    for i in range(npos):
+        psir = psi[i].copy()
+        
+        x = (cp.arange(-n-2*pad,n+2*pad))*voxelsize
+        [y,x] = cp.meshgrid(x,x)
+        P=1j*1/(wavelength*np.abs(distance))*np.exp(1j*np.pi*(x**2+y**2)/(wavelength*distance))/(2*n)**4/2
+        v = cp.ones(2*n+4*pad)        
+        vv=cp.linspace(0,1,size_v)
+        vv = vv**5*(126-420*vv+540*vv**2-315*vv**3+70*vv**4)
+        v[:n+2*pad-size_v-size_1] = 0
+        v[n+2*pad-size_v-size_1:n+2*pad-size_1] = vv#cp.sin(cp.linspace(0,1,size_v)*cp.pi/2)        
+        v[-(n+2*pad):] = v[:n+2*pad][::-1]
+        v = cp.outer(v,v)
+        
+        P *= v
+        fP = cp.fft.fft2(cp.fft.fftshift(P)                )
+        fP = fP.astype('complex64')
+
+        psir = G(psir[np.newaxis],wavelength,voxelsize,distance,'symmetric',fP)[0]
+        data[i] = psir[pad:-pad,pad:-pad]
+        # psir = cp.pad(psir,((n//2+pad,n//2+pad),(n//2+pad,n//2+pad)))        
+        # psir = cp.fft.ifft2(cp.fft.fft2(psir)*fP)        
+        # data[i] = psir[2*pad+n-n//2:2*pad+n+n//2,2*pad+n-n//2:2*pad+n+n//2]
+    return data
+
+def L2Top(data):
+    psi = cp.zeros([npos, n+2*pad, n+2*pad], dtype='complex64')
+    for j in range(npos):
+        
+        x = (cp.arange(-n-2*pad,n+2*pad))*voxelsize
+        [y,x] = cp.meshgrid(x,x)
+        P=-1j*1/(wavelength*np.abs(distance))*np.exp(1j*np.pi*(x**2+y**2)/(-wavelength*distance))/(2*n)**4/2
+        v = cp.ones(2*n+4*pad)        
+        vv=cp.linspace(0,1,size_v)
+        vv = vv**5*(126-420*vv+540*vv**2-315*vv**3+70*vv**4)
+        v[:n+2*pad-size_v-size_1] = 0
+        v[n+2*pad-size_v-size_1:n+2*pad-size_1] = vv#cp.sin(cp.linspace(0,1,size_v)*cp.pi/2)        
+        v[-(n+2*pad):] = v[:n+2*pad][::-1]
+        v = cp.outer(v,v)
+        P *= v        
+        fP = cp.fft.fft2(cp.fft.fftshift(P)                )
+        fP =fP.astype('complex64')
+        psir = cp.array(cp.pad(data[j],((pad,pad),(pad,pad)))).astype('complex64')        
+
+        psi[j] += GT(psir[np.newaxis],wavelength,voxelsize,distance,'symmetric',fP)[0]
+        # psir = cp.pad(psir,((n//2+pad,n//2+pad),(n//2+pad,n//2+pad)))        
+        # psir = cp.fft.ifft2(cp.fft.fft2(psir)*fP)        
+        # psir = psir[2*pad+n-n//2-pad:2*pad+n+n//2+pad,2*pad+n-n//2-pad:2*pad+n+n//2+pad]
+        
+        # psi[j] += psir
+    return psi
 
 def Ex(psi,ix):
     res = cp.empty([ix.shape[0],npatch,npatch],dtype='complex64')
@@ -82,7 +140,7 @@ def Ex(psi,ix):
     sty = nobj//2-ix[:,0]-npatch//2
     endy = sty+npatch
     for k in range(len(stx)):
-        res[k] = psi[sty[k]:endy[k],stx[k]:endx[k]] 
+        res[k] = psi[sty[k]:endy[k],stx[k]:endx[k]]     
     return res
 
 def ExT(psi,psir,ix):
@@ -135,6 +193,34 @@ arr1 = (cp.random.random([npos,nprb,nprb])+1j*cp.random.random([npos,nprb,nprb])
 arr2 = Lop(arr1)
 arr3 = LTop(arr2)
 print(f'{cp.sum(arr1*cp.conj(arr3))}==\n{cp.sum(arr2*cp.conj(arr2))}')
+arr1=arr2=arr3=[]
+
+
+
+if domain=='space':    
+    delta = cp.zeros([npos,n+2*pad,n+2*pad],dtype='complex64')
+    delta[:,n//2+pad,n//2+pad] = 1
+    Ldelta2 = Lop(delta)
+    Ldelta = L2op(delta)
+    Lop=L2op
+    LTop=L2Top
+
+
+    mshow_complex(np.abs(Ldelta[0])+1j*np.abs(Ldelta2[0]),False)
+    # plt.plot(np.real(Ldelta[0,0])[n//2+pad].get())
+    mshow_complex(np.real(Ldelta[0,n//2-128:n//2+128,n//2-128:n//2+128])+1j*np.real(Ldelta2[0,n//2-128:n//2+128,n//2-128:n//2+128]),False)
+
+    fig, axs = plt.subplots(2, 1, figsize=(15, 5))
+    plt.suptitle(flg)
+    axs[0].set_title('abs')
+    axs[0].plot(np.abs(Ldelta2[0])[n//2][n//2-256:n//2+256].get(),label='space')
+    axs[0].plot(np.abs(Ldelta[0])[n//2][n//2-256:n//2+256].get(),label='freq')
+    axs[0].set_title('real')
+    axs[1].plot(np.real(Ldelta2[0])[n//2][n//2-256:n//2+256].get(),label='space')
+    axs[1].plot(np.real(Ldelta[0])[n//2][n//2-256:n//2+256].get(),label='freq')
+    plt.savefig(f'figs/{flg}.png',bbox_inches='tight',dpi=300)
+    plt.show()
+    delta=Ldelta=Ldetla2=[]
 
 
 # # read data
@@ -142,23 +228,79 @@ print(f'{cp.sum(arr1*cp.conj(arr3))}==\n{cp.sum(arr2*cp.conj(arr2))}')
 # In[4]:
 
 
-shifts = np.load(f'{path}/data/gen_shifts.npy')[:npos]
-shifts_random = np.load(f'{path}/data/gen_shifts_random.npy')[:npos]
-prb = np.load(f'{path}/data/gen_prb.npy')
-if noise:
-    data = np.load(f'{path}/data/ndata.npy')[:npos]
-else:
-    data = np.load(f'{path}/data/data.npy')[:npos]
-ref = np.load(f'{path}/data/ref.npy')
-psi = np.load(f'{path}/data/psi.npy')
+import h5py
+npos = 18*18
+pos_step = 1 # steps in positions
+with h5py.File(f'{path}/code2um_nfp18x18_010000.h5') as fid:
+    data0 = fid['/entry_0000/measurement/data'][:npos].astype('float32')
+    
+with h5py.File(f'{path}/ref_0000.h5') as fid:
+    ref0 = fid['/entry_0000/measurement/data'][:].astype('float32')
+with h5py.File(f'{path}/dark_0000.h5') as fid:
+    dark0 = fid['/entry_0000/measurement/data'][:].astype('float32')
 
-mshow_polar(prb,show)
-mshow_complex(data[0]+1j*data[0]/ref,show,vmax=3)
+shifts = np.loadtxt(f'/data/vnikitin/ESRF/ID16A/20240924/positions/shifts_code_nfp18x18ordered.txt')[:,::-1]
+shifts = shifts/voxelsize*(2048//n)*1e-6
+shifts[:,1]*=-1
+
+# print(shifts[-10:])
+shifts = np.load(f'shifts_code_new.npy')[0]
+# print(shifts[-10:])
+#centering
+shifts[:,1]-=(np.amax(shifts[:,1])+np.amin(shifts[:,1]))/2
+shifts[:,0]-=(np.amax(shifts[:,0])+np.amin(shifts[:,0]))/2
+shifts = shifts.reshape(int(np.sqrt(npos)),int(np.sqrt(npos)),2)
+shifts = shifts[::pos_step,::pos_step,:].reshape(npos//pos_step**2,2)
+data0 = data0.reshape(int(np.sqrt(npos)),int(np.sqrt(npos)),n,n)
+data0 = data0[::pos_step,::pos_step,:].reshape(npos//pos_step**2,n,n)
+
+ids = np.where((np.abs(shifts[:,0])<nobj//2-n//2-pad-extra)*(np.abs(shifts[:,1])<nobj//2-n//2-pad-extra))[0]#[0:2]
+data0 = data0[ids]
+shifts = shifts[ids]
+
+# plt.plot(shifts[:,0],shifts[:,1],'.')
+# plt.axis('square')
+# plt.show()
+
+npos = len(ids)
+print(f'{npos=}')
+
+
+# In[5]:
+
+
+from holotomocupy.proc import remove_outliers
+data = data0.copy()
+ref = ref0.copy()
+dark = dark0.copy()
+dark = np.mean(dark,axis=0)
+ref = np.mean(ref,axis=0)
+data-=dark
+ref-=dark
+
+data[data<0]=0
+ref[ref<0]=0
+data[:,1320//3:1320//3+25//3,890//3:890//3+25//3] = data[:,1280//3:1280//3+25//3,890//3:890//3+25//3]
+ref[1320//3:1320//3+25//3,890//3:890//3+25//3] = ref[1280//3:1280//3+25//3,890//3:890//3+25//3]
+radius = 3
+threshold = 0.8
+
+data = remove_outliers(data, radius, threshold)
+ref = remove_outliers(ref[np.newaxis], radius, threshold)[0]     
+
+data[np.isnan(data)] = 1
+ref[np.isnan(ref)] = 1
+
+rdata = data/(ref+1e-11)
+
+mshow_complex(data[0]+1j*rdata[0],show)
+mshow_complex(ref+1j*dark,show)
+data0=ref0=dark0=[]
 
 
 # # Paganin reconstruction
 
-# In[5]:
+# In[6]:
 
 
 def Paganin(data, wavelength, voxelsize, delta_beta,  alpha):
@@ -177,16 +319,17 @@ def rec_init(rdata,ishifts):
     recMultiPaganinr = cp.zeros([nobj,nobj],dtype='float32')# to compensate for overlap
     for j in range(0,npos):
         r = rdata[j]        
-        rr = r*0+1 # to compensate for overlap                
-        rpsi = cp.ones([nobj,nobj],dtype='float32')
-        rrpsi = cp.ones([nobj,nobj],dtype='float32')
+        r = Paganin(r, wavelength, voxelsize,  24.05, 1e-1)
+        rr = r*0+1 # to compensate for overlap                        
+        rpsi = cp.zeros([nobj,nobj],dtype='float32')
+        rrpsi = cp.zeros([nobj,nobj],dtype='float32')
         stx = nobj//2-ishifts[j,1]-n//2
         endx = stx+n
         sty = nobj//2-ishifts[j,0]-n//2
         endy = sty+n
         rpsi[sty:endy,stx:endx] = r
         rrpsi[sty:endy,stx:endx] = rr
-        rpsi = Paganin(rpsi, wavelength, voxelsize,  24.05, cpag)
+        
         recMultiPaganin += rpsi
         recMultiPaganinr += rrpsi
         
@@ -197,8 +340,22 @@ def rec_init(rdata,ishifts):
 
 ishifts = cp.round(cp.array(shifts)).astype('int32')
 rdata = cp.array(data/(ref+1e-5))
+mshow(rdata[0],show)
 rec_paganin = rec_init(rdata,ishifts)
 mshow_polar(rec_paganin,show)
+mshow_polar(rec_paganin[:1000,:1000],show)
+
+# smooth borders
+v = cp.arange(-nobj//2, nobj//2)/nobj
+[vx, vy] = cp.meshgrid(v, v)
+v = cp.exp(-1000*(vx**2+vy**2)).astype('float32')
+
+rec_paganin = cp.fft.fftshift(cp.fft.fftn(cp.fft.fftshift(rec_paganin)))
+rec_paganin = cp.fft.fftshift(cp.fft.ifftn(cp.fft.fftshift(rec_paganin*v))).astype('complex64')
+mshow_polar(rec_paganin,show)
+mshow_polar(rec_paganin[:1000,:1000],show)
+
+rdata=v=[]
 
 
 # ##### $$\nabla F=2 \left(L^*\left( L\psi-\tilde d\right)\right).$$
@@ -207,7 +364,7 @@ mshow_polar(rec_paganin,show)
 # 
 # 
 
-# In[6]:
+# In[7]:
 
 
 def gradientF(vars, pars, reused, d):
@@ -229,11 +386,12 @@ def gradientF(vars, pars, reused, d):
 # 
 # 
 
-# In[7]:
+# In[8]:
 
 
 def gradient_psi(q,ix,x,ex,gradF):
-    return STop(np.conj(q)*gradF,ix,x,ex)
+    res =  STop(np.conj(q)*gradF,ix,x,ex)
+    return res
 
 def gradient_prb(psi,ix,x,ex,gradF):
     return np.sum(np.conj(Sop(psi,ix,x,ex))*gradF,axis=0)
@@ -270,7 +428,7 @@ def gradients(vars,pars,reused):
     dpsi = gradient_psi(q,ix,x,ex,gradF)
     dprb = gradient_prb(psi,ix,x,ex,gradF)
     dx = gradient_shift(psi,q,ix,x,ex,gradF)
-    grads={'psi': rho[0]*dpsi, 'prb': rho[1]*dprb, 'fshift': rho[2]*dx}
+    grads={'psi': rho[0]*dpsi,'prb': rho[1]*dprb, 'fshift': rho[2]*dx}
     return grads
 
 
@@ -279,7 +437,7 @@ def gradients(vars,pars,reused):
 # ##### $$d_0=d/|L(x_0)|$$
 # 
 
-# In[8]:
+# In[9]:
 
 
 def hessianF(Lm,Ldm1,Ldm2,data,pars):
@@ -361,17 +519,17 @@ def hessianF(Lm,Ldm1,Ldm2,data,pars):
 
 # # Optimized version, without extra functions
 
-# In[9]:
+# In[10]:
 
 
 def calc_beta(vars,grads,etas,pars,reused,d):
     (q,psi,x) = (vars['prb'], vars['psi'], vars['fshift'])    
     (ix,ex,rho) = (pars['ishift'],pars['extra'],pars['rho'])
-    (spsi,Lpsi,gradF) = (reused['spsi'], reused['Lpsi'], reused['gradF'])
+    (Lpsi,gradF) = (reused['Lpsi'], reused['gradF'])
     
     # note scaling with rho
     (dpsi1,dq1,dx1) = (grads['psi']*rho[0], grads['prb']*rho[1], grads['fshift']*rho[2])
-    (dpsi2,dq2,dx2) = (etas['psi']*rho[0], etas['prb']*rho[1], etas['fshift']*rho[2])
+    (dpsi2,dq2,dx2) = (etas['psi']*rho[0],etas['prb']*rho[1], etas['fshift']*rho[2])
         
     # frequencies
     xi1 = cp.fft.fftfreq(npatch).astype('float32')
@@ -390,17 +548,22 @@ def calc_beta(vars,grads,etas,pars,reused,d):
     
     # DT, D2T terms
     tmp1 = Ex(dpsi1,ix)     
+    # tmp1 = dpsip1#Ex(dpsi1,ix)     
     tmp1 = cp.fft.fft2(tmp1)
     sdpsi1 = cp.fft.ifft2(w*tmp1)[:,ex:nprb+ex,ex:nprb+ex]
     dt12 = -2*np.pi*1j*cp.fft.ifft2(w*w2*tmp1)[:,ex:nprb+ex,ex:nprb+ex]
     
-    tmp2 = Ex(dpsi2,ix)     
+    tmp2 =Ex(dpsi2,ix)     
+    # tmp2 = dpsip2#Ex(dpsi2,ix)     
     tmp2 = cp.fft.fft2(tmp2)
     sdpsi2 = cp.fft.ifft2(w*tmp2)[:,ex:nprb+ex,ex:nprb+ex]
     dt21 = -2*np.pi*1j*cp.fft.ifft2(w*w1*tmp2)[:,ex:nprb+ex,ex:nprb+ex]
     dt22 = -2*np.pi*1j*cp.fft.ifft2(w*w2*tmp2)[:,ex:nprb+ex,ex:nprb+ex]
     
     tmp = Ex(psi,ix)     
+    spsi = S(tmp,x)[:, ex:npatch-ex, ex:npatch-ex]    
+    
+    # tmp = psip#Ex(psi,ix)     
     tmp = cp.fft.fft2(tmp)        
     dt1 = -2*np.pi*1j*cp.fft.ifft2(w*w1*tmp)[:,ex:nprb+ex,ex:nprb+ex]
     dt2 = -2*np.pi*1j*cp.fft.ifft2(w*w2*tmp)[:,ex:nprb+ex,ex:nprb+ex]
@@ -411,34 +574,37 @@ def calc_beta(vars,grads,etas,pars,reused,d):
     d2m1 =  q*dt12 + q*dt21 + q*d2t1
     d2m1 += dq1*sdpsi2 + dq2*sdpsi1
     d2m1 += dq1*dt2 + dq2*dt1
+    top = redot(gradF,d2m1)
+    d2m1=[]
 
     d2m2 =  q*dt22 + q*dt22 + q*d2t2
     d2m2 += dq2*sdpsi2 + dq2*sdpsi2
     d2m2 += dq2*dt2 + dq2*dt2
-
-    dm1 = dq1*spsi+q*(sdpsi1+dt1)   
-    dm2 = dq2*spsi+q*(sdpsi2+dt2)   
-
-    # top and bottom parts
-    Ldm1 = Lop(dm1)
-    Ldm2 = Lop(dm2) 
-    top = redot(gradF,d2m1)+hessianF(Lpsi, Ldm1, Ldm2, d, pars)            
-    bottom = redot(gradF,d2m2)+hessianF(Lpsi, Ldm2, Ldm2,d, pars)
+    bottom = redot(gradF,d2m2)
+    d2m2=[]
     
-    return top/bottom
+    
+    Ldm1 = Lop(dq1*spsi+q*(sdpsi1+dt1) )
+    Ldm2 = Lop(dq2*spsi+q*(sdpsi2+dt2)  )
+    spsi=sdpsi1=sdpsi2=dt=dt1=dt2=[]
+    # top and bottom parts
+    top+=hessianF(Lpsi, Ldm1, Ldm2, d, pars)            
+    bottom+=hessianF(Lpsi, Ldm2, Ldm2,d, pars)
+    
+    return top/bottom, top,bottom
 
 def calc_alpha(vars,grads,etas,pars,reused,d):    
     (q,psi,x) = (vars['prb'], vars['psi'], vars['fshift'])    
     (ix,ex,rho) = (pars['ishift'],pars['extra'],pars['rho'])
     (dpsi1,dq1,dx1) = (grads['psi'], grads['prb'], grads['fshift'])
     (dpsi2,dq2,dx2) = (etas['psi'], etas['prb'], etas['fshift'])    
-    (spsi,Lpsi,gradF) = (reused['spsi'],reused['Lpsi'], reused['gradF'])
+    (Lpsi,gradF) = (reused['Lpsi'], reused['gradF'])
 
     # top part
     top = -redot(dpsi1,dpsi2)-redot(dq1,dq2)-redot(dx1,dx2)
     
     # scale variable for the hessian
-    (dpsi,dq,dx) = (etas['psi']*rho[0], etas['prb']*rho[1], etas['fshift']*rho[2])
+    (dpsi,dq,dx) = (etas['psi']*rho[0],etas['prb']*rho[1], etas['fshift']*rho[2])
 
     # frequencies        
     xi1 = cp.fft.fftfreq(npatch).astype('float32')    
@@ -452,29 +618,35 @@ def calc_alpha(vars,grads,etas,pars,reused,d):
     
     # DT,D2T terms, and Spsi
     tmp = Ex(dpsi,ix)     
+    # tmp = dpsip#Ex(dpsi,ix)     
     tmp = cp.fft.fft2(tmp)    
     sdpsi = cp.fft.ifft2(w*tmp)[:,ex:nprb+ex,ex:nprb+ex]
     dt2 = -2*np.pi*1j*cp.fft.ifft2(w*w1*tmp)[:,ex:nprb+ex,ex:nprb+ex]
     
     tmp = Ex(psi,ix)     
+    spsi = S(tmp,x)[:, ex:npatch-ex, ex:npatch-ex]    
+    # tmp = psip#Ex(psi,ix)     
     tmp = cp.fft.fft2(tmp)
     dt = -2*np.pi*1j*cp.fft.ifft2(w*w1*tmp)[:,ex:nprb+ex,ex:nprb+ex]
     d2t = -4*np.pi**2*cp.fft.ifft2(w*w2*tmp)[:,ex:nprb+ex,ex:nprb+ex]
     
     # DM and D2M terms
     d2m2 = q*(2*dt2 + d2t)+2*dq*sdpsi+2*dq*dt
-    dm = dq*spsi+q*(sdpsi+dt)   
+    bottom = redot(gradF,d2m2)
+    d2m2=[]
+
+    Ldm = Lop(dq*spsi+q*(sdpsi+dt))   
+    spsi=sdpsi=dt=[]
             
     # bottom part
-    Ldm = Lop(dm)
-    bottom = redot(gradF,d2m2)+hessianF(Lpsi, Ldm, Ldm,d,pars)
+    bottom += hessianF(Lpsi, Ldm, Ldm,d,pars)
     
     return top/bottom, top, bottom
 
 
 # ## minimization functional and calculation of reused arrays
 
-# In[10]:
+# In[11]:
 
 
 def minf(Lpsi,d,pars):
@@ -487,20 +659,19 @@ def minf(Lpsi,d,pars):
     return f
 
 def calc_reused(vars, pars):
+    
+    (q,psi,x) = (vars['prb'], vars['psi'],vars['fshift'])    
+    (ix,ex,rho) = (pars['ishift'],pars['extra'],pars['rho'])
+    
     reused = {}
-    psi = vars['psi']
-    q = vars['prb']
-    x = vars['fshift']
-    ix = pars['ishift']
-    ex = pars['extra']
-    reused['spsi'] = Sop(psi,ix,x,ex)        
-    reused['Lpsi'] = Lop(reused['spsi']*q)     
+    spsi = S(Ex(psi,ix),x)[:, ex:npatch-ex, ex:npatch-ex]    
+    reused['Lpsi'] = Lop(spsi*q)     
     return reused
 
 
 # ## debug functions
 
-# In[ ]:
+# In[12]:
 
 
 def plot_debug(vars,etas,pars,top,bottom,alpha,data,i):
@@ -514,16 +685,15 @@ def plot_debug(vars,etas,pars,top,bottom,alpha,data,i):
         errt = cp.zeros(npp*2)
         errt2 = cp.zeros(npp*2)
         for k in range(0,npp*2):
+            # psipt = psip+(alpha*k/(npp-1))*rho[0]*dpsip2
             psit = psi+(alpha*k/(npp-1))*rho[0]*dpsi2
             qt = q+(alpha*k/(npp-1))*rho[1]*dq2
             xt = x+(alpha*k/(npp-1))*rho[2]*dx2
-
-            errt[k] = minf(Lop(Sop(psit,ix,xt,ex)*qt),data,pars)
+            errt[k] = minf(Lop(S(Ex(psit,ix),xt)[:, ex:npatch-ex, ex:npatch-ex]*qt),data,pars)
                     
         t = alpha*(cp.arange(2*npp))/(npp-1)    
-        errt2 = minf(Lop(Sop(psi,ix,x,ex)*q),data,pars)
-        errt2 = errt2 -top*t+0.5*bottom*t**2
-        
+        errt2 = minf(Lop(S(Ex(psi,ix),x)[:, ex:npatch-ex, ex:npatch-ex]*q),data,pars)
+        errt2 = errt2 -top*t/(n*n*npos)+0.5*bottom*t**2/(n*n*npos)    
         plt.plot(alpha.get()*cp.arange(2*npp).get()/(npp-1),errt.get(),'.')
         plt.plot(alpha.get()*cp.arange(2*npp).get()/(npp-1),errt2.get(),'.')
         plt.show()
@@ -534,6 +704,9 @@ def vis_debug(vars,pars,i):
         (q,psi,x) = (vars['prb'], vars['psi'], vars['fshift'])        
         mshow_polar(psi,show)
         mshow_polar(q,show)
+        if show:
+            plt.plot(vars['fshift'].get(),'.')
+            plt.show()
         write_tiff(np.angle(psi),f'{path_out}_{flg}/crec_psi_angle/{i:03}')
         write_tiff(np.abs(psi),f'{path_out}_{flg}/crec_psi_abs/{i:03}')
         write_tiff(np.angle(q),f'{path_out}_{flg}/crec_prb_angle/{i:03}')
@@ -555,7 +728,7 @@ def grad_debug(alpha, grads, pars, i):
 
 # # Bilinear Hessian method
 
-# In[ ]:
+# In[13]:
 
 
 def BH(data, vars, pars):
@@ -563,7 +736,7 @@ def BH(data, vars, pars):
     if pars['model']=='Gaussian':
         # work with sqrt
         data = cp.sqrt(data)
-        
+    alpha=1    
     for i in range(pars['niter']):                             
         reused = calc_reused(vars, pars)
         error_debug(vars, pars, reused, data, i)
@@ -571,68 +744,98 @@ def BH(data, vars, pars):
       
         reused['gradF'] = gradientF(vars,pars,reused,data) 
         grads = gradients(vars,pars,reused)
-
+        
         if i==0 or pars['method']=='BH-GD':
             etas = {}
             etas['psi'] = -grads['psi']
             etas['prb'] = -grads['prb']
             etas['fshift'] = -grads['fshift']
         else:      
-            beta = calc_beta(vars, grads, etas, pars, reused, data)
+            beta,_,_ = calc_beta(vars, grads, etas, pars, reused, data)
+                
             etas['psi'] = -grads['psi'] + beta*etas['psi']
             etas['prb'] = -grads['prb'] + beta*etas['prb']
             etas['fshift'] = -grads['fshift'] + beta*etas['fshift']
 
+        
         alpha,top,bottom = calc_alpha(vars, grads, etas, pars, reused, data)         
-
         plot_debug(vars,etas,pars,top,bottom,alpha,data,i)
         grad_debug(alpha,grads,pars,i)
+        
         vars['psi'] += pars['rho'][0]*alpha*etas['psi']
+        
         vars['prb'] += pars['rho'][1]*alpha*etas['prb']
         vars['fshift'] += pars['rho'][2]*alpha*etas['fshift']
+        
     return vars
 
-# Scaling for variables,
-# if ==0 then no optimization
-rho = [1,1.5,0.1]
-if prb_opt:
-    probe = 1+0*prb
-else:
-    probe = prb
-    rho[1] = 0
-if pos_opt:
-    positions_px = cp.array(shifts_random)
-else:
-    positions_px = cp.array(shifts)
-    rho[2] = 0
 
-# changing variables
-vars = {}
-vars['psi'] = rec_paganin.copy()
-vars['prb'] = cp.array(probe)
-vars['fshift'] = cp.array(positions_px-cp.round(positions_px).astype('int32')).astype('float32')
-vars['table'] = pd.DataFrame(columns=["iter", "err", "time"])
+# reconstruct probe
+rho = [0,1,0]
+probe = cp.ones([nprb,nprb],dtype='complex64')
+positions_px = cp.array(shifts)
 
 # fixed variables
-pars = {'niter': niter, 'err_step': 1, 'vis_step': 16, 'grad_step': -1}
+pars = {'niter': 4, 'err_step': 1, 'vis_step': -1, 'grad_step': -1}
 pars['rho'] = rho
 pars['ishift'] = cp.round(positions_px).astype('int32')
 pars['extra'] = extra
 pars['eps'] = 1e-8
 pars['model'] = 'Gaussian'
-pars['method'] = method
 
-flg = f'{pars['method']}_True_{prb_opt}_{pos_opt}_{noise}'
 
+pars['method'] = 'BH-CG'
+vars = {}
+vars['psi'] = rec_paganin.copy()*0+1
+vars['prb'] = cp.array(probe)
+vars['fshift'] = cp.array(positions_px-cp.round(positions_px).astype('int32')).astype('float32')
+vars['table'] = pd.DataFrame(columns=["iter", "err", "time"])
+
+data_rec = cp.array(ref).copy()
+vars = BH(data_rec, vars, pars)      
+mshow_polar(vars['prb'],show)
+
+
+# # Smooth borders for the probe
+
+# In[14]:
+
+
+probe = cp.pad(vars['prb'][3*pad//2:-3*pad//2,3*pad//2:-3*pad//2],((3*pad//2,3*pad//2),(3*pad//2,3*pad//2)),'symmetric')
+# v = cp.ones(n+2*pad)
+# vv = cp.sin(cp.linspace(0,np.pi/2,pad))
+# v[:pad]=vv
+# v[-pad:]=vv[::-1]
+# v=cp.outer(v,v)
+# probe*=v
+
+mshow_polar(probe,show)
+
+
+# # full reconstruction
+
+# In[15]:
+
+
+rho = [1,1.5*np.mean(np.abs(probe)),0.1]
+positions_px = cp.array(shifts)
+
+# fixed variables
+pars = {'niter': niter, 'err_step': 32, 'vis_step': 32, 'grad_step': -1}
+pars['rho'] = rho
+pars['ishift'] = cp.round(positions_px).astype('int32')
+pars['extra'] = extra
+pars['eps'] = 1e-8
+pars['model'] = 'Gaussian'
+
+
+pars['method'] = 'BH-CG'
+vars = {}
+vars['psi'] = rec_paganin.copy()*0+1
+vars['prb'] = cp.array(probe)
+vars['fshift'] = cp.array(positions_px-cp.round(positions_px).astype('int32')).astype('float32')
+vars['table'] = pd.DataFrame(columns=["iter", "err", "time"])
 
 data_rec = cp.array(data).copy()
 vars = BH(data_rec, vars, pars)      
-# %load_ext line_profiler
-# %lprun -f BH vars,erra,alphaa = BH(data_rec, vars, pars)      
-# mshow(np.angle(vars['psi']),True) 
-
-
-
-
-
 

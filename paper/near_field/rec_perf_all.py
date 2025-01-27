@@ -13,7 +13,7 @@ import time
 from holotomocupy.utils import *
 
 
-# In[ ]:
+# In[2]:
 
 
 prb_opt = sys.argv[1]=='True'
@@ -26,7 +26,7 @@ gpu = int(sys.argv[6])
 # prb_opt = True
 # pos_opt = True
 # noise = False
-# method = 'BH-CG'
+# method = 'DY'
 # niter = 4096
 # gpu = 0
 cp.cuda.Device(gpu).use()
@@ -500,7 +500,7 @@ def calc_reused(vars, pars):
 
 # ## debug functions
 
-# In[ ]:
+# In[11]:
 
 
 def plot_debug(vars,etas,pars,top,bottom,alpha,data,i):
@@ -555,8 +555,34 @@ def grad_debug(alpha, grads, pars, i):
 
 # # Bilinear Hessian method
 
-# In[ ]:
+# In[12]:
 
+
+import copy
+def line_search(vars,pars,etas,d,alpha):
+    (q,psi,x) = (vars['prb'], vars['psi'], vars['fshift'])    
+    (ix,ex,rho) = (pars['ishift'],pars['extra'],pars['rho'])
+    (dpsi,dq,dx) = (etas['psi'], etas['prb'], etas['fshift'])    
+    err_best = minf(Lop(Sop(psi,ix,x,ex)*q),d,pars)
+    
+    lflg=False
+    rflg=False
+    for k in range(10):
+        psit = psi+alpha*rho[0]*dpsi
+        qt = q+alpha*rho[1]*dq
+        xt = x+alpha*rho[2]*dx
+        errt = minf(Lop(Sop(psit,ix,xt,ex)*qt),d,pars)
+        if err_best<errt:
+            alpha/=2
+            if rflg:
+                return alpha
+            lflg=1
+        elif err_best>errt:
+            if lflg:
+                return alpha
+            alpha*=2
+            rflg=1            
+    return 0
 
 def BH(data, vars, pars):
    
@@ -571,22 +597,34 @@ def BH(data, vars, pars):
       
         reused['gradF'] = gradientF(vars,pars,reused,data) 
         grads = gradients(vars,pars,reused)
-
+        alpha=1
         if i==0 or pars['method']=='BH-GD':
             etas = {}
             etas['psi'] = -grads['psi']
             etas['prb'] = -grads['prb']
             etas['fshift'] = -grads['fshift']
         else:      
-            beta = calc_beta(vars, grads, etas, pars, reused, data)
+            if pars['method']=='DY-LS':
+                top =  cp.linalg.norm(grads['psi'] )**2 +  cp.linalg.norm(grads['prb'] )**2 + cp.linalg.norm(grads['fshift'] )**2 
+                bottom = cp.real(cp.sum(cp.conj(etas['psi'])*(grads['psi']-grads0['psi'])))+\
+                    cp.real(cp.sum(cp.conj(etas['prb'])*(grads['prb']-grads0['prb'])))+\
+                    cp.real(cp.sum(cp.conj(etas['fshift'])*(grads['fshift']-grads0['fshift'])))           
+                beta = top/bottom
+            else:
+                beta = calc_beta(vars, grads, etas, pars, reused, data)
+
             etas['psi'] = -grads['psi'] + beta*etas['psi']
             etas['prb'] = -grads['prb'] + beta*etas['prb']
             etas['fshift'] = -grads['fshift'] + beta*etas['fshift']
 
-        alpha,top,bottom = calc_alpha(vars, grads, etas, pars, reused, data)         
+        grads0 = copy.deepcopy(grads)
+        if pars['method']=='DY-LS':
+            alpha = line_search(vars,pars,etas,data,alpha)
+        else:
+            alpha,top,bottom = calc_alpha(vars, grads, etas, pars, reused, data)         
 
-        plot_debug(vars,etas,pars,top,bottom,alpha,data,i)
-        grad_debug(alpha,grads,pars,i)
+        # plot_debug(vars,etas,pars,top,bottom,alpha,data,i)
+        # grad_debug(alpha,grads,pars,i)
         vars['psi'] += pars['rho'][0]*alpha*etas['psi']
         vars['prb'] += pars['rho'][1]*alpha*etas['prb']
         vars['fshift'] += pars['rho'][2]*alpha*etas['fshift']
@@ -614,7 +652,7 @@ vars['fshift'] = cp.array(positions_px-cp.round(positions_px).astype('int32')).a
 vars['table'] = pd.DataFrame(columns=["iter", "err", "time"])
 
 # fixed variables
-pars = {'niter': niter, 'err_step': 1, 'vis_step': 16, 'grad_step': -1}
+pars = {'niter': niter, 'err_step': 1, 'vis_step': 32, 'grad_step': -1}
 pars['rho'] = rho
 pars['ishift'] = cp.round(positions_px).astype('int32')
 pars['extra'] = extra
@@ -624,15 +662,6 @@ pars['method'] = method
 
 flg = f'{pars['method']}_True_{prb_opt}_{pos_opt}_{noise}'
 
-
 data_rec = cp.array(data).copy()
 vars = BH(data_rec, vars, pars)      
-# %load_ext line_profiler
-# %lprun -f BH vars,erra,alphaa = BH(data_rec, vars, pars)      
-# mshow(np.angle(vars['psi']),True) 
-
-
-
-
-
 

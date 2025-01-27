@@ -1,7 +1,7 @@
 import cupy as cp
 import numpy as np
-from .cuda_kernels import wrap_kernel, wrapadj_kernel, gather_mag_kernel
-from .chunking import gpu_batch
+from cuda_kernels import wrap_kernel, wrapadj_kernel, gather_mag_kernel
+from chunking import gpu_batch
 
 
 def _init(ne):
@@ -116,30 +116,31 @@ def MT(f, magnification=1, ne=None):
     return fde
 
 
-# import tifffile
-# import matplotlib.pyplot as plt
+import tifffile
+import matplotlib.pyplot as plt
 
-# a = tifffile.imread('../../tests/data/delta-chip-192.tiff')
+a = cp.zeros([1,256,256],dtype='complex64')
+a[0,96:-96,96:-96] = 1
 # a = a-1j*a
-# magnification = 1.5
-# ne = 192
-# n = 128
+magnification = 2
+ne = 256
+n = 256
 
-# aa = M(a,magnification,n)
+aa = M(a,magnification,n)
 # aaa = MT(aa,magnification,ne)
 # print(np.sum(aa*np.conj(aa)))
 # print(np.sum(a*np.conj(aaa)))
 # aaaa = M(aaa, magnification,n)
 # print(np.sum(aaaa*np.conj(aaaa)/np.sum(aa*np.conj(aaaa))))
 
-# plt.figure()
-# plt.imshow(aa[92].real)
-# plt.colorbar()
-# plt.savefig('t.png')
-# plt.figure()
-# plt.imshow(aaa[92].real)
-# plt.colorbar()
-# plt.savefig('t1.png')
+plt.figure()
+plt.imshow(a[0].real.get())
+plt.colorbar()
+plt.show()
+plt.figure()
+plt.imshow(aa[0].real.get())
+plt.colorbar()
+plt.show()
 
 
 # plt.figure()

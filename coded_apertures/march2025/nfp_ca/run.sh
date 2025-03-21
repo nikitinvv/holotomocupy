@@ -1,6 +1,6 @@
 ssh -t tomo@tomo4 "bash -c 'pkill -9 python; source ~/.bashrc; conda activate holotomocupy; \\
 cd /home/beams/TOMO/vnikitin/BH-ptychography/rec_nfp_ca/;ls; \\
-nohup python demo_object_probe_positions_large_chunk_ca_reg.py 4 0.1 256 >256 & bash'"
+nohup python demo_object_probe_positions_large_chunk_ca_reg.py 4 0.05 256 >256 & bash'"
 
 ssh -t tomo@tomo5 "bash -c 'pkill -9 python; source ~/.bashrc; conda activate holotomocupy; \\
 cd /home/beams/TOMO/vnikitin/BH-ptychography/rec_nfp_ca/;ls; \\

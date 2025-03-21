@@ -3,6 +3,7 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import tifffile
 import os
+from concurrent.futures import wait
 
 def mshow(a, show=False, **args):
     if show:
@@ -72,3 +73,32 @@ def write_tiff(a, name, **args):
 def read_tiff(name):
     a = tifffile.imread(name)[:]
     return a
+
+
+def _linear(res, x, y, a, b,st, end):
+    res[st:end] = a*x[st:end]+b*y[st:end]
+
+def _mulc(res, x, a, st, end):
+    res[st:end] = a*x[st:end]
+
+def mulc(x, a,pool):
+    res = np.empty_like(x)
+    nthreads = pool._max_workers
+    nthreads = min(nthreads, res.shape[0])
+    nchunk = int(np.ceil(res.shape[0] / nthreads))
+    futures = [
+        pool.submit(_mulc, res, x, a, k * nchunk, min((k + 1) * nchunk, res.shape[0]))
+        for k in range(nthreads)
+    ]
+    wait(futures)
+    return res
+
+def linear(res, x,y,a,b,pool):
+    nthreads = pool._max_workers
+    nthreads = min(nthreads, res.shape[0])
+    nchunk = int(np.ceil(res.shape[0] / nthreads))
+    futures = [
+        pool.submit(_linear, res, x, y, a, b, k * nchunk, min((k + 1) * nchunk, res.shape[0]))
+        for k in range(nthreads)
+    ]
+    wait(futures)

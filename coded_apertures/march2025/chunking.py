@@ -81,6 +81,9 @@ def gpu_batch(chunk=8, ngpus=1, axis_out=0, axis_inp=0):
                         gout = out[igpu * gsize_out : (igpu + 1) * gsize_out]
                 if axis_out == 1:                    
                     gout = out[:, igpu * gsize_out : (igpu + 1) * gsize_out]
+                if axis_out == 2:                    
+                    gout = out[:, :, igpu * gsize_out : (igpu + 1) * gsize_out]
+                
                 if np.prod(gout.shape) == 0:
                     break
                 if axis_inp == 0:
@@ -90,9 +93,18 @@ def gpu_batch(chunk=8, ngpus=1, axis_out=0, axis_inp=0):
                     ]
                     if len(inp[proper + cproper :]) > 0:
                         ginp.extend(inp[proper + cproper :])
+                
                 if axis_inp == 1:
                     ginp = [
                         x[:, igpu * gsize : (igpu + 1) * gsize]
+                        for x in inp[: proper + cproper]
+                    ]
+                    if len(inp[proper + cproper :]) > 0:
+                        ginp.extend(inp[proper + cproper :])
+
+                if axis_inp == 2:
+                    ginp = [
+                        x[:,:, igpu * gsize : (igpu + 1) * gsize]
                         for x in inp[: proper + cproper]
                     ]
                     if len(inp[proper + cproper :]) > 0:
@@ -225,10 +237,15 @@ def run(
                     inp_gpu_c = [a[:end-st] for a in inp_gpu[(k - 1) % 2]]                                    
                 elif axis_inp == 1:
                     inp_gpu_c = [a[:,:end-st] for a in inp_gpu[(k - 1) % 2]]                
+                elif axis_inp == 2:
+                    inp_gpu_c = [a[:,:,:end-st] for a in inp_gpu[(k - 1) % 2]]      
+
                 if axis_out == 0:                
                     out_gpu_c = out_gpu[(k - 1) % 2][:end-st]
                 elif axis_out == 1:                
                     out_gpu_c = out_gpu[(k - 1) % 2][:,:end-st]
+                elif axis_out == 2:                
+                    out_gpu_c = out_gpu[(k - 1) % 2][:,:,:end-st]
                                     
                 func(
                     cl,
@@ -255,6 +272,12 @@ def run(
                             inp_pinned[k % 2][j][:, : end - st],
                             pool_inp,
                         )
+                    elif axis_inp == 2:
+                        copy(
+                            inp[j][:, :, st:end],
+                            inp_pinned[k % 2][j][:, :, : end - st],
+                            pool_inp,
+                        )
                     inp_gpu[k % 2][j].set(inp_pinned[k % 2][j])
                     #set tail to 0
                     # if axis_inp == 0:
@@ -266,9 +289,11 @@ def run(
                     if axis_inp == 0:
                         inp_gpu[k % 2][j][: end - st] = inp[j][st:end]
                         # inp_gpu[k % 2][j][end - st :] = 0
-                    if axis_inp == 1:
+                    elif axis_inp == 1:
                         inp_gpu[k % 2][j][:, : end - st] = inp[j][:, st:end]
                         # inp_gpu[k % 2][j][:, end - st :] = 0
+                    elif axis_inp == 2:
+                        inp_gpu[k % 2][j][:, :, : end - st] = inp[j][:, :, st:end]
 
         stream[2].synchronize()
         if k > 1:
@@ -277,6 +302,8 @@ def run(
                 copy(out_pinned[(k - 2) % 2][: end - st], out[st:end], pool_out)
             if axis_out == 1:
                 copy(out_pinned[(k - 2) % 2][:, : end - st], out[:, st:end], pool_out)
+            if axis_out == 2:
+                copy(out_pinned[(k - 2) % 2][:, :, : end - st], out[:, :, st:end], pool_out)
         stream[0].synchronize()
         stream[1].synchronize()
         
@@ -340,6 +367,8 @@ def run1(out, inp, chunk, proper, cproper, nonproper, axis_inp, cl, func, igpu, 
                     inp_gpu_c = [a[:end-st] for a in inp_gpu[(k - 1) % 2]]                
                 elif axis_inp == 1:
                     inp_gpu_c = [a[:,:end-st] for a in inp_gpu[(k - 1) % 2]]                
+                elif axis_inp == 2:
+                    inp_gpu_c = [a[:,:,:end-st] for a in inp_gpu[(k - 1) % 2]]                
                 func(cl, out, *inp_gpu_c, *inp[proper + cproper :])
 
         if k < nchunk:
@@ -354,6 +383,12 @@ def run1(out, inp, chunk, proper, cproper, nonproper, axis_inp, cl, func, igpu, 
                             inp_pinned[k % 2][j][:, : end - st],
                             pool_inp,
                         )
+                    elif axis_inp == 2:
+                        copy(
+                            inp[j][:, :, st:end],
+                            inp_pinned[k % 2][j][:,:, : end - st],
+                            pool_inp,
+                        )
 
                     inp_gpu[k % 2][j].set(inp_pinned[k % 2][j])
                     # # set tail to 0
@@ -366,8 +401,11 @@ def run1(out, inp, chunk, proper, cproper, nonproper, axis_inp, cl, func, igpu, 
                     if axis_inp == 0:
                         inp_gpu[k % 2][j][: end - st] = inp[j][st:end]
                         # inp_gpu[k % 2][j][end - st :] = 0
-                    if axis_inp == 1:
+                    elif axis_inp == 1:
                         inp_gpu[k % 2][j][:, : end - st] = inp[j][:, st:end]
+                        # inp_gpu[k % 2][j][:, end - st :] = 0                    
+                    elif axis_inp == 2:
+                        inp_gpu[k % 2][j][:, :, : end - st] = inp[j][:, :, st:end]
                         # inp_gpu[k % 2][j][:, end - st :] = 0                    
 
         stream[2].synchronize()

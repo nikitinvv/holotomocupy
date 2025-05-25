@@ -17,7 +17,11 @@ sys.path.insert(0, '..')
 from utils import *
 from rec import Rec
 
-# get_ipython().run_line_magic('matplotlib', 'inline')
+
+# In[ ]:
+
+
+
 
 
 # ## Sizes and propagation settings
@@ -36,6 +40,7 @@ distance = (z1 * z2) / focusToDetectorDistance
 magnification = focusToDetectorDistance / z1
 voxelsize = float(cp.abs(detector_pixelsize / magnification))
 path = f"/data/vnikitin/ESRF/ID16A/20240924/Chip/Chip_005nm_155deg_binning1_nfpPSEUDO_RANDOM_repeat/"
+path2 = f"/data/vnikitin/ESRF/ID16A/20240924/Chip/Chip_005nm_155deg_binning1_nfpPSEUDO_RANDOM_repeat_repeat/"
 voxelsize
 
 
@@ -45,11 +50,11 @@ voxelsize
 args = SimpleNamespace()
 
 args.ngpus = 2#int(sys.args[1])
-args.lam = 0.5#float(sys.args[2])
+args.lam = 0.0#float(sys.args[2])
 
 args.n = 6144
-args.npsi = args.n+2*args.n // 8 + args.n // 8
-args.pad = args.n // 8
+args.pad = 0
+args.npsi = args.n+2*args.pad + args.n // 8
 args.nq = args.n + 2 * args.pad
 args.ex = 16
 args.npatch = args.nq + 2 * args.ex
@@ -62,10 +67,10 @@ args.distance = distance
 args.eps = 1e-12
 args.rho = [1, 2, 0.1]
 args.crop = 2 * args.pad
-args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/Chip_nfp2/{args.lam}/"
+args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/Chip_nfp/s333/"
 
 args.niter = 10000
-args.err_step = 1
+args.err_step = 64
 args.vis_step = 64
 args.method = "BH-CG"
 args.show = False
@@ -92,21 +97,21 @@ with h5py.File(f"{path}/dark_0000.h5") as fid:
 with h5py.File(f'{path}Chip_005nm_155deg_binning1_nfpPSEUDO_RANDOM_repeat0000.h5','r') as fid:
     spz = np.array(str(np.array(str(np.array(fid['/entry_0000/instrument/PCIe/header/spz']))[1:]))[1:-1].split(' '),dtype='float32')*1e-6/voxelsize
     spy = np.array(str(np.array(str(np.array(fid['/entry_0000/instrument/PCIe/header/spy']))[1:]))[1:-1].split(' '),dtype='float32')*1e-6/voxelsize
-
+                    
 
 pos_init = np.zeros([args.npos,2],dtype='float32')
 pos_init[:,1] = spy
 pos_init[:,0] = -spz
-# pos_init=-pos_init
 
-# plt.plot(pos_init[:,1],pos_init[:,0],'.')
-# print(spz)
-# print(spy)
+
+# In[ ]:
+
+
 
 
 # # remove outliers from data
 
-# In[5]:
+# In[ ]:
 
 
 import cupyx.scipy.ndimage as ndimage
@@ -118,7 +123,7 @@ def remove_outliers(data, dezinger, dezinger_threshold):
     for k in range(data.shape[0]):
         data0 = cp.array(data[k])
         fdata = ndimage.median_filter(data0, w)
-        # print(np.sum(np.abs(data0 - fdata) > fdata * dezinger_threshold))
+        print(np.sum(np.abs(data0 - fdata) > fdata * dezinger_threshold))
         res[k] = np.where(
             np.abs(data0 - fdata) > fdata * dezinger_threshold, fdata, data0
         ).get()
@@ -154,7 +159,7 @@ mshow(ref,args.show)
 
 # # initial guess for the object
 
-# In[6]:
+# In[ ]:
 
 
 def Paganin(data, wavelength, voxelsize, delta_beta, alpha):
@@ -215,30 +220,29 @@ v=[]
 mshow_polar(psi_init,args.show)
 mshow_polar(psi_init[:1000, :1000],args.show)
 
-# rdata = v = []
+rdata = v = []
 
 
 # #### Initial guess for the probe calculated by backpropagating the square root of the reference image
 # #### Smooth the probe borders for stability
 
-# In[7]:
+# In[ ]:
+
+
+b = cl_rec.S(pos_init.astype('int32')*0,0*pos_init.astype('float32'),cp.array(psi_init))
+a = cl_rec.D(b)
+c = cl_rec.DT(a)
+# mshow_polar(b[0],True)
+# mshow_polar(a[0],True)
+# mshow_polar(c[0],True)
+print(np.sum(b*c.conj()))
+print(np.sum(a*a.conj()))
+
+
+# In[ ]:
 
 
 q_init = cp.array(cl_rec.DT(np.sqrt(ref[np.newaxis]))[0])
-
-ppad = 3 * args.pad // 2
-q_init = np.pad(
-    q_init[ppad : args.nq - ppad, ppad : args.nq - ppad],
-    ((ppad, ppad), (ppad, ppad)),
-    "symmetric",
-)
-v = cp.ones(args.nq, dtype="float32")
-vv = cp.sin(cp.linspace(0, cp.pi / 2, ppad))
-v[:ppad] = vv
-v[args.nq - ppad :] = vv[::-1]
-v = cp.outer(v, v)
-q_init = cp.abs(q_init * v) * cp.exp(1j * cp.angle(q_init) * v)
-vv=[]
 mshow_polar(q_init,args.show)
 
 
@@ -246,33 +250,19 @@ mshow_polar(q_init,args.show)
 
 
 # variables
+
 vars = {}
 vars["psi"] = cp.array(psi_init)
 vars["q"] = cp.array(q_init)
 vars["ri"] = np.round(pos_init).astype("int32")
 vars["r"] = np.array(pos_init - vars["ri"]).astype("float32")
+
+a = np.load(f'/home/beams/TOMO/vnikitin/holotomocupy/coded_apertures/march2025/Chip_nfp/r.npy')[16:]
+vars["r"][:]=a
+
 vars["r_init"] = np.array(pos_init - vars["ri"]).astype("float32")
 vars["table"] = pd.DataFrame(columns=["iter", "err", "time"])
 
 # reconstruction
 vars = cl_rec.BH(data, vars)
-
-
-# In[ ]:
-
-
-# results
-erra = vars["table"]["err"].values
-plt.plot(erra)
-plt.yscale("log")
-plt.grid()
-mshow_polar(vars["psi"],args.show)
-mshow_polar(vars["q"],args.show)
-pos_rec = vars["ri"] + vars["r"]
-if args.show:
-    plt.plot((pos_init[:, 1] - pos_rec[:, 1]), ".", label="x difference")
-    plt.plot((pos_init[:, 0] - pos_rec[:, 0]), ".", label="y difference")
-    plt.legend()
-    plt.grid()
-    plt.plot()
 

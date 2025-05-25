@@ -44,29 +44,37 @@ args = SimpleNamespace()
 
 args.ngpus = int(sys.argv[1])
 args.lam = float(sys.argv[2])
+args.lamq = float(sys.argv[3])
+args.pad =  int(sys.argv[4])
+args.pad_type=sys.argv[5]
+
 
 args.n = 2048
-args.npsi = args.n+2*args.n // 4+args.n // 4+args.n // 8
-args.pad =  args.n // 4+args.n // 8
+
+args.npsi = args.n+2*args.pad+args.n // 8
+args.crop = int(sys.argv[6])
+
 args.nq = args.n + 2 * args.pad
 args.ex = 4
 args.npatch = args.nq + 2 * args.ex
 args.npos = 16
-args.nchunk = 2
+args.nchunk = 4
 
 args.voxelsize = voxelsize
 args.wavelength = wavelength
 args.distance = distance
 args.eps = 1e-12
 args.rho = [1, 2, 0.1]
-args.crop = args.npsi//2#2 * args.pad
-args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/Chip_nfp10nm/{args.lam}/"
 
-args.niter = 10000
-args.err_step = 32
-args.vis_step = 64
+
+args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/Chip_nfp10nm/{args.pad_type}_pad{args.pad}_crop{args.crop}_lam{args.lam}_lamq{args.lamq}/"
+
+args.niter = 4097
+args.err_step = 64
+args.vis_step = 128
 args.method = "BH-CG"
 args.show = False
+
 
 # create class
 cl_rec = Rec(args)

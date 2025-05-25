@@ -34,6 +34,7 @@ class Rec:
         eps = args.eps
         rho = args.rho
         lam = args.lam
+        lamq = args.lamq
         crop = args.crop
         path_out = args.path_out
         show = args.show
@@ -60,6 +61,8 @@ class Rec:
                 for k in range(3):
                     self.stream[igpu][k] = cp.cuda.Stream(non_blocking=False)
                 fx = cp.fft.fftfreq(nq * 2, d=voxelsize).astype("float32")
+                if args.pad_type=='nan':
+                    fx = cp.fft.fftfreq(nq, d=voxelsize).astype("float32")
                 [fx, fy] = cp.meshgrid(fx, fx)
                 unimod = np.exp(1j * 2*np.pi* distance /wavelength)
                 self.fker[igpu] = cp.exp(-1j * cp.pi * wavelength * distance * (fx**2 + fy**2))#*unimod
@@ -78,6 +81,7 @@ class Rec:
         self.eps = eps
         self.rho = rho
         self.lam = lam
+        self.lamq = lamq
         self.crop = crop
         self.path_out = path_out        
         self.niter = args.niter
@@ -85,6 +89,7 @@ class Rec:
         self.vis_step = args.vis_step
         self.rho = args.rho
         self.method = args.method
+        self.pad_type = args.pad_type
         self.show = show
 
     def BH(self, d, vars):
@@ -299,17 +304,20 @@ class Rec:
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
         def _D(self, big_psi, psi):
             ff = psi.copy()
-            ff = self._fwd_pad(ff)
-            v = cp.ones(2*self.nq,dtype='float32')
-            v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-            v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-            v = cp.outer(v,v)
-            ff *= v*2        
+            if self.pad_type=='symmetric':
+                ff = self._fwd_pad(ff)
+                # v = cp.ones(2*self.nq,dtype='float32')
+                # v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
+                # v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
+                # v = cp.outer(v,v)
+                ff *= 2        
+            elif self.pad_type=='none':
+                ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
             ff = cp.fft.ifft2(cp.fft.fft2(ff)*self.fker[cp.cuda.Device().id])
-            ff = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]
-            
-            big_psi[:] = ff[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]
-            
+            if self.pad_type!='nan':
+                ff = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]
+                            
+            big_psi[:] = ff[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]            
             # big_psi[:] = self._adj_pad_sym(ff)#[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]
         
         _D(self, big_psi, psi)
@@ -328,16 +336,25 @@ class Rec:
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
         def _DT(self, psi, big_psi):
             # pad to the probe size
+            
             ff = cp.pad(big_psi, ((0, 0), (self.pad, self.pad), (self.pad, self.pad)))
+            # ff = self._fwd_pad_sym(big_psi)
             # ff = big_psi.copy
-            ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
+            if self.pad_type!='nan':
+                ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
             ff = cp.fft.ifft2(cp.fft.fft2(ff)/self.fker[cp.cuda.Device().id])
-            v = cp.ones(2*self.nq,dtype='float32')
-            v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-            v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-            v = cp.outer(v,v)
-            ff *= v*2        
-            psi[:] = self._adj_pad(ff)
+            if self.pad_type=='symmetric':
+                # v = cp.ones(2*self.nq,dtype='float32')
+                # v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
+                # v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
+                # v = cp.outer(v,v)
+                ff *= 2        
+                psi[:] = self._adj_pad(ff)
+            elif self.pad_type=='none':
+                psi[:] = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]
+            elif self.pad_type=='nan':
+                psi[:] = ff[:]
+                
         _DT(self, psi, big_psi)
         return psi
     
@@ -421,6 +438,7 @@ class Rec:
         # regularization and probe fitting terms,
         # fast on 1 GPU
         # gradq += 2*self.lam*self.GT(self.CT(self.C(self.G(q))))
+        gradq += 2*self.lamq*self.GT(self.G(q))
         # gradq += self.calc_phi_q(q,dref)
             
         return gradq
@@ -661,11 +679,15 @@ class Rec:
         
         gpsi1 = self.G(dpsi1)
         gpsi2 = self.G(dpsi2)
+        gq1 = self.G(dq1)
+        gq2 = self.G(dq2)
         
         # regularization and probe fitting terms,
         # fast on 1 GPU
         res[0] += 2*self.lam*redot(gpsi1,gpsi2)# + self.hessian_Fq(q,dq1,dq2,dref)
         res[1] += 2*self.lam*redot(gpsi2,gpsi2)# + self.hessian_Fq(q,dq1,dq2,dref)
+        res[0] += 2*self.lamq*redot(gq1,gq2)# + self.hessian_Fq(q,dq1,dq2,dref)
+        res[1] += 2*self.lamq*redot(gq2,gq2)# + self.hessian_Fq(q,dq1,dq2,dref)
         # res[0] += 2*self.lam*redot(gq1,gq2) + self.hessian_Fq(q,dq1,dq2,dref)
         # res[1] += 2*self.lam*redot(gq2,gq2) + self.hessian_Fq(q,dq2,dq2,dref)
         
@@ -750,7 +772,9 @@ class Rec:
         
         # gq2 = self.C(self.G(dq2))        
         gpsi2 = self.G(dpsi2)
+        gq2 = self.G(dq2)        
         res[1] += 2*self.lam*redot(gpsi2,gpsi2) #+ self.hessian_Fq(q,dq2,dq2,dref)
+        res[1] += 2*self.lamq*redot(gq2,gq2) #+ self.hessian_Fq(q,dq2,dq2,dref)
 
         top = cp.float32((res[0]).get()) 
         bottom = cp.float32((res[1]).get()) 
@@ -786,10 +810,10 @@ class Rec:
                 qt = q + (alpha * k / (npp - 1)) * dq2
                 rt = r + (alpha * k / (npp - 1)) * dr2
                 tmp=self.fwd(ri,rt,psit,qt)
-                errt[k] = self.minF(tmp, d)+ self.lam*cp.linalg.norm((self.G(psit)))**2# + cp.linalg.norm(cp.abs(self.D(qt[cp.newaxis]))-dref)**2
+                errt[k] = self.minF(tmp, d)+ self.lam*cp.linalg.norm((self.G(psit)))**2+self.lamq*cp.linalg.norm((self.G(qt)))**2# + cp.linalg.norm(cp.abs(self.D(qt[cp.newaxis]))-dref)**2
 
             t = alpha * (cp.arange(2 * npp)) / (npp - 1)
-            errt2 = self.minF(self.fwd(ri,r,psi,q), d)+ self.lam*cp.linalg.norm((self.G(psi)))**2# + self.lam*cp.linalg.norm(self.C(self.G(q)))**2+ cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
+            errt2 = self.minF(self.fwd(ri,r,psi,q), d)+ self.lam*cp.linalg.norm((self.G(psi)))**2+self.lamq*cp.linalg.norm((self.G(q)))**2# + self.lam*cp.linalg.norm(self.C(self.G(q)))**2+ cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
             errt2 = errt2 - top * t + 0.5 * bottom * t**2
 
             plt.plot(
@@ -832,8 +856,9 @@ class Rec:
     def error_debug(self,vars, reused, d, i):
         """Visualization and data saving"""
         psi = vars['psi']
+        q = vars['q']
         if i % self.err_step == 0 and self.err_step != -1:
-            err = self.minF(reused["big_psi"], d)+ self.lam*cp.linalg.norm(self.G(psi))**2 #+ cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
+            err = self.minF(reused["big_psi"], d)+ self.lam*cp.linalg.norm(self.G(psi))**2+ self.lamq*cp.linalg.norm(self.G(q))**2 #+ cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
             print(f"{i}) {err=:1.5e}", flush=True)
             vars["table"].loc[len(vars["table"])] = [i, err.get(), time.time()]
             name = f'{self.path_out}/conv.csv'

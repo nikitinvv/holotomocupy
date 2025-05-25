@@ -7,15 +7,14 @@
 import cupy as cp
 import matplotlib.pyplot as plt
 import pandas as pd
-import sys
-from types import SimpleNamespace
-import warnings
-warnings.filterwarnings("ignore", message=f".*peer.*")
-import sys
-
-sys.path.insert(0, '..')
 from utils import *
+import sys
 from rec import Rec
+from types import SimpleNamespace
+
+import warnings
+
+warnings.filterwarnings("ignore", message=f".*peer.*")
 
 
 # ## Sizes and propagation settings
@@ -25,7 +24,7 @@ from rec import Rec
 
 energy = 33.5
 wavelength = 1.24e-09 / energy
-z1 = 5.5*1e-3-1.286*1e-3  # [m] position of the sample
+z1 = -17.75e-3  # [m] position of the sample
 detector_pixelsize = 3.03751e-6
 focusToDetectorDistance = 1.28  # [m]
 # adjustments for the cone beam
@@ -33,8 +32,7 @@ z2 = focusToDetectorDistance - z1
 distance = (z1 * z2) / focusToDetectorDistance
 magnification = focusToDetectorDistance / z1
 voxelsize = float(cp.abs(detector_pixelsize / magnification))
-path = f"/data/vnikitin/ESRF/ID16A/20240924/Chip/Chip_010nm_nfpPSEUDO_RANDOM/"
-voxelsize
+path = f"/data/vnikitin/ESRF/ID16A/20240924/SiemensLH/code2um_nfp18x18_01"
 
 
 # In[3]:
@@ -44,20 +42,14 @@ args = SimpleNamespace()
 
 args.ngpus = int(sys.argv[1])
 args.lam = float(sys.argv[2])
-args.lamq = float(sys.argv[3])
-args.pad =  int(sys.argv[4])
-args.pad_type=sys.argv[5]
-
 
 args.n = 2048
-
-args.npsi = args.n+2*args.pad+args.n // 8
-args.crop = int(sys.argv[6])
-
+args.npsi = 8192+512
+args.pad = int(sys.argv[3])
 args.nq = args.n + 2 * args.pad
-args.ex = 4
+args.ex = 16
 args.npatch = args.nq + 2 * args.ex
-args.npos = 16
+args.npos = 18 * 18
 args.nchunk = 4
 
 args.voxelsize = voxelsize
@@ -65,16 +57,15 @@ args.wavelength = wavelength
 args.distance = distance
 args.eps = 1e-12
 args.rho = [1, 2, 0.1]
+args.crop = 2 * args.pad
+args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/SiemensLH/code2um_nfp18x18_01/bets_final_{args.pad}_{args.lam}_{args.rho[1]}"
 
-
-args.path_out = f"/data/vnikitin/ESRF/ID16A/20240924_rec0224/Chip_nfp10nm/{args.pad_type}_pad{args.pad}_crop{args.crop}_lam{args.lam}_lamq{args.lamq}/"
 
 args.niter = 4097
-args.err_step = 64
+args.err_step = 1
 args.vis_step = 128
 args.method = "BH-CG"
 args.show = False
-
 
 # create class
 cl_rec = Rec(args)
@@ -87,32 +78,50 @@ cl_rec = Rec(args)
 
 import h5py
 
-with h5py.File(f"{path}/Chip_010nm_nfpPSEUDO_RANDOM0000.h5") as fid:
+npos = args.npos
+pos_step = 1  # steps in positions
+with h5py.File(f"{path}/code2um_nfp18x18_010000.h5") as fid:
     data = fid["/entry_0000/measurement/data"][: args.npos].astype("float32")
 
-with h5py.File(f"{path}/Chip_010nm_nfpPSEUDO_RANDOM0000.h5") as fid:
+with h5py.File(f"{path}/ref_0000.h5") as fid:
     ref = fid["/entry_0000/measurement/data"][:].astype("float32")
 with h5py.File(f"{path}/dark_0000.h5") as fid:
     dark = fid["/entry_0000/measurement/data"][:].astype("float32")
 
-with h5py.File(f'{path}Chip_010nm_nfpPSEUDO_RANDOM0000.h5','r') as fid:
-    spz = np.array(str(np.array(str(np.array(fid['/entry_0000/instrument/PCIe/header/spz']))[1:]))[1:-1].split(' '),dtype='float32')*1e-6/voxelsize
-    spy = np.array(str(np.array(str(np.array(fid['/entry_0000/instrument/PCIe/header/spy']))[1:]))[1:-1].split(' '),dtype='float32')*1e-6/voxelsize
+pos_init = np.loadtxt(
+    f"/data/vnikitin/ESRF/ID16A/20240924/positions/shifts_code_nfp18x18ordered.txt"
+)[:, ::-1]
+pos_init = pos_init / voxelsize * (2048 // args.n) * 1e-6
+pos_init[:, 1] *= -1
 
+print(pos_init[-4:])
+pos_init = np.load(f"shifts_new.npy")
+print(pos_init[-4:])
+# centering
+pos_init[:, 1] -= (np.amax(pos_init[:, 1]) + np.amin(pos_init[:, 1])) / 2
+pos_init[:, 0] -= (np.amax(pos_init[:, 0]) + np.amin(pos_init[:, 0])) / 2
+pos_init = pos_init.reshape(int(np.sqrt(args.npos)), int(np.sqrt(args.npos)), 2)
+pos_init = pos_init[::pos_step, ::pos_step, :].reshape(args.npos // pos_step**2, 2)
+data = data.reshape(int(np.sqrt(args.npos)), int(np.sqrt(args.npos)), args.n, args.n)
+data = data[::pos_step, ::pos_step, :].reshape(npos // pos_step**2, args.n, args.n)
 
-pos_init = np.zeros([args.npos,2],dtype='float32')
-pos_init[:,1] = spy
-pos_init[:,0] = -spz
-# pos_init=-pos_init
+ids = np.where(
+    (np.abs(pos_init[:, 0]) < args.npsi // 2 - args.n // 2 - args.pad - args.ex)
+    * (np.abs(pos_init[:, 1]) < args.npsi // 2 - args.n // 2 - args.pad - args.ex)
+)[0]  
+data = data[ids]
+pos_init = pos_init[ids]
 
-# plt.plot(pos_init[:,1],pos_init[:,0],'.')
-# print(spz)
-# print(spy)
+mplot_positions(pos_init,args.show)
+
+npos = len(ids)
+args.npos = npos
+print(f"{npos=}")
 
 
 # # remove outliers from data
 
-# In[5]:
+# In[ ]:
 
 
 import cupyx.scipy.ndimage as ndimage
@@ -138,15 +147,15 @@ ref -= dark
 
 data[data < 0] = 0
 ref[ref < 0] = 0
-data[:, 1320//3 : 1320//3 + 25//3 , 890//3 : 890//3 + 25//3 ] = data[
-    :, 1280//3 : 1280//3 + 25//3 , 890//3 : 890//3 + 25//3 
+data[:, 1320 // 3 : 1320 // 3 + 25 // 3, 890 // 3 : 890 // 3 + 25 // 3] = data[
+    :, 1280 // 3 : 1280 // 3 + 25 // 3, 890 // 3 : 890 // 3 + 25 // 3
 ]
-ref[1320//3 : 1320//3 + 25//3 , 890//3 : 890//3 + 25//3 ] = ref[
-    1280//3 : 1280//3 + 25//3 , 890//3 : 890//3 + 25//3 
+ref[1320 // 3 : 1320 // 3 + 25 // 3, 890 // 3 : 890 // 3 + 25 // 3] = ref[
+    1280 // 3 : 1280 // 3 + 25 // 3, 890 // 3 : 890 // 3 + 25 // 3
 ]
 
-data = remove_outliers(data, 5, 0.995)
-ref = remove_outliers(ref[None], 5, 0.995)[0]
+data = remove_outliers(data, 3, 0.8)
+ref = remove_outliers(ref[None], 3, 0.8)[0]
 
 data /= np.mean(ref)
 ref /= np.mean(ref)
@@ -180,9 +189,9 @@ def rec_init(rdata, ipos_init):
     recMultiPaganinr = cp.zeros(
         [args.npsi, args.npsi], dtype="float32"
     )  # to compensate for overlap
-    for j in range(0, args.npos):
+    for j in range(0, npos):
         r = cp.array(rdata[j])
-        r = Paganin(r, wavelength, voxelsize, 24.05, 1e-2)
+        r = Paganin(r, wavelength, voxelsize, 24.05, 1e-1)
         rr = r * 0 + 1  # to compensate for overlap
         rpsi = cp.zeros([args.npsi, args.npsi], dtype="float32")
         rrpsi = cp.zeros([args.npsi, args.npsi], dtype="float32")
@@ -217,11 +226,10 @@ psi_init = cp.fft.fftshift(cp.fft.fftn(cp.fft.fftshift(psi_init)))
 psi_init = cp.fft.fftshift(cp.fft.ifftn(cp.fft.fftshift(psi_init * v))).astype(
     "complex64"
 )
-v=[]
 mshow_polar(psi_init,args.show)
 mshow_polar(psi_init[:1000, :1000],args.show)
 
-# rdata = v = []
+rdata = v = []
 
 
 # #### Initial guess for the probe calculated by backpropagating the square root of the reference image
@@ -230,22 +238,7 @@ mshow_polar(psi_init[:1000, :1000],args.show)
 # In[7]:
 
 
-
-
-
-# In[8]:
-
-# In[ ]:
-
-
-
-
-
-# In[9]:
-
-
-# pref = np.pad(ref,((args.pad,args.pad),(args.pad,args.pad)),'symmetric')
-q_init = cp.array(cl_rec.DT(cp.array(np.sqrt(ref[np.newaxis])).astype('complex64'))[0])
+q_init = cp.array(cl_rec.DT(np.sqrt(ref[np.newaxis]))[0])
 
 ppad = 3 * args.pad // 2
 q_init = np.pad(
@@ -259,48 +252,40 @@ v[:ppad] = vv
 v[args.nq - ppad :] = vv[::-1]
 v = cp.outer(v, v)
 q_init = cp.abs(q_init * v) * cp.exp(1j * cp.angle(q_init) * v)
-vv=[]
+
 mshow_polar(q_init,args.show)
-
-
-# In[10]:
-
-
-# variables
-
-vars = {}
-vars["psi"] = cp.array(psi_init)
-vars["q"] = cp.array(q_init)
-vars["ri"] = np.round(pos_init).astype("int32")
-vars["r"] = np.array(pos_init - vars["ri"]).astype("float32")
-vars["r_init"] = np.array(pos_init - vars["ri"]).astype("float32")
-vars["table"] = pd.DataFrame(columns=["iter", "err", "time"])
-
-# pdata = np.pad(data,((0,0),(args.pad,args.pad),(args.pad,args.pad)),'constant',constant_values=1)
-# v = np.ones(args.nq,dtype='float32')
-# v[:args.pad] = np.sin(np.linspace(0,1,args.pad)*cp.pi/2)
-# v[-args.pad:] = np.cos(np.linspace(0,1,args.pad)*cp.pi/2)
-# v = np.outer(v,v)
-# pdata *= v#*2        
-# reconstruction
-vars = cl_rec.BH(data, vars)
 
 
 # In[ ]:
 
 
-# results
-erra = vars["table"]["err"].values
-plt.plot(erra)
-plt.yscale("log")
-plt.grid()
-mshow_polar(vars["psi"],args.show)
-mshow_polar(vars["q"],args.show)
-pos_rec = vars["ri"] + vars["r"]
-if args.show:
-    plt.plot((pos_init[:, 1] - pos_rec[:, 1]), ".", label="x difference")
-    plt.plot((pos_init[:, 0] - pos_rec[:, 0]), ".", label="y difference")
-    plt.legend()
-    plt.grid()
-    plt.plot()
+# variables
+vars = {}
+vars["psi"] = cp.array(psi_init)
+vars["q"] = cp.array(q_init)
+vars["ri"] = np.floor(pos_init).astype("int32")
+vars["r"] = np.array(pos_init - vars["ri"]).astype("float32")
+vars["table"] = pd.DataFrame(columns=["iter", "err", "time"])
+
+# reconstruction
+vars = cl_rec.BH(data, ref, vars)
+
+
+# In[ ]:
+
+
+# # results
+# erra = vars["table"]["err"].values
+# plt.plot(erra)
+# plt.yscale("log")
+# plt.grid()
+# mshow_polar(vars["psi"],args.show)
+# mshow_polar(vars["q"],args.show)
+# pos_rec = vars["ri"] + vars["r"]
+# if args.show:
+#     plt.plot((pos_init[:, 1] - pos_rec[:, 1]), ".", label="x difference")
+#     plt.plot((pos_init[:, 0] - pos_rec[:, 0]), ".", label="y difference")
+#     plt.legend()
+#     plt.grid()
+#     plt.plot()
 

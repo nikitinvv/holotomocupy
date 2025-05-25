@@ -3,7 +3,6 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import time
 from concurrent.futures import ThreadPoolExecutor
-from cupy.cuda import runtime
 import cupyx.scipy.ndimage as ndimage
 import os
 import sys
@@ -13,123 +12,71 @@ sys.path.insert(0, '..')
 from cuda_kernels import *
 from utils import *
 from chunking import gpu_batch
-from holotomocupy.holo import *
+import copy
 
 cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
 class Rec:
     def __init__(self, args):
-        ngpus = args.ngpus
-        npsi = args.npsi
-        nq = args.nq
-        npatch = args.npatch
-        n = args.n
-        pad = args.pad
-        npos = args.npos
-        nchunk = args.nchunk
-        ex = args.ex
-        voxelsize = args.voxelsize
-        wavelength = args.wavelength
-        distance = args.distance
-        eps = args.eps
-        rho = args.rho
-        crop = args.crop
-        path_out = args.path_out
-        show = args.show
 
+        for attr in args.__dict__:
+            setattr(self, attr, copy.deepcopy(args.__dict__[attr]))
+        
         # allocate gpu and pinned memory buffers
         # calculate max buffer size
-        nbytes = (
-            10 * nchunk * npatch * npatch * np.dtype("complex64").itemsize            
-        )
-
+        nbytes = 32 * self.nchunk * self.npatch**2 * np.dtype("complex64").itemsize            
+        
         # create CUDA streams and allocate pinned memory
-        self.stream = [[[] for _ in range(3)] for _ in range(ngpus)]
-        self.pinned_mem = [[] for _ in range(ngpus)]
-        self.gpu_mem = [[] for _ in range(ngpus)]
-        self.fker = [[] for _ in range(ngpus)]
-        self.pool_inp = [[] for _ in range(ngpus)]
-        self.pool_out = [[] for _ in range(ngpus)]
-        self.pool = ThreadPoolExecutor(ngpus)    
-        self.pad_type = 'symmetric'
-        for igpu in range(ngpus):
+        self.stream = [[[] for _ in range(3)] for _ in range(self.ngpus)]
+        self.pinned_mem = [[] for _ in range(self.ngpus)]
+        self.gpu_mem = [[] for _ in range(self.ngpus)]
+        self.fker = [[] for _ in range(self.ngpus)]
+        self.pool_inp = [[] for _ in range(self.ngpus)]
+        self.pool_out = [[] for _ in range(self.ngpus)]
+        self.pool = ThreadPoolExecutor(16)
+
+        for igpu in range(self.ngpus):
             with cp.cuda.Device(igpu):
                 self.pinned_mem[igpu] = cp.cuda.alloc_pinned_memory(nbytes)
                 self.gpu_mem[igpu] = cp.cuda.alloc(nbytes)
                 for k in range(3):
                     self.stream[igpu][k] = cp.cuda.Stream(non_blocking=False)
-                fx = cp.fft.fftfreq(nq * 2, d=voxelsize).astype("float32")
-                if self.pad_type=='nan':
-                    fx = cp.fft.fftfreq(nq, d=voxelsize).astype("float32")
+                fx = cp.fft.fftfreq(self.nq * 2, d=self.voxelsize).astype("float32")
                 [fx, fy] = cp.meshgrid(fx, fx)
-                unimod = np.exp(1j * 2*np.pi* distance /wavelength)
-                self.fker[igpu] = cp.exp(-1j * cp.pi * wavelength * distance * (fx**2 + fy**2))#*unimod
-                self.pool_inp[igpu] = ThreadPoolExecutor(16 // ngpus)    
-                self.pool_out[igpu] = ThreadPoolExecutor(16 // ngpus)
-            
-        self.npsi = npsi
-        self.nq = nq
-        self.npatch = npatch
-        self.n = n
-        self.npos = npos
-        self.nchunk = nchunk
-        self.ngpus = ngpus
-        self.ex = ex
-        self.pad = pad
-        self.eps = eps
-        self.rho = rho
-        self.crop = crop
-        self.path_out = path_out        
-        self.niter = args.niter
-        self.err_step = args.err_step
-        self.vis_step = args.vis_step
-        self.rho = args.rho
-        self.method = args.method
-        
-        self.show = show
+                self.fker[igpu] = cp.exp(-1j * cp.pi * self.wavelength * self.distance * (fx**2 + fy**2))#*unimod
+                self.pool_inp[igpu] = ThreadPoolExecutor(16 // self.ngpus)    
+                self.pool_out[igpu] = ThreadPoolExecutor(16 // self.ngpus)
 
-    def BH(self, d, vars):
+    def BH(self, d, dref, vars):
         d = np.sqrt(d)
-        
-        alpha = 1
-        rho = self.rho
+        dref = np.sqrt(cp.asarray(dref))
+
         reused = {}
-
         for i in range(self.niter):
-            # Calc reused variables and big_phi
             self.calc_reused(reused, vars)
-            
-            self.calc_phi(reused, d)
-            
-            # debug and visualization
-            self.error_debug(vars, reused, d, i)
-            
+            self.gradientF(reused, d)
+
+            self.error_debug(vars, reused, d, dref, i)            
             self.vis_debug(vars, i)
-
-            # gradients for each variable
-            grads = self.gradients(vars, reused)
             
-            if i == 0 or self.method == "BH-GD":
+            grads = self.gradients(vars, reused, dref)
+            
+            if i == 0:
                 etas = {}
-                etas["psi"] = -grads["psi"] * rho[0] ** 2
-                etas["q"] = -grads["q"] * rho[1] ** 2
-                etas["r"] = -grads["r"] * rho[2] ** 2
+                etas["psi"] = mulc(grads["psi"], -self.rho[0] ** 2, self.pool)
+                etas["q"] = mulc(grads["q"], -self.rho[1] ** 2, self.pool)
+                etas["r"] = mulc(grads["r"], -self.rho[2] ** 2, self.pool)
             else:
-                # conjugate direction
-                beta = self.calc_beta(vars, grads, etas, reused, d)
-                etas["psi"] = -grads["psi"] * rho[0] ** 2 + beta * etas["psi"]
-                etas["q"] = -grads["q"] * rho[1] ** 2 + beta * etas["q"]
-                etas["r"] = -grads["r"] * rho[2] ** 2 + beta * etas["r"]
-
-            # step length
-            alpha, top, bottom = self.calc_alpha(vars, grads, etas, reused, d)
-            # print(alpha,top,bottom)
-            # debug approxmation
-            self.plot_debug(vars, etas, top, bottom, alpha, d, i)
-
-            vars["psi"] += alpha * etas["psi"]
-            vars["q"] += alpha * etas["q"]
-            vars["r"] += alpha * etas["r"]
+                beta = self.calc_beta(vars, grads, etas, reused, d, dref)
+                linear(etas['psi'],grads['psi'],etas['psi'],-self.rho[0]**2,beta,self.pool)                                
+                linear(etas['q'],grads['q'],etas['q'],-self.rho[1]**2,beta,self.pool)                                
+                linear(etas['r'],grads['r'],etas['r'],-self.rho[2]**2,beta,self.pool)                                
+                
+            alpha, top, bottom = self.calc_alpha(vars, grads, etas, reused, d, dref)
+            self.plot_debug(vars, etas, top, bottom, alpha, d, dref, i)
+            linear(vars["psi"],vars["psi"],etas['psi'],1,alpha,self.pool)                                
+            linear(vars["q"],vars["q"],etas['q'],1,alpha,self.pool)                                
+            linear(vars["r"],vars["r"],etas['r'],1,alpha,self.pool)                                
 
         return vars
     
@@ -162,7 +109,7 @@ class Rec:
 
         return patches
 
-    def ET(self, patches, ri):
+    def ET(self, ri, patches):
         """Place patches, note only on 1 gpu for now"""
         
         flg = chunking_flg(locals().values())        
@@ -175,7 +122,7 @@ class Rec:
             psi = cp.zeros([self.npsi, self.npsi], dtype="complex64")
 
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
-        def _ET(self, psi, patches, ri):
+        def _ET(self, psi, ri, patches):
             """Adjoint extract patches"""
             stx = self.npsi // 2 - ri[:, 1] - self.npatch // 2
             sty = self.npsi // 2 - ri[:, 0] - self.npatch // 2
@@ -189,7 +136,7 @@ class Rec:
                 (patches, psi, stx, sty, len(ri), self.npatch, self.npsi),
             )
 
-        _ET(self, psi, patches, ri)
+        _ET(self, psi, ri, patches)
         if flg:
             for k in range(1,len(psi)):
                 psi[0] += psi[k]
@@ -197,7 +144,6 @@ class Rec:
         return psi
 
     def S(self, ri, r, psi):
-        # memory for result
         flg = chunking_flg(locals().values())        
         if flg:
             patches = np.empty([len(ri), self.nq, self.nq], dtype="complex64")
@@ -215,16 +161,12 @@ class Rec:
                 -2 * cp.pi * 1j * (y * r[:, 1, None, None] + x * r[:, 0, None, None])
             ).astype("complex64")
             psir = cp.fft.ifft2(tmp * cp.fft.fft2(psir))
-            patches[:] = psir[
-                :, self.ex : self.npatch - self.ex, self.ex : self.npatch - self.ex
-            ]
+            patches[:] = psir[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
         _S(self, patches, ri, r, psi)
         return patches
 
-    def ST(self, patches, ri, r):
-        """Place patches, note only on 1 gpu for now"""
-
+    def ST(self, ri, r, patches):
         flg = chunking_flg(locals().values())        
         if flg:
             psi = []
@@ -235,7 +177,7 @@ class Rec:
             psi = cp.zeros([self.npsi, self.npsi], dtype="complex64")
 
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)                
-        def _ST(self, psi, patches , ri, r):
+        def _ST(self, psi, ri,r,patches):
             """Adjont extract patches with subpixel shift"""
             psir = cp.pad(patches, ((0, 0), (self.ex, self.ex), (self.ex, self.ex)))
 
@@ -246,9 +188,9 @@ class Rec:
             ).astype("complex64")
             psir = cp.fft.ifft2(tmp * cp.fft.fft2(psir))
 
-            psi[:] += self.ET(psir, ri)
+            psi[:] += self.ET(ri,psir)
 
-        _ST(self, psi, patches, ri, r)
+        _ST(self, psi, ri,r,patches)
         if flg:
             for k in range(1,len(psi)):
                 psi[0] += psi[k]
@@ -258,36 +200,21 @@ class Rec:
 
     def _fwd_pad(self,f):
         """Fwd data padding"""
-        [ntheta, n] = f.shape[:2]
-        fpad = cp.zeros([ntheta, 2*n, 2*n], dtype='complex64')
-        pad_kernel((int(cp.ceil(2*n+2/32)), int(cp.ceil(2*n/32)), ntheta),
-                (32, 32, 1), (fpad, f, n, ntheta, 0))
+        [npos, n] = f.shape[:2]
+        fpad = cp.zeros([npos, 2*n, 2*n], dtype='complex64')
+        pad_kernel((int(cp.ceil(2*n/32)), int(cp.ceil(2*n/32)), npos),
+                (32, 32, 1), (fpad, f, n, npos, 0))
         return fpad/2
-    
-    def _fwd_pad_sym(self,f):
-        """Fwd data padding"""
-        fpad = cp.zeros([len(f), self.n+2*self.pad, self.n+2*self.pad], dtype='complex64')
-        pad_sym_kernel((int(cp.ceil((self.n+2*self.pad)/32)), int(cp.ceil((self.n+2*self.pad)/32)), len(f)),
-                (32, 32, 1), (fpad, f, self.pad, self.n, self.n, len(f), 0))
-        return fpad/((self.n+2*self.pad)/self.n)
-
-
-    def _adj_pad_sym(self, fpad):
-        """Adj data padding"""
-        f = cp.zeros([len(fpad), self.n, self.n], dtype='complex64')
-        pad_sym_kernel((int(cp.ceil((self.n+2*self.pad)/32)), int(cp.ceil((self.n+2*self.pad)/32)), len(f)),
-                (32, 32, 1), (fpad, f, self.pad, self.n, self.n, len(f), 1))
-        return f/((self.n+2*self.pad)/self.n)
     
     def _adj_pad(self, fpad):
         """Adj data padding"""
-        [ntheta, n] = fpad.shape[:2]
+        [npos, n] = fpad.shape[:2]
         n //= 2
-        f = cp.zeros([ntheta, n, n], dtype='complex64')
-        pad_kernel((int(cp.ceil(2*n/32)), int(cp.ceil(2*n/32)), ntheta),
-                (32, 32, 1), (fpad, f, n, ntheta, 1))
+        f = cp.zeros([npos, n, n], dtype='complex64')
+        pad_kernel((int(cp.ceil(2*n/32)), int(cp.ceil(2*n/32)), npos),
+                (32, 32, 1), (fpad, f, n, npos, 1))
         return f/2
-    
+
     def D(self, psi):
         """Forward propagator"""
          # memory for result
@@ -299,23 +226,12 @@ class Rec:
         
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
         def _D(self, big_psi, psi):
-            ff = psi.copy()
-            if self.pad_type=='symmetric':
-                ff = self._fwd_pad(ff)
-                # v = cp.ones(2*self.nq,dtype='float32')
-                # v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-                # v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-                # v = cp.outer(v,v)
-                ff *= 2        
-            elif self.pad_type=='none':
-                ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
+            ff = self._fwd_pad(psi)
+            ff *= 2        
             ff = cp.fft.ifft2(cp.fft.fft2(ff)*self.fker[cp.cuda.Device().id])
-            if self.pad_type!='nan':
-                ff = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]
-                            
-            big_psi[:] = ff[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]            
-            # big_psi[:] = self._adj_pad_sym(ff)#[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]
-        
+            ff = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]            
+            big_psi[:] = ff[:, self.pad : self.nq - self.pad, self.pad : self.nq - self.pad]
+                    
         _D(self, big_psi, psi)
         return big_psi
 
@@ -332,52 +248,56 @@ class Rec:
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
         def _DT(self, psi, big_psi):
             # pad to the probe size
-            
             ff = cp.pad(big_psi, ((0, 0), (self.pad, self.pad), (self.pad, self.pad)))
-            # ff = self._fwd_pad_sym(big_psi)
             # ff = big_psi.copy
-            if self.pad_type!='nan':
-                ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
+            ff = cp.pad(ff,((0,0),(self.nq//2,self.nq//2),(self.nq//2,self.nq//2)))
             ff = cp.fft.ifft2(cp.fft.fft2(ff)/self.fker[cp.cuda.Device().id])
-            if self.pad_type=='symmetric':
-                # v = cp.ones(2*self.nq,dtype='float32')
-                # v[:self.nq//2] = cp.sin(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-                # v[-self.nq//2:] = cp.cos(cp.linspace(0,1,self.nq//2)*cp.pi/2)
-                # v = cp.outer(v,v)
-                ff *= 2        
-                psi[:] = self._adj_pad(ff)
-            elif self.pad_type=='none':
-                psi[:] = ff[:,self.nq//2:-self.nq//2,self.nq//2:-self.nq//2]
-            elif self.pad_type=='nan':
-                psi[:] = ff[:]
-                
+            ff *= 2        
+            psi[:] = self._adj_pad(ff)
         _DT(self, psi, big_psi)
-        return psi 
+        return psi
     
+    def G(self,psi):
+        if self.lam==0:
+            return np.zeros_like(psi)
+            
+        flg = chunking_flg(locals().values())        
+        if flg:
+            res = np.empty_like(psi)
+        else:
+            res = cp.empty_like(psi)
+        
+        @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
+        def _G(self, res, psi):
+            stencil = cp.array([1, -2, 1]).astype('float32')            
+            res[:] = ndimage.convolve1d(psi, stencil, axis=1)
+            res[:] += ndimage.convolve1d(psi, stencil, axis=2)
+                
+        _G(self,res,psi)
+        return res  
     
-    def calc_phi(self, reused, d):
+    def gradientF(self, reused, d):
         big_psi = reused["big_psi"]
         flg = chunking_flg(locals().values())        
         if flg:
-            big_phi = np.empty([len(big_psi), self.nq, self.nq], dtype="complex64")
+            gradF = np.empty([len(big_psi), self.nq, self.nq], dtype="complex64")
         else:
-            big_phi = cp.empty([len(big_psi), self.nq, self.nq], dtype="complex64")
+            gradF = cp.empty([len(big_psi), self.nq, self.nq], dtype="complex64")
         
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
-        def _calc_phi(self, big_phi, big_psi, d):
+        def _gradientF(self, gradF, big_psi, d):
             td = d * (big_psi / (cp.abs(big_psi) + self.eps))
-            big_phi[:] = self.DT(2 * (big_psi - td))
+            gradF[:] = self.DT(2 * (big_psi - td))
             
-        _calc_phi(self, big_phi, big_psi, d)
-        reused['big_phi'] = big_phi    
+        _gradientF(self, gradF, big_psi, d)
+        reused['gradF'] = gradF    
 
-    def calc_phi_q(self, q, dref):
+    def gradientF_q(self, q, dref):
         tmp = self.D(q[cp.newaxis])        
         td = dref * (tmp / (cp.abs(tmp) + self.eps))
         return  self.DT(2 * (tmp - td))[0]
     
-    def gradient_psi(self, ri, r, big_phi, psi, q):
-        # memory for result
+    def gradient_psi(self, ri, r, gradF, q):
         flg = chunking_flg(locals().values())        
         if flg:
             gradpsi = []
@@ -387,16 +307,16 @@ class Rec:
         else:
             gradpsi = cp.zeros([self.npsi, self.npsi], dtype="complex64")
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)                
-        def _gradient_psi(self, gradpsi, ri, r, big_phi, q):            
-            gradpsi[:] += self.ST(cp.conj(q) * big_phi, ri, r)
-        _gradient_psi(self, gradpsi, ri, r, big_phi, q)
+        def _gradient_psi(self, gradpsi, ri, r, gradF, q):            
+            gradpsi[:] += self.ST(ri, r,cp.conj(q) * gradF)
+        _gradient_psi(self, gradpsi, ri, r, gradF, q)
         if flg:
             for k in range(1,len(gradpsi)):
                 gradpsi[0] += gradpsi[k]
             gradpsi = gradpsi[0]    
         return gradpsi
     
-    def gradient_q(self, spsi, big_phi, q):
+    def gradient_q(self, spsi, gradF, q, dref):
         flg = chunking_flg(locals().values())        
         if flg:
             gradq = []
@@ -407,23 +327,22 @@ class Rec:
             gradq = cp.zeros([self.nq, self.nq], dtype="complex64")
         
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)                
-        def _gradient_q(self, gradq, spsi, big_phi):
-            gradq[:] += cp.sum(cp.conj(spsi) * big_phi,axis=0)        
-        _gradient_q(self, gradq, spsi, big_phi)
+        def _gradient_q(self, gradq, spsi, gradF):
+            gradq[:] += cp.sum(cp.conj(spsi) * gradF,axis=0)        
+        _gradient_q(self, gradq, spsi, gradF)
 
         if flg:
             for k in range(1,len(gradq)):
                 gradq[0] += gradq[k]
             gradq = gradq[0]    
 
-        # regularization and probe fitting terms,
-        # fast on 1 GPU
-        # gradq += 2*self.lam*self.GT(self.CT(self.C(self.G(q))))
-        # gradq += self.calc_phi_q(q,dref)
+        # regularization and probe fitting terms
+        gradq += 2*self.lam*self.G(self.G(q))
+        gradq += self.gradientF_q(q,dref)
             
         return gradq
    
-    def gradient_r(self, ri, r, big_phi, psi, q):
+    def gradient_r(self, ri, r, gradF, psi, q):
         
         flg = chunking_flg(locals().values())        
         if flg:
@@ -432,7 +351,7 @@ class Rec:
             gradr = cp.empty([len(ri), 2], dtype="float32")
         
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)                               
-        def _gradient_r(self, gradr, ri, r, big_phi, psi, q):
+        def _gradient_r(self, gradr, ri, r, gradF, psi, q):
 
             # frequencies
             xi1 = cp.fft.fftfreq(self.npatch).astype("float32")
@@ -452,21 +371,21 @@ class Rec:
             dt1 = -2 * cp.pi * 1j * dt1[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
             dt2 = -2 * cp.pi * 1j * dt2[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
-            # inner product with big_phi
+            # inner product with gradF
             
-            gradr[:, 0] = redot(big_phi, q * dt1, axis=(1, 2))
-            gradr[:, 1] = redot(big_phi, q * dt2, axis=(1, 2))
+            gradr[:, 0] = redot(gradF, q * dt1, axis=(1, 2))
+            gradr[:, 1] = redot(gradF, q * dt2, axis=(1, 2))
         
-        _gradient_r(self, gradr, ri, r, big_phi, psi, q)
+        _gradient_r(self, gradr, ri, r, gradF, psi, q)
         return gradr
     
-    def gradients(self, vars, reused):
+    def gradients(self, vars, reused, dref):
         (q, psi, ri, r) = (vars["q"], vars["psi"], vars["ri"], vars["r"])
-        (big_phi, spsi) = (reused["big_phi"], reused["spsi"])
+        (gradF, spsi) = (reused["gradF"], reused["spsi"])
 
-        dpsi = self.gradient_psi(ri, r, big_phi, psi, q)
-        dprb = self.gradient_q(spsi, big_phi, q)
-        dr = self.gradient_r(ri, r, big_phi, psi, q)
+        dpsi = self.gradient_psi(ri, r, gradF, q)
+        dprb = self.gradient_q(spsi, gradF, q, dref)
+        dr = self.gradient_r(ri, r, gradF, psi, q)
         grads = {"psi": dpsi, "q": dprb, "r": dr}        
         return grads
     
@@ -515,17 +434,6 @@ class Rec:
         
         reused["spsi"] = spsi
         reused["big_psi"] = big_psi
-                
-
-    def hessian_Fq(self, q,dq1,dq2,dref):
-        Dq = self.D(q[cp.newaxis])[0]
-        Dq1 = self.D(dq1[cp.newaxis])[0]
-        Dq2 = self.D(dq2[cp.newaxis])[0] 
-        l0 = Dq/np.abs(Dq)
-        d0 = dref/np.abs(Dq)
-        v1 = np.sum((1-d0)*reprod(Dq1,Dq2))
-        v2 = np.sum(d0*reprod(l0,Dq1)*reprod(l0,Dq2))        
-        return 2*(v1+v2)
     
     def hessian_F(self, big_psi, dbig_psi1, dbig_psi2, d):    
         flg = chunking_flg(locals().values())        
@@ -533,7 +441,7 @@ class Rec:
             res = []
             for igpu in range(self.ngpus):
                 with cp.cuda.Device(igpu):
-                    res.append(cp.zeros(1, dtype="float32"))
+                    res.append(cp.zeros(1, dtype="complex64"))
         else:
             res = cp.zeros(1, dtype="float32")
         
@@ -552,9 +460,16 @@ class Rec:
         res = res[0]    
         return res
 
-    def calc_beta(self, vars, grads, etas, reused, d):
+    def hessianFq(self, big_q,dbig_q1,dbig_q2,dref):        
+        l0 = big_q/(np.abs(big_q) + self.eps)
+        d0 = dref/(np.abs(big_q) + self.eps)
+        v1 = np.sum((1-d0)*reprod(dbig_q1,dbig_q2))
+        v2 = np.sum(d0*reprod(l0,dbig_q1)*reprod(l0,dbig_q2))        
+        return 2*(v1+v2)
+    
+    def calc_beta(self, vars, grads, etas, reused, d, dref):
         (q, psi, ri, r) = (vars["q"], vars["psi"], vars["ri"], vars["r"])
-        (spsi, big_psi, big_phi) = (reused["spsi"], reused["big_psi"], reused["big_phi"])
+        (spsi, big_psi, gradF) = (reused["spsi"], reused["big_psi"], reused["gradF"])
         (dpsi1, dq1, dr1) = (grads["psi"], grads["q"], grads["r"])
         (dpsi2, dq2, dr2) = (etas["psi"], etas["q"], etas["r"])        
 
@@ -571,7 +486,7 @@ class Rec:
             res = cp.zeros([2], dtype="float32")
 
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
-        def _calc_beta(self, res, ri, r, spsi, big_psi, big_phi, dr1, dr2, d, q, dq1, dq2, psi,dpsi1, dpsi2):            
+        def _calc_beta(self, res, ri, r, spsi, big_psi, gradF, dr1, dr2, d, q, dq1, dq2, psi,dpsi1, dpsi2):            
             # note scaling with rho
             dpsi1 = dpsi1 * self.rho[0] ** 2
             dq1 = dq1 * self.rho[1] ** 2
@@ -580,8 +495,7 @@ class Rec:
             xi1 = cp.fft.fftfreq(self.npatch).astype("float32")
             [xi2, xi1] = cp.meshgrid(xi1, xi1)
 
-            # multipliers in frequencies
-            
+            # multipliers in frequencies            
             dr1 = dr1[:, :, cp.newaxis, cp.newaxis]
             dr2 = dr2[:, :, cp.newaxis, cp.newaxis]
             w = cp.exp(
@@ -601,16 +515,16 @@ class Rec:
             )
 
             # DT, D2T terms
-            tmp1 = self.E(ri, dpsi1)
-            tmp1 = cp.fft.fft2(tmp1)
-            sdpsi1 = cp.fft.ifft2(w * tmp1)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
-            dt12 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp1)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
+            tmp = self.E(ri, dpsi1)
+            tmp = cp.fft.fft2(tmp)
+            sdpsi1 = cp.fft.ifft2(w * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
+            dt12 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
-            tmp2 = self.E(ri, dpsi2)
-            tmp2 = cp.fft.fft2(tmp2)
-            sdpsi2 = cp.fft.ifft2(w * tmp2)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
-            dt21 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w1 * tmp2)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
-            dt22 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp2)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
+            tmp = self.E(ri, dpsi2)
+            tmp  = cp.fft.fft2(tmp)
+            sdpsi2 = cp.fft.ifft2(w * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
+            dt21 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w1 * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
+            dt22 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
             tmp = self.E(ri, psi)
             tmp = cp.fft.fft2(tmp)
@@ -620,54 +534,52 @@ class Rec:
             d2t2 = -4 * cp.pi**2 * cp.fft.ifft2(w * w22 * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
             # DM,D2M terms
-            d2m1 = q * dt12 
-            d2m1 += q * dt21 
-            d2m1 += q * d2t1
-            d2m1 += dq1 * sdpsi2 
-            d2m1 += dq2 * sdpsi1
-            d2m1 += dq1 * dt2 
-            d2m1 += dq2 * dt1
+            d2m1 = q * dt12 + q * dt21 + q * d2t1
+            d2m1 += dq1 * sdpsi2 + dq2 * sdpsi1
+            d2m1 += dq1 * dt2 + dq2 * dt1
 
-            d2m2 = q * dt22 
-            d2m2 += q * dt22 
-            d2m2 += q * d2t2
-            d2m2 += dq2 * sdpsi2 
-            d2m2 += dq2 * sdpsi2
-            d2m2 += dq2 * dt2 
-            d2m2 += dq2 * dt2
+            d2m2 = q * dt22 + q * dt22 + q * d2t2
+            d2m2 += dq2 * sdpsi2 + dq2 * sdpsi2
+            d2m2 += dq2 * dt2 + dq2 * dt2
 
-            dm1 = dq1 * spsi
-            dm1 += q * (sdpsi1 + dt1)
-            dm2 = dq2 * spsi
-            dm2 += q * (sdpsi2 + dt2)
+            dm1 = dq1 * spsi + q * (sdpsi1 + dt1)
+            dm2 = dq2 * spsi + q * (sdpsi2 + dt2)
 
             # top and bottom parts
             Ddm1 = self.D(dm1)
             Ddm2 = self.D(dm2)
 
-            top = redot(big_phi, d2m1) + self.hessian_F(big_psi, Ddm1, Ddm2, d)
-            bottom = redot(big_phi, d2m2) + self.hessian_F(big_psi, Ddm2, Ddm2, d)
+            top = redot(gradF, d2m1) + self.hessian_F(big_psi, Ddm1, Ddm2, d)
+            bottom = redot(gradF, d2m2) + self.hessian_F(big_psi, Ddm2, Ddm2, d)
             res[0] += top
             res[1] += bottom
             
-        _calc_beta(self, res, ri, r, spsi, big_psi, big_phi, dr1, dr2, d, q, dq1, dq2, psi,dpsi1, dpsi2)           
+        _calc_beta(self, res, ri, r, spsi, big_psi, gradF, dr1, dr2, d, q, dq1, dq2, psi,dpsi1, dpsi2)           
         if flg:
             for k in range(1,len(res)):
                 res[0][0] += res[k][0]
                 res[0][1] += res[k][1]
             res = res[0]      
-        
+
+        # regularization and probe fitting terms,
+        gq1 = self.G(dq1)
+        gq2 = self.G(dq2)
+        Dq = self.D(q[cp.newaxis])[0]
+        Ddq1 = self.D(dq1[cp.newaxis])[0]
+        Ddq2 = self.D(dq2[cp.newaxis])[0] 
+        res[0] += 2*self.lam*redot(gq1,gq2) + self.hessianFq(Dq,Ddq1,Ddq2,dref)
+        res[1] += 2*self.lam*redot(gq2,gq2) + self.hessianFq(Dq,Ddq2,Ddq2,dref)
         
         top = cp.float32((res[0]).get()) 
         bottom = cp.float32((res[1]).get()) 
         return top/bottom
     
 
-    def calc_alpha(self, vars, grads, etas, reused, d):
+    def calc_alpha(self, vars, grads, etas, reused, d, dref):
         (q, psi, ri, r) = (vars["q"], vars["psi"], vars["ri"], vars["r"])
         (dpsi1, dq1, dr1) = (grads["psi"], grads["q"], grads["r"])
         (dpsi2, dq2, dr2) = (etas["psi"], etas["q"], etas["r"])
-        (spsi, big_psi, big_phi) = (reused["spsi"], reused["big_psi"], reused["big_phi"])
+        (spsi, big_psi, gradF) = (reused["spsi"], reused["big_psi"], reused["gradF"])
         
         flg = (chunking_flg(vars.values()) 
                or chunking_flg(reused.values()) 
@@ -682,7 +594,7 @@ class Rec:
             res = cp.zeros([2], dtype="float32")
         
         @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
-        def _calc_alpha(self, res, ri, r, spsi, big_psi, big_phi, dr1, dr2, d, q, dq2, psi, dpsi2):            
+        def _calc_alpha(self, res, ri, r, spsi, big_psi, gradF, dr1, dr2, d, q, dq2, psi, dpsi2):            
             # top part
             top = -redot(dr1, dr2)
 
@@ -714,19 +626,16 @@ class Rec:
             d2t = -4 * cp.pi**2 * cp.fft.ifft2(w * w2 * tmp)[:, self.ex : self.nq + self.ex, self.ex : self.nq + self.ex]
 
             # DM and D2M terms
-            d2m2 = q * (2 * dt2 + d2t) 
-            d2m2 += 2 * dq2 * sdpsi 
-            d2m2 += 2 * dq2 * dt
-            dm = dq2 * spsi 
-            dm += q * (sdpsi + dt)
+            d2m2 = q * (2 * dt2 + d2t) + 2 * dq2 * sdpsi + 2 * dq2 * dt
+            dm = dq2 * spsi + q * (sdpsi + dt)
 
             # bottom part
             Ddm = self.D(dm)
-            bottom = redot(big_phi, d2m2) + self.hessian_F(big_psi, Ddm, Ddm, d)
+            bottom = redot(gradF, d2m2) + self.hessian_F(big_psi, Ddm, Ddm, d)
             res[0] += top
             res[1] += bottom
 
-        _calc_alpha(self, res, ri, r, spsi, big_psi, big_phi, dr1, dr2, d, q, dq2, psi, dpsi2)
+        _calc_alpha(self, res, ri, r, spsi, big_psi, gradF, dr1, dr2, d, q, dq2, psi, dpsi2)
         if flg:
             for k in range(1,len(res)):
                 res[0][0] += res[k][0]
@@ -737,7 +646,12 @@ class Rec:
         # regularization and probe fitting terms,
         # fast on 1 GPU
         
-        
+        gq2 = self.G(dq2)        
+        Dq = self.D(q[cp.newaxis])[0]
+        Ddq2 = self.D(dq2[cp.newaxis])[0] 
+
+        res[1] += 2*self.lam*redot(gq2,gq2) + self.hessianFq(Dq,Ddq2,Ddq2,dref)
+
         top = cp.float32((res[0]).get()) 
         bottom = cp.float32((res[1]).get()) 
         return top/bottom,top,bottom
@@ -758,7 +672,7 @@ class Rec:
         _fwd(self,res,ri,r,psi,q)
         return res
 
-    def plot_debug(self, vars, etas, top, bottom, alpha, d, i):
+    def plot_debug(self, vars, etas, top, bottom, alpha, d, dref, i):
         """Check the minimization functional behaviour"""
         if i % self.vis_step == 0 and self.vis_step != -1 and self.show:
             (q, psi, ri, r) = (vars["q"], vars["psi"], vars["ri"], vars["r"])
@@ -772,10 +686,15 @@ class Rec:
                 qt = q + (alpha * k / (npp - 1)) * dq2
                 rt = r + (alpha * k / (npp - 1)) * dr2
                 tmp=self.fwd(ri,rt,psit,qt)
-                errt[k] = self.minF(tmp, d)
+                errt[k] = self.minF(tmp, d) + \
+                    self.lam*cp.linalg.norm(self.G(qt))**2 + \
+                    cp.linalg.norm(cp.abs(self.D(qt[cp.newaxis]))-dref)**2
 
             t = alpha * (cp.arange(2 * npp)) / (npp - 1)
-            errt2 = self.minF(self.fwd(ri,r,psi,q), d)
+            tmp = self.fwd(ri,r,psi,q)
+            errt2 = self.minF(tmp, d) + \
+                self.lam*cp.linalg.norm(self.G(q))**2 + \
+                cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
             errt2 = errt2 - top * t + 0.5 * bottom * t**2
 
             plt.plot(
@@ -801,25 +720,17 @@ class Rec:
             (q, psi) = (vars["q"], vars["psi"])
             mshow_polar(psi,self.show)
             mshow_polar(q,self.show)
-            diff = vars['r']-vars['r_init']
-            plt.plot(diff[:,0],'.',label='y')
-            plt.plot(diff[:,1],'.',label='x')
-            plt.grid()
-            plt.legend()
-            plt.savefig(f'{self.path_out}/{i:04}')
-            plt.close()
-            # plt.show()
             write_tiff(cp.angle(psi),f'{self.path_out}/rec_psi_angle/{i:04}')
             write_tiff(cp.abs(psi),f'{self.path_out}/rec_psi_abs/{i:04}')
             write_tiff(cp.angle(q),f'{self.path_out}/rec_prb_angle/{i:04}')
             write_tiff(cp.abs(q),f'{self.path_out}/rec_prb_abs/{i:04}')
-            np.save(f'{self.path_out}/{i:04}',vars['r'])
 
 
-    def error_debug(self,vars, reused, d, i):
+    def error_debug(self,vars, reused, d, dref, i):
         """Visualization and data saving"""
+        q = vars['q']
         if i % self.err_step == 0 and self.err_step != -1:
-            err = self.minF(reused["big_psi"], d)
+            err = self.minF(reused["big_psi"], d)+ self.lam*cp.linalg.norm(self.G(q))**2 + cp.linalg.norm(cp.abs(self.D(q[cp.newaxis]))-dref)**2
             print(f"{i}) {err=:1.5e}", flush=True)
             vars["table"].loc[len(vars["table"])] = [i, err.get(), time.time()]
             name = f'{self.path_out}/conv.csv'

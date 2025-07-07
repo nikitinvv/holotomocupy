@@ -45,6 +45,8 @@ class Rec:
                 self.pool_out[igpu] = ThreadPoolExecutor(16 // args.ngpus)
         
         self.pool_cpu = ThreadPoolExecutor(16)
+        self.f = [self.F1,self.F2,self.F3,self.F4]
+        self.gf = [self.gF1,self.gF2,self.gF3,self.gF4]
         self.df = [self.dF1,self.dF2,self.dF3,self.dF4]
         self.d2f = [self.d2F1,self.d2F2,self.d2F3,self.d2F4]
 
@@ -91,39 +93,6 @@ class Rec:
             res[:] = a*x[:]
         _mulc(self, res, x,a)
         return res
-    
-    @timer
-    def BH(self, d, vars):
-        
-        for i in range(self.niter):
-            self.error_debug(vars, d, i)
-            self.vis_debug(vars, i)
-            grads = self.gradients(vars, d)            
-            if i == 0:
-                etas = {}
-                etas["u"] = self.mulc_batch(grads['u'],-self.rho[0]**2)
-                #etas["Ru"] = self.mulc_batch(grads['Ru'],-self.rho[0]**2)
-                etas["q"] = self.mulc_batch(grads['q'],-self.rho[1]**2)
-                etas["r"] = self.mulc_batch(grads['r'],-self.rho[2]**2)
-            else:
-                beta = self.calc_beta(vars, grads, etas, d);# print(f'{beta=}')
-                self.linear_batch(etas['u'],grads['u'],beta, -self.rho[0]**2)                
-                self.linear_batch(etas['q'],grads['q'],beta, -self.rho[1]**2)                                
-                self.linear_batch(etas['r'],grads['r'],beta, -self.rho[2]**2)
-            etas["Ru"] = self.R(etas["u"])
-
-            alpha, top, bottom = self.calc_alpha(vars, grads, etas, d);# print(f'{alpha=}')
-            grads = []
-            # debug approxmation
-            self.plot_debug(vars, etas, top, bottom, alpha, d, i)
-            self.linear_batch(vars["u"],etas['u'],1,alpha)
-            self.linear_batch(vars["q"],etas['q'],1,alpha)
-            self.linear_batch(vars["r"],etas['r'],1,alpha)
-            self.R(vars["u"],out=vars["psi"])
-            self.expR(vars['psi'],out=vars["psi"])
-            
-            #os.system('echo micro*tomo |sudo -S /clear_cache3 2>/dev/null')
-        return vars
     
 
     def initR(self, n):
@@ -819,8 +788,8 @@ class Rec:
                 res[0][1] += res[k][1]
             res = res[0]      
         
-        etas['Ru']=[]   
-        grads['Ru']=[]   
+        etas['Ru']=[]  
+        grads['Ru']=[] 
         
         #to fit into mem
         if self.lam>0:
@@ -928,7 +897,7 @@ class Rec:
             res = res[0]
         res[0] += -self.redot_batch(du1, du2) - self.redot_batch(dq1, dq2)
         
-        grads['Ru']=[]            
+        grads['Ru']=[]    ###### uncomment in the final version        
         
         if self.lam>0:
             gu2 = du1#reuse memory
@@ -1003,14 +972,12 @@ class Rec:
                 errt[k] = self.minF(tmp, d)
                 if self.lam>0:
                     errt[k] += self.lam*self.minFL(self.G(ut))
-                    # errt[k] += self.lam*np.linalg.norm(self.G(ut))**2
                 
             t = alpha * (cp.arange(npp)) / (npp//2)
             tmp = self.fwd(r,u,q)
             errt2 = self.minF(tmp, d) 
             if self.lam>0:
                 errt2 += self.lam*self.minFL(self.G(u)) 
-                # errt2 += self.lam*np.linalg.norm(self.G(u))**2
             errt2 = errt2 - top * t + 0.5 * bottom * t**2
             plt.plot(
                 alpha * cp.arange(npp).get() / (npp//2),
@@ -1072,25 +1039,95 @@ class Rec:
             vars["table"].loc[len(vars["table"])] = [i, err.get(), time.time()]
             name = f'{self.path_out}/conv.csv'
             os.makedirs(os.path.dirname(name), exist_ok=True)
-            vars["table"].to_csv(name, index=False)
-    
-    def F1(self,inp):
-        x1=inp
-        return cp.linalg.norm(cp.abs(x1)-self.d)**2
-    
-    def F2(self,inp):
-        x21,x22 = inp
-        
-        res = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')
-        for j in range(self.ndist):
-            res[:,j] = self.D(x21[j]*self.M(x22[:,j],j),j)
-        
-        out = res
+            vars["table"].to_csv(name, index=False)    
 
+    ####### F1(x1)=\||x1|-d\|_2^2
+    def F1(self,x1,data):
+        return cp.linalg.norm(cp.abs(x1)-data)**2
+    
+    def dF1(self, x, y, data, return_x=True):    
+        out = cp.empty_like(x)
+        for j in range(self.ndist):
+            td = data[:,j] * (x[:,j] / (cp.abs(x[:,j])))                
+            out[:,j] = 2 * (x[:,j] - td)
+
+        return redot(out,y)
+    
+    def gF1(self, x, y,data):        
+        out = cp.empty_like(y)
+        for j in range(self.ndist):
+            td = data[:,j] * (y[:,j] / (cp.abs(y[:,j])))                
+            out[:,j] = 2 * (y[:,j] - td)
+        
+        return out        
+    
+    def d2F1(self,x,y,z,data):
+        out = 0
+        for j in range(self.ndist):
+            l0 = x[:,j] / (cp.abs(x[:,j]))
+            d0 = data[:,j] / (cp.abs(x[:,j]))
+            v1 = cp.sum((1 - d0) * reprod(y[:,j], z[:,j]))            
+            v2 = cp.sum(d0 * reprod(l0, y[:,j]) * reprod(l0, z[:,j]))
+            out += 2 * (v1 + v2)
+        return out    
+    
+    ####### F2(x21,x22)=D(x21\cdot M(x22))
+    def F2(self,x):
+        x21,x22 = x
+        
+        out = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')
+        for j in range(self.ndist):
+            out[:,j] = self.D(x21[j]*self.M(x22[:,j],j),j)
+                
         return out
     
-    def F3(self,inp):
-        x31,x32,x33 = inp
+    def dF2(self,x,y, return_x=True):
+        x21,x22 = x
+        y21,y22 = y       
+
+        if return_x:
+            x1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')
+        y1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')        
+        for j in range(self.ndist):
+            if return_x:
+                x1[:,j] = self.D(x21[j]*self.M(x22[:,j],j),j)        
+            y1[:,j] = self.D(y21[j]*self.M(x22[:,j],j),j)
+            y1[:,j] += self.D(x21[j]*self.M(y22[:,j],j),j)
+        if return_x:
+            return x1, y1
+        else:
+            return y1
+    
+    def gF2(self,x,y):
+        y11 = y
+        y21 = cp.empty([self.ndist,self.n,self.n],dtype='complex64')
+        y22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')         
+        
+        q,u,r,psi = x
+
+        for j in range(self.ndist):   
+            mspsi = self.M(self.S(r[:,j],psi),j)
+            y21[j] = cp.sum(self.DT(y11[:,j],j)*np.conj(mspsi),axis=0)        
+            y22[:,j] = self.MT(self.DT(y11[:,j],j)*np.conj(q[j]),j)                    
+        
+        return [y21,y22]   
+        
+    def d2F2(self,x,y,z):
+        x21,x22 = x
+        y21,y22 = y
+        z21,z22 = z
+        
+        y1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')        
+        for j in range(self.ndist):        
+            if y is z:
+                y1[:,j]= 2*self.D(y21[j]*self.M(y22[:,j],j),j)        
+            else:
+                y1[:,j] = self.D(y21[j]*self.M(z22[:,j],j),j)+self.D(z21[j]*self.M(y22[:,j],j),j)
+        return y1
+    
+    ####### F3(x31,x32,x33)=(x31,S_{x33}(x32))
+    def F3(self,x):
+        x31,x32,x33 = x
 
         x22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
         xi1 = cp.fft.fftfreq(self.npsi).astype("float32")
@@ -1098,46 +1135,16 @@ class Rec:
         for j in range(self.ndist):
             x33j =  x33[:, j, :, None, None]
             w = cp.exp(-2 * cp.pi * 1j * (xi2 * x33j[:, 1] + xi1 * x33j[:, 0]))
-            t = cp.fft.ifft2(w * cp.fft.fft2(x32))                        
-            x22[:,j] = t
-
-        out = [x31, x22]
-        return out
+            x22[:,j] = cp.fft.ifft2(w * cp.fft.fft2(x32))                        
+            
+        return [x31, x22]
     
-    def F4(self,inp):
-        x41,x42,x43 = inp
-
-        x32 = cp.exp(1j*self.R(x42))
-
-        out = [x41, x32, x43]
-        return out
-    
-    def dF1(self, inp):
-        x1,y1 = inp
-
-        res = cp.empty_like(x1)
-        for j in range(self.ndist):
-            td = self.d[:,j] * (x1[:,j] / (cp.abs(x1[:,j])))                
-            res[:,j] = 2 * (x1[:,j] - td)
-
-        out = redot(res,y1)
-        return out
-    
-    def dF2(self,inp):
-        x21,x22,y21,y22 = inp       
-        x1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')
-        y1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')        
-        for j in range(self.ndist):
-            x1[:,j] = self.D(x21[j]*self.M(x22[:,j],j),j)        
-            y1[:,j] = self.D(y21[j]*self.M(x22[:,j],j),j)
-            y1[:,j] += self.D(x21[j]*self.M(y22[:,j],j),j)
-        out = [x1,y1]   
-        return out
-    
-    def dF3(self,inp):
-        x31,x32,x33,y31,y32,y33 = inp
+    def dF3(self,x,y,return_x=True):
+        x31,x32,x33 = x
+        y31,y32,y33 = y
         
-        x22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
+        if return_x:
+            x22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
         y22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
         xi1 = cp.fft.fftfreq(self.npsi).astype("float32")
         [xi2, xi1] = cp.meshgrid(xi1, xi1)
@@ -1145,50 +1152,22 @@ class Rec:
             x33j =  x33[:, j, :, None, None]
             dx33j =  y33[:, j, :, None, None]
             w = cp.exp(-2 * cp.pi * 1j * (xi2 * x33j[:, 1] + xi1 * x33j[:, 0]))
-            t = cp.fft.ifft2(w * cp.fft.fft2(x32))                        
-            x22[:,j] = t
             w1 = xi1 * dx33j[:, 0] + xi2 * dx33j[:, 1]
+            
+            if return_x:
+                x22[:,j] = cp.fft.ifft2(w * cp.fft.fft2(x32))                        
+
             t = cp.fft.ifft2(w * cp.fft.fft2(y32))                        
             dt = -2*cp.pi*1j*cp.fft.ifft2(w * w1 * cp.fft.fft2(x32))                                    
             y22[:,j] = t + dt
-        out = [x31,x22,y31,y22]
-        return out
-    
-    def dF4(self,inp):
-        x41,x42,x43,y41,y42,y43 = inp
         
-        x32 = cp.exp(1j*self.R(x42))
-        y32 = cp.exp(1j*self.R(x42))*1j*self.R(y42)                        
-                
-        out = [x41, x32, x43, y41, y32, y43]
-        return out
+        if return_x:
+            return [x31,x22], [y31,y22]
+        else:
+            return [y31,y22]
     
-    def gF1(self, inp):
-        x1 = inp 
-        y1 = cp.empty_like(x1)
-        for j in range(self.ndist):
-            td = self.d[:,j] * (x1[:,j] / (cp.abs(x1[:,j])))                
-            y1[:,j] = 2 * (x1[:,j] - td)
-        out = [x1,y1]
-        return out
-        
-    
-    def gF2(self,inp):
-        x11,y11 = inp
-        y21 = cp.empty([self.ndist,self.n,self.n],dtype='complex64')
-        y22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')         
-        # gradq[j] += cp.sum(cp.conj(mspsi)*gradF,axis=0)        
-        
-        for j in range(self.ndist):   
-            mspsi = self.M(self.S(self.r[:,j],self.psi),j)
-            # mspsi = self.DT(x11[:,j],j)/self.q[j]
-            y21[j] = cp.sum(self.DT(y11[:,j],j)*np.conj(mspsi),axis=0)        
-            y22[:,j] = self.MT(self.DT(y11[:,j],j)*np.conj(self.q[j]),j)                    
-        out = [y21,y22]   
-        return out
-    
-    def gF3(self,inp):
-        [y21,y22]=inp
+    def gF3(self,x,y):
+        y21,y22 = y
                 
         y33 = cp.empty([self.ntheta, self.ndist, 2], dtype="float32")
         y32 = cp.zeros([self.ntheta,self.npsi,self.npsi],dtype='complex64')         
@@ -1196,64 +1175,32 @@ class Rec:
         xi1 = cp.fft.fftfreq(self.npsi).astype("float32")
         xi2, xi1 = cp.meshgrid(xi1, xi1)
 
+        q,u,r,psi = x
+
         for j in range(self.ndist):
-            # multipliers in frequencies
-            rj = self.r[:, j]
-            w = cp.exp(
-                -2 * cp.pi * 1j * (xi2 * rj[:, 1, None, None] + xi1 * rj[:, 0, None, None])
-            )
+            rj = r[:, j,:,None,None]
+            w = cp.exp(-2 * cp.pi * 1j * (xi2 * rj[:, 1] + xi1 * rj[:, 0]))
                 
             tmp = cp.fft.fft2(y22[:,j])
             y32[:] += cp.fft.ifft2(1/w * tmp)
 
-            tmp = cp.fft.fft2(self.psi)
+            tmp = cp.fft.fft2(psi)
             
             dt1 = cp.fft.ifft2(w * xi1 * tmp)
             dt2 = cp.fft.ifft2(w * xi2 * tmp)
-            dt1 = -2 * cp.pi * 1j * dt1#
-            dt2 = -2 * cp.pi * 1j * dt2#
+            dt1 = -2 * cp.pi * 1j * dt1
+            dt2 = -2 * cp.pi * 1j * dt2
 
             y33[:, j, 0] = redot(y22[:,j], dt1, axis=(1, 2))
             y33[:, j, 1] = redot(y22[:,j], dt2, axis=(1, 2))
     
-        out = [y21,y32,y33]
-        return out
-    
-    def gF4(self,inp):
-        [y31,y32,y33]=inp
-                
-        y42 = (-1j)*self.RT(y32*cp.conj(self.psi))
-        
-        out = [y31,y42,y33]
-        return out
-    
+        return [y21,y32,y33]
 
+    def d2F3(self,x,y,z):
+        x31,x32,x33 = x
+        y31,y32,y33 = y
+        z31,z32,z33 = z
     
-    def d2F1(self,inp):
-        [x,y,z] = inp
-        res = 0
-        for j in range(self.ndist):
-            l0 = x[:,j] / (cp.abs(x[:,j]))
-            d0 = self.d[:,j] / (cp.abs(x[:,j]))
-            v1 = cp.sum((1 - d0) * reprod(y[:,j], z[:,j]))
-            v2 = cp.sum(d0 * reprod(l0, y[:,j]) * reprod(l0, z[:,j]))
-            res += 2 * (v1 + v2)
-        return res    
-    
-    def d2F2(self,inp):
-        x21,x22,y21,y22,z21,z22 = inp
-        x1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')
-        y1 = cp.empty([self.ntheta,self.ndist,self.n,self.n],dtype='complex64')        
-        for j in range(self.ndist):
-            x1[:,j] = self.D(x21[j]*self.M(x22[:,j],j),j)        
-            y1[:,j] = self.D(y21[j]*self.M(z22[:,j],j),j)+self.D(z21[j]*self.M(y22[:,j],j),j)
-        out = [x1,y1] 
-        return out
-
-    def d2F3(self,inp):
-        x31,x32,x33,y31,y32,y33,z31,z32,z33 = inp
-    
-        x22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
         y22 = cp.empty([self.ntheta,self.ndist,self.npsi,self.npsi],dtype='complex64')
         xi1 = cp.fft.fftfreq(self.npsi).astype("float32")
         [xi2, xi1] = cp.meshgrid(xi1, xi1)
@@ -1267,135 +1214,150 @@ class Rec:
             w12 = (xi1**2 * y33j[:, 0] * z33j[:, 0]
                     + xi1 * xi2 * (y33j[:, 0] * z33j[:, 1] + y33j[:, 1] * z33j[:, 0])
                     + xi2**2 * y33j[:, 1] * z33j[:, 1])
+            
             tmp = cp.fft.fft2(y32)
             dt1 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w1 * tmp)
-            tmp = cp.fft.fft2(z32)
-            dt2 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)
             tmp = cp.fft.fft2(x32)
             d2t = -4 * cp.pi**2 * cp.fft.ifft2(w * w12 * tmp)
-            
-            t = cp.fft.ifft2(w * tmp)
-            x22[:,j] = t
-            y22[:,j] = dt1+dt2+d2t
-        out = [x31,x22,y31*0,y22]
-        return out
-    
-    def d2F4(self,inp):
-        x41,x42,x43,y41,y42,y43,z41,z42,z43 = inp        
-        x32 = cp.exp(1j*self.R(x42))
-        y32 = np.exp(1j*self.R(x42))*(-self.R(y42)*self.R(z42))
-        out = [x41,x32,x43,y41*0,y32,y43*0]
-        return out
-    
-    def f11(self,x,y,z):           
-        res = 0
-        for id in range(1,len(self.d2f))[::-1]:            
-            d2f = self.d2f[id](x+y+z)                    
-            dfy = self.df[id](x+y)
-            dfz = self.df[id](x+z)         
-            gg = d2f            
-            for idg in range(0,id)[::-1]:
-                gg = self.df[idg](gg)            
-            res += gg
-            x = dfy[:len(dfz)//2]
-            y = dfy[len(dfz)//2:]
-            z = dfz[len(dfz)//2:]
-        d2f = self.d2f[0](x+y+z)                            
-        return res+d2f        
-    
-    @timer
-    def hess(self, vars, grads, etas, d):
-        (q, psi,  r) = (vars["q"], vars["psi"], vars["r"])
-        (Rdu1, du1, dq1, dr1) = (grads["Ru"], grads["u"], grads["q"], grads["r"])
-        (Rdu2, du2, dq2, dr2) = (etas["Ru"], etas["u"],  etas["q"], etas["r"])        
+            if y is z:
+                y22[:,j] = 2*dt1+d2t    
+            else:
+                tmp = cp.fft.fft2(z32)
+                dt2 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)            
+                y22[:,j] = dt1+dt2+d2t
 
-        flg = (chunking_flg(vars.values()) 
-               or chunking_flg(grads.values()) 
-               or chunking_flg(etas.values()))                 
-        if flg:
-            res = []
-            for igpu in range(self.ngpus):
-                with cp.cuda.Device(igpu):
-                    res.append(cp.zeros([2], dtype="float32"))
+        return [cp.zeros_like(y31), y22]
+
+    
+    ####### F4(x41,x42,x43)=(x41,e^{1j R(x42)},x43)
+    def F4(self,x):
+        x41,x42,x43,x44 = x
+
+        x32 = x44 #already computed
+
+        return [x41, x32, x43]        
+    
+    def dF4(self,x,y,return_x=True):
+        x41,x42,x43,x44 = x
+        y41,y42,y43,y44 = y
+
+        if return_x:            
+            x32 = x44 # already computed
+        y32 = x44*1j*y44
+
+        if return_x:        
+            return [x41, x32, x43], [y41, y32, y43]    
         else:
-            res = cp.zeros([2], dtype="float32")
+            return  [y41, y32, y43]    
+    
+    def gF4(self,x,y):
+        y31,y32,y33 = y
+        q,u,r,psi = x
 
-        @gpu_batch(self.nchunk, self.ngpus, axis_out=0, axis_inp=0)
-        def _hess(self, res,  r, dr1, dr2, psi, Rdu1, Rdu2, d, q, dq1, dq2):            
-            # frequencies
-            xi1 = cp.fft.fftfreq(self.npsi).astype("float32")
-            [xi2, xi1] = cp.meshgrid(xi1, xi1)
-            
-            # multipliers in frequencies
-            for j in range(self.ndist):
-                dr1j = dr1[:, j, :, cp.newaxis, cp.newaxis]
-                dr2j = dr2[:, j, :, cp.newaxis, cp.newaxis]
-                rj = r[:, j]
-                w = cp.exp(
-                    -2 * cp.pi * 1j * (xi2 * rj[:, 1, None, None] + xi1 * rj[:, 0, None, None])
-                )
-                w1 = xi1 * dr1j[:, 0] + xi2 * dr1j[:, 1]
-                w2 = xi1 * dr2j[:, 0] + xi2 * dr2j[:, 1]
-                w12 = (
-                    xi1**2 * dr1j[:, 0] * dr2j[:, 0]
-                    + xi1 * xi2 * (dr1j[:, 0] * dr2j[:, 1] + dr1j[:, 1] * dr2j[:, 0])
-                    + xi2**2 * dr1j[:, 1] * dr2j[:, 1]
-                )
-                w22 = (
-                    xi1**2 * dr2j[:, 0] ** 2
-                    + 2 * xi1 * xi2 * (dr2j[:, 0] * dr2j[:, 1])
-                    + xi2**2 * dr2j[:, 1] ** 2
-                )
-
-                # dt1,dt2,d2t1,d2t2
-                tmp = cp.fft.fft2(psi)
-                dt1 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w1 * tmp)
-                dt2 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)
-                d2t1 = -4 * cp.pi**2 * cp.fft.ifft2(w * w12 * tmp)
-                d2t2 = -4 * cp.pi**2 * cp.fft.ifft2(w * w22 * tmp)
-
-                tmp = psi*1j*Rdu1
-                tmp = cp.fft.fft2(tmp)
-                dt12 = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)
-                sdpsi1R = cp.fft.ifft2(w * tmp)
-                
-                tmp = psi*1j*Rdu2
-                tmp = cp.fft.fft2(tmp)
-                dt1R = -2 * cp.pi * 1j * cp.fft.ifft2(w * w1 * tmp)
-                dt2R = -2 * cp.pi * 1j * cp.fft.ifft2(w * w2 * tmp)                                
-                sdpsi2R = cp.fft.ifft2(w * tmp)
-                
-                sdpsi1RR = self.S(rj,-0.5*psi*Rdu1*Rdu2)# 0.5 since there is 2* later, not sure why
-                sdpsi2RR = self.S(rj,-0.5*psi*Rdu2*Rdu2)
-
-                mspsi = self.M(self.S(r[:,j], psi),j)  
-                dv1 = q[j] * self.M(sdpsi1R+dt1,j)+dq1[j]*mspsi#[:,j]
-                dv2 = q[j] * self.M(sdpsi2R+dt2,j)+dq2[j]*mspsi#[:,j]
-                
-                d2v1 = q[j]*self.M(2*sdpsi1RR+dt12+dt1R+d2t1,j)
-                d2v1 += dq1[j]*self.M(sdpsi2R+dt2,j)
-                d2v1 += dq2[j]*self.M(sdpsi1R+dt1,j)
-
-                d2v2 = q[j]*self.M(2*sdpsi2RR+2*dt2R+d2t2,j)
-                d2v2 += 2*dq2[j]*self.M(sdpsi2R+dt2,j)
-                                
-                # top and bottom parts
-                Ddv1 = self.D(dv1,j)
-                Ddv2 = self.D(dv2,j)
-                
-                big_psi = self.D(mspsi*q[j],j) 
-                td = d[:,j] * (big_psi / (cp.abs(big_psi)))
-                gradF = self.DT(2 * (big_psi - td), j)
-
-                top = redot(gradF, d2v1) + self.hessian_F(big_psi, Ddv1, Ddv2, d[:,j])
-                res[0] += top
-                
-        _hess(self, res,  r, dr1, dr2, psi,Rdu1, Rdu2, d, q, dq1, dq2)  
-        if flg:
-            for k in range(1,len(res)):
-                res[0][0] += res[k][0]
-                res[0][1] += res[k][1]
-            res = res[0]      
+        y42 = (-1j)*self.RT(y32*cp.conj(psi))
         
-        top = cp.float32((res[0]).get()) 
-        return top
+        return [y31,y42,y33]
+    
+    def d2F4(self,x,y,z):
+        x41,x42,x43,x44 = x
+        y41,y42,y43,y44 = y
+        z41,z42,z43,z44 = z
+        
+        if y is z:
+            y32 = x44*(-y44**2)
+        else:
+            y32 = x44*(-y44*z44)
+        
+        return [cp.zeros_like(y41),y32,cp.zeros_like(y43)]
+    
+    ####### Cascade hessian
+    def hessian_new(self,vars,grads,etas,data):     
+        x = [vars['q'],vars['u'],vars['r'],vars['psi']]
+        y = [grads['q'],grads['u'],grads['r'],grads['Ru']]
+        z = [etas['q'],etas['u'],etas['r'],etas['Ru']]
+        out = 0
+        for id in range(1,len(self.d2f))[::-1]:                        
+            
+            d2f = self.d2f[id](x,y,z)
+            dfy = self.df[id](x,y)
+            if y is z:    
+                dfz = dfy[1]
+            else:
+                dfz = self.df[id](x,z,return_x=False)         
+
+            x,y = dfy
+            z = dfz
+            d2f = [x,d2f]
+            for idg in range(1,id)[::-1]:
+                d2f = self.df[idg](*d2f)            
+            d2f = self.df[0](*d2f,data)            
+            out += d2f
+            
+        out += self.d2f[0](x,y,z,data)     
+        out = np.float32(out.get())                        
+        return out
+    
+    ####### Cascade gradients
+    def gradients_new(self,vars,data):   
+        x = [vars['q'],vars['u'],vars['r'],vars['psi']]
+        y = x
+        for id in range(1,len(self.f))[::-1]:
+            y = self.f[id](y)
+        y = self.gf[0](x,y,data)        
+        for id in range(1,len(self.gf)):
+            y = self.gf[id](x,y)        
+        grads = {}
+        grads['q'],grads['u'],grads['r'] = y
+        return grads
+    
+    def BH(self, d, vars):
+        
+        for i in range(self.niter):            
+            self.error_debug(vars, d, i)
+            self.vis_debug(vars, i)
+            # grads = self.gradients(vars, d)
+            grads = self.gradients_new(vars, d)
+            grads['Ru']=self.R(grads['u'])
+            if i == 0:
+                etas = {}
+                etas["u"] = self.mulc_batch(grads['u'],-self.rho[0]**2)
+                etas["q"] = self.mulc_batch(grads['q'],-self.rho[1]**2)
+                etas["r"] = self.mulc_batch(grads['r'],-self.rho[2]**2)
+            else:
+                grads['u']*=self.rho[0]**2
+                grads['q']*=self.rho[1]**2
+                grads['r']*=self.rho[2]**2
+                top = self.hessian_new(vars,grads,etas,d)
+                grads['u']/=self.rho[0]**2
+                grads['q']/=self.rho[1]**2
+                grads['r']/=self.rho[2]**2
+                bottom = self.hessian_new(vars,etas,etas,d)
+                beta = top/bottom
+                print(f'{beta=}')
+
+                # beta = self.calc_beta(vars, grads, etas, d);# print(f'{beta=}')
+                # print(beta)                
+
+                self.linear_batch(etas['u'],grads['u'],beta, -self.rho[0]**2)                
+                self.linear_batch(etas['q'],grads['q'],beta, -self.rho[1]**2)                                
+                self.linear_batch(etas['r'],grads['r'],beta, -self.rho[2]**2)
+            etas["Ru"] = self.R(etas["u"])
+
+            alpha, top, bottom = self.calc_alpha(vars, grads, etas, d);
+            top = -(redot(grads['u'],etas['u'])+
+                    redot(grads['q'],etas['q'])+
+                    redot(grads['r'],etas['r'])).get()
+            bottom= self.hessian_new(vars,etas,etas,d)
+            alpha = top/bottom
+            print(f'{alpha=},{top=},{bottom=}')
+            # alpha, top, bottom = self.calc_alpha(vars, grads, etas, d);
+            # print(alpha,top,bottom)
+            grads = []
+            # debug approxmation
+            self.plot_debug(vars, etas, top, bottom, alpha, d, i)
+            self.linear_batch(vars["u"],etas['u'],1,alpha)
+            self.linear_batch(vars["q"],etas['q'],1,alpha)
+            self.linear_batch(vars["r"],etas['r'],1,alpha)
+            self.R(vars["u"],out=vars["psi"])
+            self.expR(vars['psi'],out=vars["psi"])
+            

@@ -312,7 +312,7 @@ class Rec:
                     drx = (ix - (rx - rix)).astype("float32")
                     dry = (iy - (ry - riy)).astype("float32")
 
-                    # T_{x32}(y33)
+                    # T_{y32}(x33)
                     w = (cp.cos(cp.pi / 2 * drx) * cp.cos(cp.pi / 2 * dry)) ** 2
                     y22[:, k] += w[:, np.newaxis, np.newaxis] *  ishift(y32,rix + ix, riy + iy)
 
@@ -437,9 +437,9 @@ class Rec:
 
     def gF3(self, x, y):
         y31, y32, y33 = y
-        q, u, r, psi = x
-
-        y42 = (-1j) * self.RT(y32 * cp.conj(psi))
+        x31, x32, x33, x34 = x
+        
+        y42 = (-1j) * self.RT(y32 * cp.conj(x34))
 
         return [y31, y42, y33]
 

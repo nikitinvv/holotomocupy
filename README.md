@@ -25,6 +25,7 @@ This software package presents a family of novel algorithms, encapsulated in an 
 conda create -n holotomocupy -c conda-forge cupy dxchange setuptools matplotlib psutil jupyter matplotlib-scalebar
 conda activate holotomocupy
 cd holotomocupy; pip install -e .
+```
 
 ## Performance tests
 

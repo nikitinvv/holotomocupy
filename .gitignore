@@ -218,4 +218,3 @@ coded_apertures/3d_ald/data/*
 
 report*
 *.tiff
-*.npy

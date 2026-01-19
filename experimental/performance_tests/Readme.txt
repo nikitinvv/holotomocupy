@@ -10,9 +10,9 @@ python rec_iterative.py config1.conf
 #Output example:
 
 python rec_iterative.py config1.conf 
-12:46:41 ngpus=4 n=512 ntheta=900 iter=0 err=6.88578e-02
-12:47:04 ngpus=4 n=512 ntheta=900 iter=1 err=1.06501e-02
-12:47:19 ngpus=4 n=512 ntheta=900 iter=2 err=4.94378e-03
+13:41:07 ngpus=4 n=512 ntheta=1200 iter=0 err=6.88637e-02
+13:41:16 ngpus=4 n=512 ntheta=1200 iter=1 err=8.03636e-03
+13:41:31 ngpus=4 n=512 ntheta=1200 iter=2 err=4.06956e-03
 
 In config1.conf file please change in_file name and output folder.
 

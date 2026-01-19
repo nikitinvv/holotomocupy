@@ -699,10 +699,12 @@ class Rec:
         for k in range(0, npp):            
             self.linear_batch(obj,dobj,1,t[k],out=objt)
             self.linear_batch(prb,dprb,1,t[k],out=prbt)
-            self.linear_batch(pos,dpos,1,t[k],out=post)            
-            err_real[k] = self.min(prbt, objt, post)
-
-        err_approx = self.min(prb, obj, pos) - top * t + 0.5 * bottom * t**2
+            self.linear_batch(pos,dpos,1,t[k],out=post)  
+            ewave = self.fwd_tomo(objt,exp=True)
+            err_real[k] = self.min(prbt, objt, post,ewave)
+        
+        ewave = self.fwd_tomo(obj,exp=True)
+        err_approx = self.min(prb, obj, pos,ewave) - top * t + 0.5 * bottom * t**2
         mshow_approx(t,err_real,err_approx,self.show)
 
     def vis_debug(self, vars, i):

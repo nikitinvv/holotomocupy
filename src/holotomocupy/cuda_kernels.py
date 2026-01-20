@@ -105,12 +105,12 @@ extern "C" void __global__ pad(float2* g, float2* f, int n, int nz, int ntheta, 
 )
 
 fun_phi = r"""
-__device__ float phi(float t, float m)
+__device__ float phi(float t)
 {
     int sgn = 0;
     float w = 0;
 
-    t /= m;
+    
 
     if (-2 < t && t <= -1)
     {
@@ -135,12 +135,12 @@ __device__ float phi(float t, float m)
 """
 
 fun_dphi = r"""
-__device__ float dphi(float t, float m)
+__device__ float dphi(float t)
 {
     int sgn = 0;
     float w = 0;
 
-    t /= m;
+    
 
     if (-2 < t && t <= -1)
     {
@@ -160,18 +160,16 @@ __device__ float dphi(float t, float m)
         w = 0;
     }
 
-    w /= m;
     return w;
 }
 """
 
 fun_d2phi = r"""
-__device__ float d2phi(float t, float m)
+__device__ float d2phi(float t)
 {
     int sgn = 0;
     float w = 0;
-
-    t /= m;
+    
 
     if (-2 < t && t <= -1)
     {
@@ -191,7 +189,6 @@ __device__ float d2phi(float t, float m)
         w = 0;
     }
 
-    w /= (m * m);
     return w;
 }
 """
@@ -234,13 +231,13 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
     if (dir == 0) g0 = {};
     else g0 = g[g_ind];
 
-    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
-        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
         {
             dxm = dx - jx;
             dym = dy - jy;
 
-            w = phi(dxm, mag[0]) * phi(dym, mag[0]);
+            w = phi(dxm) * phi(dym);
 
             f_indx = (ix + jx + npsi) % npsi;
             f_indy = (iy + jy + nzpsi) % nzpsi;
@@ -303,14 +300,14 @@ void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
     Deltarx = Deltar[2 * tz + 1];
     Deltary = Deltar[2 * tz + 0];
 
-    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
-        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
         {
             dxm = dx - jx;
             dym = dy - jy;
 
-            w = dphi(dxm, mag[0]) * phi(dym, mag[0]) * Deltarx
-              + dphi(dym, mag[0]) * phi(dxm, mag[0]) * Deltary;
+            w = dphi(dxm) * phi(dym) * Deltarx
+              + dphi(dym) * phi(dxm) * Deltary;
 
             indx = (ix + jx + npsi) % npsi;
             indy = (iy + jy + nzpsi) % nzpsi;
@@ -370,16 +367,16 @@ void __global__ d2t(float2* res, float2* c, float* r, float* mag,
     Deltar2x = Deltar2[2 * tz + 1];
     Deltar2y = Deltar2[2 * tz + 0];
 
-    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
-        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
         {
             dxm = dx - jx;
             dym = dy - jy;
 
-            w  = d2phi(dxm, mag[0]) * phi(dym, mag[0]) * Deltar1x * Deltar2x;
-            w += dphi(dxm, mag[0]) * dphi(dym, mag[0])
+            w  = d2phi(dxm) * phi(dym) * Deltar1x * Deltar2x;
+            w += dphi(dxm) * dphi(dym)
                  * (Deltar1x * Deltar2y + Deltar1y * Deltar2x);
-            w += phi(dxm, mag[0]) * d2phi(dym, mag[0]) * Deltar1y * Deltar2y;
+            w += phi(dxm) * d2phi(dym) * Deltar1y * Deltar2y;
 
             indx = (ix + jx + npsi) % npsi;
             indy = (iy + jy + nzpsi) % nzpsi;
@@ -432,14 +429,14 @@ void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
     float2 dt10 = {};
     float2 dt20 = {};
 
-    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
-        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
         {
             dxm = dx - jx;
             dym = dy - jy;
 
-            w1 = -dphi(dym, mag[0]) * phi(dxm, mag[0]);
-            w2 = -dphi(dxm, mag[0]) * phi(dym, mag[0]);
+            w1 = -dphi(dym) * phi(dxm);
+            w2 = -dphi(dxm) * phi(dym);
 
             indx = (ix + jx + npsi) % npsi;
             indy = (iy + jy + nzpsi) % nzpsi;
@@ -459,4 +456,109 @@ void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
 }
 """,
     "dtadj",
+)
+
+
+
+
+# extra for paganin
+
+
+fun_phi_back = r"""
+__device__ float phi(float t, float m)
+{
+    int sgn = 0;
+    float w = 0;
+
+    t /= m;
+
+    if (-2 < t && t <= -1)
+    {
+        w = (t + 2) * (t + 2) * (t + 2);
+    }
+    else if (-1 < t && t <= 1)
+    {
+        sgn = (t > 0) ? 1 : ((t < 0) ? -1 : 0);
+        w = 4 - 6 * t * t + 3 * t * t * t * sgn;
+    }
+    else if (1 < t && t <= 2)
+    {
+        w = (2 - t) * (2 - t) * (2 - t);
+    }
+    else
+    {
+        w = 0;
+    }
+
+    return w;
+}
+"""
+
+sback_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi_back
+    + r"""
+void __global__ sback(float2* g, float2* f, float* r, float* mag,
+                  int n, int npsi, int nz, int nzpsi, int ntheta, bool dir)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int ix, iy;
+    int f_indx, f_indy, f_ind, g_ind;
+    float x, y;
+    float dx, dy;
+    float dxm, dym;
+    float w;
+    float2 g0;
+
+    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
+    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+
+    ix = (int)floorf(x);
+    iy = (int)floorf(y);
+
+    dx = x - ix;
+    dy = y - iy;
+
+    g_ind = tx + ty * n + tz * n * nz;
+
+    if (dir == 0) g0 = {};
+    else g0 = g[g_ind];
+
+    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
+        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+        {
+            dxm = dx - jx;
+            dym = dy - jy;
+
+            w = phi(dxm, mag[0]) * phi(dym, mag[0]);
+
+            f_indx = (ix + jx + npsi) % npsi;
+            f_indy = (iy + jy + nzpsi) % nzpsi;
+            f_ind = f_indx + f_indy * npsi + tz * npsi * nzpsi;
+
+            if (dir == 0)
+            {
+                g0.x += w * f[f_ind].x;
+                g0.y += w * f[f_ind].y;
+            }
+            else
+            {
+                atomicAdd(&(f[f_ind].x), w * g0.x);
+                atomicAdd(&(f[f_ind].y), w * g0.y);
+            }
+        }
+
+    if (dir == 0) g[g_ind] = g0;
+}
+}
+""",
+    "sback",
 )

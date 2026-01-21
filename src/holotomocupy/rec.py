@@ -108,9 +108,11 @@ class Rec:
 
             # compute gradients
             self.gradients(vars, grads)
+
+            
             
             # scale
-            for v in ["obj", "prb", "pos"]:
+            for v in ["obj", "prb", "pos"]:                
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
             # keep projections in memory
             
@@ -136,7 +138,7 @@ class Rec:
                 top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
             
             bottom = self.hessian(vars, etas, etas)            
-            alpha = top / bottom
+            alpha = top / bottom            
             
             # check approximation with the Hessian
             self.check_approximation(vars, etas, top, bottom, alpha, i)
@@ -278,14 +280,16 @@ class Rec:
             y = d 
             # compute gradient by applying operators in forward order
             for id in range(0, len(self.gF) - 1):  #last one computed separately because of different chunking
-                y = self.gF[id](x,y)            
+                y = self.gF[id](x,y)                           
             gradprb[:] += y[0]
             gradproj[:] = y[1]
             gradpos[:] = y[2]
+            
         _gradients_cascade(self,gradproj,gradpos,gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
         gradprb = sum(gradprb[1:], gradprb[0])
     
         # part2, parallelization over object slices
+        
         y = [gradprb,gradproj,gradpos]                
         y = self.gF[-1](x, y)
         return y        
@@ -627,9 +631,10 @@ class Rec:
             x = self.F[id](x)
         x31,x32,x33 = x
 
-        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype="complex64")
+        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype=self.obj_dtype)
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
         igpu = cp.cuda.Device().id
+        
         for k in range(self.ndist):
             Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadj(x32, x33[:, k], k, y22[:, k])
             y32[:] += Deltapsi

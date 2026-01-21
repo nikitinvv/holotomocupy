@@ -146,6 +146,8 @@ class Shift():
 
     def curlyS(self, psi, r, imagn):
         out=self.S(self.coeff(psi),r,imagn)
+        if psi.dtype=='float32':
+            out=out.real
         return out
        
         
@@ -153,13 +155,18 @@ class Shift():
         c=self.coeff(psi) 
         c1=self.coeff(Deltapsi)
         out = self.dS(c,r,imagn,c1)+self.dT(c,r,imagn,Deltar)
+        if psi.dtype=='float32':
+            out=out.real
         return out
    
     def dcurlySadj(self, psi, r, imagn, Deltaphi):
+        Deltaphi = Deltaphi.astype('complex64')# temporarily
         c = self.coeff(psi)
         out1 = self.coeff(self.dSadj(c, r, imagn, Deltaphi))
         
         out2 = self.dTadj(c, r, imagn, Deltaphi)
+        if psi.dtype=='float32':
+            out1=out1.real
         out = [out1, out2]
         return out
    
@@ -169,9 +176,9 @@ class Shift():
         c1=self.coeff(Deltapsi1)
         c2=self.coeff(Deltapsi2)
         out = self.dT(c1, r, imagn, Deltar2)+self.dT(c2, r, imagn, Deltar1)+self.d2T(c, r, imagn, Deltar1, Deltar2)
-        return out
-        
-
+        if psi.dtype=='float32':
+            out=out.real
+        return out        
 
     ##extra shifts for forming the intiial guess for paganin
     def Sback(self, spsi, r, imagn):

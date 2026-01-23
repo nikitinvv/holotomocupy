@@ -154,15 +154,40 @@ class Chunking:
         for k in range(proper_inp, proper_inp + nonproper_inp):
             inp[k] = cp.asarray(inp[k])
 
+        def cpu_to_pinned_copy(k):
+            """Initiate cpu->pinned multhreaded copy"""
+
+            st, end = k * self.chunk, min(size, (k + 1) * self.chunk)
+            src = self.mk_slices(axis_inp, slice(st, end))
+            dst = self.mk_slices(axis_inp, slice(0, end - st))
+            futures_inp = []
+            for j in range(proper_inp):
+                futures_inp.append(self.copy(inp[j][src], inp_pinned[k % 2][j][dst], pool_inp))            
+            return futures_inp
+
+        def pinned_to_cpu_copy(k):
+            """Initiate pinned->cpu multhreaded copy"""
+
+            st, end = k * self.chunk, min(size, (k + 1) * self.chunk)
+            src = self.mk_slices(axis_out, slice(0, end - st))
+            dst = self.mk_slices(axis_out, slice(st, end))
+            futures_out = []
+            for j in range(proper_out):
+                futures_out.append(self.copy(out_pinned[k % 2][j][src], out[j][dst], pool_out))
+            return futures_out
+        
         # run by chunks, overlap data transfers and computations
         for k in range(nchunk + 2):
-            if k < nchunk:#run cpu threads for cpu ->pinned trasnfers, not waiting for them here
-                st, end = k * self.chunk, min(size, (k + 1) * self.chunk)
-                src = self.mk_slices(axis_inp, slice(st, end))
-                dst = self.mk_slices(axis_inp, slice(0, end - st))
-                futures_inp = []
-                for j in range(proper_inp):
-                    futures_inp.append(self.copy(inp[j][src], inp_pinned[k % 2][j][dst], pool_inp))                    
+            if k < nchunk:
+                with stream[0]:  # cpu->pinned->gpu
+
+                    cpu_pinned_threads = cpu_to_pinned_copy(k)
+                    for f in cpu_pinned_threads:
+                        wait(f)
+
+                    st, end = k * self.chunk, min(size, (k + 1) * self.chunk)
+                    for j in range(proper_inp):
+                        inp_gpu[k % 2][j].set(inp_pinned[k % 2][j])
 
             if k > 0 and k < nchunk + 1:
                 with stream[1]:  # processing
@@ -181,33 +206,22 @@ class Chunking:
                     )
 
             if k > 1:
-                with stream[2]:  # gpu->pinned copy
+                with stream[2]:  # gpu->pinned->cpu copy
                     for j in range(proper_out):
-                        out_gpu[(k - 2) % 2][j].get(out=out_pinned[(k - 2) % 2][j], blocking=False)
+                        out_gpu[k % 2][j].get(out=out_pinned[k % 2][j], blocking=False)
+                            
+                    stream[2].synchronize()
+                    pinned_cpu_threads = pinned_to_cpu_copy(k-2)
+                    for f in pinned_cpu_threads:
+                        wait(f)        
 
-            if k < nchunk:
-                #wait cpu threads copying to pinned
-                for f in futures_inp:
-                    wait(f)
-                with stream[0]:  # pinned->gpu copy
-                    st, end = k * self.chunk, min(size, (k + 1) * self.chunk)
-                    src = self.mk_slices(axis_inp, slice(st, end))
-                    dst = self.mk_slices(axis_inp, slice(0, end - st))                    
-                    for j in range(proper_inp):
-                        inp_gpu[k % 2][j].set(inp_pinned[k % 2][j])
 
-            stream[2].synchronize()
-            if k > 1:  # pinned->cpu copy
-                st, end = (k - 2) * self.chunk, min(size, (k - 1) * self.chunk)
-                src = self.mk_slices(axis_out, slice(0, end - st))
-                dst = self.mk_slices(axis_out, slice(st, end))
-                futures_out = []
-                for j in range(proper_out):
-                    futures_out.append(self.copy(out_pinned[k % 2][j][src], out[j][dst], pool_out))
-                for f in futures_out:
-                    wait(f)        
+            ### these should not be needed but doesnt work without... to check
             stream[0].synchronize()
             stream[1].synchronize()
+            
+            ## stream switch [0,1,2]->[2,0,1]->[1,2,0]...
+            stream = stream[-1:]+stream[:2]            
             
 
     def alloc_double_buffers(self, arrs, axis, pinned_mem, gpu_mem, offset, chunk):

@@ -100,16 +100,14 @@ class Rec:
         vars["obj"] /= self.norm_const
         # precalculate proj
         vars["proj"] = self.fwd_tomo(vars["obj"])
-        
+        self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
             # error and visualization debug
             self.error_debug(vars, i)
             self.vis_debug(vars, i)
 
             # compute gradients
-            self.gradients(vars, grads)
-
-            
+            self.gradients(vars, grads)            
             
             # scale
             for v in ["obj", "prb", "pos"]:                
@@ -794,8 +792,10 @@ class Rec:
             return
             
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
-        print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {err=:1.5e}", flush=True)
-        self.table.loc[len(self.table)] = [i, err, time.time()]
+        ittime = time.time()-self.time_start
+        print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {ittime=:.0f}s {err=:1.5e} ", flush=True)                
+        self.table.loc[len(self.table)] = [i, err, ittime]
+        self.time_start = time.time()
         name = f"{self.path_out}/conv.csv"
         os.makedirs(os.path.dirname(name), exist_ok=True)
         self.table.to_csv(name, index=False)

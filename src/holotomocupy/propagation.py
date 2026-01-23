@@ -1,4 +1,4 @@
-import numpy as np
+import math
 import cupy as cp
 from .cuda_kernels import *
 from .utils import *
@@ -25,7 +25,7 @@ class Propagation:
         [ntheta, nz, n] = f.shape
         fpad = cp.zeros([ntheta, 2 * nz, 2 * n], dtype="complex64")
         pad_kernel(
-            (int(cp.ceil(2 * n / 32)), int(cp.ceil(2 * nz / 32)), ntheta),
+            (math.ceil(2 * n / 32), math.ceil(2 * nz / 32), ntheta),
             (32, 32, 1),
             (fpad, f, n, nz, ntheta, 0),
         )
@@ -38,7 +38,7 @@ class Propagation:
         nz //=2
         f = cp.zeros([ntheta, nz, n], dtype="complex64")
         pad_kernel(
-            (int(cp.ceil(2 * n / 32)), int(cp.ceil(2 * nz / 32)), ntheta),
+            (math.ceil(2 * n / 32), math.ceil(2 * nz / 32), ntheta),
             (32, 32, 1),
             (fpad, f, n, nz, ntheta, 1),
         )

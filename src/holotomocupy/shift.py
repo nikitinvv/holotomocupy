@@ -1,6 +1,6 @@
 import numpy as np
 import cupy as cp
-
+import math
 from .cuda_kernels import *
 from .utils import *
 
@@ -45,8 +45,8 @@ class Shift():
         maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         s_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),
@@ -63,8 +63,8 @@ class Shift():
         
         s_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),
@@ -90,8 +90,8 @@ class Shift():
         maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         dt_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),
@@ -110,8 +110,8 @@ class Shift():
         maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         dtadj_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),
@@ -133,8 +133,8 @@ class Shift():
         maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         d2t_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),
@@ -190,8 +190,8 @@ class Shift():
         
         sback_kernel(
                     (
-                        int(cp.ceil(self.n / 32)),
-                        int(cp.ceil(self.nz / 32)),
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
                         ntheta,
                     ),
                     (32, 32, 1),

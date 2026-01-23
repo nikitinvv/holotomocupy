@@ -6,6 +6,7 @@ import warnings
 import pandas as pd
 import cupyx.scipy.ndimage as ndimage
 from datetime import datetime
+import nvtx
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -102,6 +103,7 @@ class Rec:
         vars["proj"] = self.fwd_tomo(vars["obj"])
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
+            nvtx.push_range("::BH:"+str(i))
             # error and visualization debug
             self.error_debug(vars, i)
             self.vis_debug(vars, i)
@@ -117,26 +119,39 @@ class Rec:
             self.fwd_tomo(grads["obj"], out=grads["proj"])
             
             if i == self.start_iter:
+                nvtx.push_range(":::BH:mulc_batch")
                 # initial search direction (negative gradient)
                 for v in ["obj", "prb", "pos"]:
                     self.mulc_batch(etas[v], grads[v], -1)
+                nvtx.pop_range()
             else:
                 # calc beta using Hessian-weighted inner products
+                nvtx.push_range(":::BH:hessian")
                 beta = self.hessian(vars, grads, etas) / self.hessian(vars, etas, etas)
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)
+                nvtx.pop_range()
             
-            # keep projections in memory            
+            # keep projections in memory  
+            nvtx.push_range(":::BH:fwd_tomo")          
             self.fwd_tomo(etas["obj"], out=etas["proj"])
+            nvtx.pop_range()
             
             # calc alpha (step length)            
+            nvtx.push_range(":::BH:redot_batch")
             top = 0
             for v in ["obj", "prb", "pos"]:
                 top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
-            
+
+            nvtx.pop_range()
+            nvtx.push_range(":::BH:hessian1")
             bottom = self.hessian(vars, etas, etas)            
-            alpha = top / bottom            
+            nvtx.pop_range()      
+
+            nvtx.push_range(":::BH:rest")
+            alpha = top / bottom     
+            
             
             # check approximation with the Hessian
             self.check_approximation(vars, etas, top, bottom, alpha, i)
@@ -144,10 +159,14 @@ class Rec:
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)
+            nvtx.pop_range()
             
             
-            # update proj for current u            
+            # update proj for current u  
+            nvtx.push_range(":::BH:fwd_tomo")          
             self.fwd_tomo(vars["obj"], out=vars["proj"])
+            nvtx.pop_range()
+            nvtx.pop_range()         
                         
         # normalize back
         vars["obj"] *= self.norm_const
@@ -161,9 +180,11 @@ class Rec:
         2. probe fit term,
         3. regularization term"""
 
+        nvtx.push_range("hessian")
         w = self.hessian_cascade(vars, grads, etas)
         w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
         w += self.hessian_reg(vars["obj"], grads["obj"], etas["obj"])
+        nvtx.pop_range()
         return w
 
     def hessian_cascade(self, vars, grads, etas):
@@ -190,6 +211,7 @@ class Rec:
             x1, y1, z1, 
             x0, y0, z0, 
         ):
+            nvtx.push_range("hessian_cascade")
             # reorganize inputs into ordered lists for cascade traversal
             x = [x0, x1, x2]
             y = [y0, y1, y2]
@@ -229,6 +251,7 @@ class Rec:
                 x = fx
 
             # accumulate scalar result into per-GPU accumulator
+            nvtx.pop_range()
             out[:] += w
 
         _hessian_cascade(
@@ -246,10 +269,12 @@ class Rec:
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
         3. regularization term"""
-
+        
+        nvtx.push_range("gradients")
         grads["prb"], grads["obj"], grads["pos"] = self.gradients_cascade(vars)
         self.gradient_prbfit(grads["prb"], vars["prb"])
         self.gradient_reg(grads["obj"], vars["obj"])
+        nvtx.pop_range()
         
     def gradients_cascade(self, vars):
         """Cascade gradient for the main term
@@ -274,6 +299,7 @@ class Rec:
         
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
         def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):
+            nvtx.push_range("gradients_cascade")
             x = [prb, proj, pos]
             y = d 
             # compute gradient by applying operators in forward order
@@ -282,7 +308,7 @@ class Rec:
             gradprb[:] += y[0]
             gradproj[:] = y[1]
             gradpos[:] = y[2]
-            
+            nvtx.pop_range()
         _gradients_cascade(self,gradproj,gradpos,gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
         gradprb = sum(gradprb[1:], gradprb[0])
     
@@ -370,6 +396,7 @@ class Rec:
 
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _fwd_proj(self, out, proj, pos, prb):
+            nvtx.push_range("fwd_proj")
             x = [prb, proj, pos]
             y = x  # forming output
             # compute functional by applying operators in reverse order
@@ -377,6 +404,7 @@ class Rec:
                 y = self.F[id](y)
                 
             out[:] = y
+            nvtx.pop_range()
 
         _fwd_proj(self, out, proj, pos, prb)
         return out
@@ -389,8 +417,10 @@ class Rec:
 
         @self.gpu_batch(axis_out=1, axis_inp=0,nout=1)
         def _fwd_tomo(self, out, obj):
+            nvtx.push_range("fwd_tomo")
             igpu = cp.cuda.Device().id
             out[:] = self.cl_tomo[igpu].R(obj)
+            nvtx.push_range("fwd_tomo")
             
         _fwd_tomo(self, out, obj)
         return out    
@@ -404,11 +434,13 @@ class Rec:
 
 
     ####### F0(x0) = 1/n\||x0|-d\|_2^2
+    @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
         x0 = x
         return cp.linalg.norm(cp.abs(x0) - d) ** 2 / self.data_size
 
+    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
         
@@ -417,7 +449,8 @@ class Rec:
 
         tmp = 2 * (x - d * (x0 / cp.abs(x0)))
         return redot(tmp, y0) / self.data_size
-
+    
+    @nvtx.annotate("d2F0", color="green")
     def d2F0(self, x, y, z, d):
         """In: (x0,y0,z0), Out: const"""
         
@@ -431,6 +464,7 @@ class Rec:
         v2 = cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))
         return 2 * (v1 + v2)/ self.data_size
     
+    @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
         
@@ -443,6 +477,7 @@ class Rec:
         return y0
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
+    @nvtx.annotate("F1", color="green")
     def F1(self, x):
         """In: (x11,x12), Out: x0"""
 
@@ -454,7 +489,8 @@ class Rec:
             x0[:, j] = self.cl_prop[igpu].D(x11[j] * x12[:, j], j)
         
         return x0
-
+    
+    @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
         """In: (x11,x12),(y11,y12) Out: y0"""
 
@@ -472,6 +508,7 @@ class Rec:
 
         return (x0, y0) if return_x else y0
     
+    @nvtx.annotate("d2F1", color="green")
     def d2F1(self, x, y, z):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
 
@@ -489,6 +526,7 @@ class Rec:
 
         return y0
     
+    @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
@@ -510,6 +548,7 @@ class Rec:
         return y11, y12        
 
     ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
+    @nvtx.annotate("F2", color="green")
     def F2(self, x):
         """In: (x21,x22) Out: (x11,x12)"""
 
@@ -518,6 +557,7 @@ class Rec:
         x12 = cp.exp(1j*x22)
         return x11, x12
 
+    @nvtx.annotate("dF2", color="green")
     def dF2(self, x, y, return_x=True):
         """In: (x21,x22),(y21,y22) Out: (x11,x12),(y11,y12)"""
 
@@ -532,6 +572,7 @@ class Rec:
 
         return ([x11, x12], [y11, y12]) if return_x else [y11, y12]
 
+    @nvtx.annotate("d2F2", color="green")
     def d2F2(self, x, y, z):
         """In: (x21,x22),(y21,y22),(z21,z22) Out: (y11,y12)"""
 
@@ -548,6 +589,7 @@ class Rec:
         
         return [y11, y12]
     
+    @nvtx.annotate("gF2", color="green")
     def gF2(self,x,y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
@@ -565,6 +607,7 @@ class Rec:
         return [y21, y22]
     
     ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
+    @nvtx.annotate("F3", color="green")
     def F3(self, x):
         """In: (x31, x32, x33)  Out: (x21,x22)"""
 
@@ -578,6 +621,7 @@ class Rec:
         x21 = x31
         return [x21, x22]
 
+    @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
         """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
         
@@ -602,6 +646,7 @@ class Rec:
         y21 = y31
         return ([x21, x22], [y21, y22]) if return_x else [y21, y22]
 
+    @nvtx.annotate("d2F3", color="green")
     def d2F3(self, x, y, z):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33)  Out: (y21, y22)"""
         
@@ -620,6 +665,7 @@ class Rec:
         
         return [y21, y22]
     
+    @nvtx.annotate("gF3", color="green")
     def gF3(self, x, y):     
         """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""   
 
@@ -643,6 +689,7 @@ class Rec:
     
     ######## (x31,x32,x33) = F4(x41,x42,x43) = (x41,R(x42),x43)
     # F4=R(x),dF4=R(y),d2F4=0: Rx,Ry are stored between iterations    
+    @nvtx.annotate("gF4", color="green")
     def gF4(self, x, y):
         """In: x(x01, x02, x03) ,(y31,y32,y33) Out: (y41,y42,y43)"""   
         y31, y32, y33 = y

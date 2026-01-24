@@ -1,6 +1,6 @@
 import numpy as np
 import cupy as cp
-
+import math
 from .cuda_kernels import *
 from .utils import *
 
@@ -12,7 +12,7 @@ class Tomo:
         """Usfft parameters"""
         eps = 1e-3  # accuracy of usfft
         mu = -cp.log(eps) / (2 * n * n)
-        m = int(cp.ceil(2 * n * 1 / cp.pi * cp.sqrt(-mu * cp.log(eps) + (mu * n) * (mu * n) / 4)))
+        m = math.ceil(2 * n * 1 / cp.pi * cp.sqrt(-mu * cp.log(eps) + (mu * n) * (mu * n) / 4))
         # extra arrays
         # interpolation kernel
         t = cp.linspace(-1 / 2, 1 / 2, n, endpoint=False).astype("float32")
@@ -64,7 +64,7 @@ class Tomo:
         mua = cp.array([mu], dtype="float32")
 
         gather_kernel(
-            (int(cp.ceil(n / 32)), int(cp.ceil(self.ntheta / 32)), nz),
+            (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
             (32, 32, 1),
             (sino, fde, theta, m, mua, n, self.ntheta, nz, 0),
         )
@@ -109,7 +109,7 @@ class Tomo:
         mua = cp.array([mu], dtype="float32")
         fde = cp.zeros([nz, 2 * n, 2 * n], dtype="complex64")
         gather_kernel(
-            (int(cp.ceil(n / 32)), int(cp.ceil(self.ntheta / 32)), nz),
+            (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
             (32, 32, 1),
             (sino, fde, theta, m, mua, n, self.ntheta, nz, 1),
         )

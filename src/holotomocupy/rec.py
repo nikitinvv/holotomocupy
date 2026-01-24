@@ -6,6 +6,7 @@ import warnings
 import pandas as pd
 import cupyx.scipy.ndimage as ndimage
 from datetime import datetime
+import nvtx
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -25,7 +26,7 @@ class Rec:
 
         # list of functionals, gradients, differentials, and second-order differentials
         self.F = [self.F0, self.F1, self.F2, self.F3]
-        self.gF = [self.gF0, self.gF1, self.gF2, self.gF31, self.gF32]
+        self.gF = [self.gF0, self.gF1, self.gF2, self.gF3, self.gF4]
         self.dF = [self.dF0, self.dF1, self.dF2, self.dF3]
         self.d2F = [self.d2F0, self.d2F1, self.d2F2, self.d2F3]
         self.noper = len(self.F)
@@ -98,46 +99,59 @@ class Rec:
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
-        # precalculate ewave
-        vars["ewave"] = self.fwd_tomo(vars["obj"], exp=True)
-        
+        # precalculate proj
+        vars["proj"] = self.fwd_tomo(vars["obj"])
+        self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
+            nvtx.push_range("::BH:"+str(i))
             # error and visualization debug
             self.error_debug(vars, i)
             self.vis_debug(vars, i)
 
             # compute gradients
-            self.gradients(vars, grads)
+            self.gradients(vars, grads)            
             
             # scale
-            for v in ["obj", "prb", "pos"]:
+            for v in ["obj", "prb", "pos"]:                
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
             # keep projections in memory
             
             self.fwd_tomo(grads["obj"], out=grads["proj"])
             
             if i == self.start_iter:
+                nvtx.push_range(":::BH:mulc_batch")
                 # initial search direction (negative gradient)
                 for v in ["obj", "prb", "pos"]:
                     self.mulc_batch(etas[v], grads[v], -1)
+                nvtx.pop_range()
             else:
                 # calc beta using Hessian-weighted inner products
+                nvtx.push_range(":::BH:hessian")
                 beta = self.hessian(vars, grads, etas) / self.hessian(vars, etas, etas)
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)
+                nvtx.pop_range()
             
-            # keep projections in memory            
+            # keep projections in memory  
+            nvtx.push_range(":::BH:fwd_tomo")          
             self.fwd_tomo(etas["obj"], out=etas["proj"])
+            nvtx.pop_range()
             
             # calc alpha (step length)            
+            nvtx.push_range(":::BH:redot_batch")
             top = 0
             for v in ["obj", "prb", "pos"]:
                 top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
-            
+
+            nvtx.pop_range()
+            nvtx.push_range(":::BH:hessian1")
             bottom = self.hessian(vars, etas, etas)            
+            nvtx.pop_range()      
+
+            nvtx.push_range(":::BH:rest")
+            alpha = top / bottom     
             
-            alpha = top / bottom
             
             # check approximation with the Hessian
             self.check_approximation(vars, etas, top, bottom, alpha, i)
@@ -145,10 +159,14 @@ class Rec:
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)
+            nvtx.pop_range()
             
             
-            # update ewave for current u            
-            self.fwd_tomo(vars["obj"], exp=True, out=vars["ewave"])
+            # update proj for current u  
+            nvtx.push_range(":::BH:fwd_tomo")          
+            self.fwd_tomo(vars["obj"], out=vars["proj"])
+            nvtx.pop_range()
+            nvtx.pop_range()         
                         
         # normalize back
         vars["obj"] *= self.norm_const
@@ -162,9 +180,11 @@ class Rec:
         2. probe fit term,
         3. regularization term"""
 
+        nvtx.push_range("hessian")
         w = self.hessian_cascade(vars, grads, etas)
         w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
         w += self.hessian_reg(vars["obj"], grads["obj"], etas["obj"])
+        nvtx.pop_range()
         return w
 
     def hessian_cascade(self, vars, grads, etas):
@@ -187,10 +207,11 @@ class Rec:
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _hessian_cascade(
             self, out, d,
-            x1, y1, z1, 
             x2, y2, z2, 
+            x1, y1, z1, 
             x0, y0, z0, 
         ):
+            nvtx.push_range("hessian_cascade")
             # reorganize inputs into ordered lists for cascade traversal
             x = [x0, x1, x2]
             y = [y0, y1, y2]
@@ -203,13 +224,13 @@ class Rec:
                     d2f1 = self.d2F[id](x, y, z, d)
                     d2f2 = self.dF[id](x, w, d, return_x=False)
                 else:
-                    d2f1 = self.d2F[id](x, y, z)
+                    d2f1 = self.d2F[id](x, y, z)                                        
                     d2f2 = self.dF[id](x, w, return_x=False)
                     
                 # reuse d2f1 as working accumulator and add contribution from d2f2
                 w = d2f1
                 if isinstance(w, list):
-                    for iv in range(len(w)):
+                    for iv in range(len(w)):                        
                         w[iv] += d2f2[iv]
                 else:
                     w += d2f2
@@ -230,12 +251,13 @@ class Rec:
                 x = fx
 
             # accumulate scalar result into per-GPU accumulator
+            nvtx.pop_range()
             out[:] += w
 
         _hessian_cascade(
             self, out, self.data,
             vars["pos"], grads["pos"], etas["pos"],
-            vars["ewave"], grads["proj"], etas["proj"],
+            vars["proj"], grads["proj"], etas["proj"],
             vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
         )
         # reduce per-GPU accumulators to a single scalar
@@ -247,10 +269,12 @@ class Rec:
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
         3. regularization term"""
-
+        
+        nvtx.push_range("gradients")
         grads["prb"], grads["obj"], grads["pos"] = self.gradients_cascade(vars)
         self.gradient_prbfit(grads["prb"], vars["prb"])
         self.gradient_reg(grads["obj"], vars["obj"])
+        nvtx.pop_range()
         
     def gradients_cascade(self, vars):
         """Cascade gradient for the main term
@@ -262,7 +286,7 @@ class Rec:
             parameters to functions are unified as (x,y,z)
         """
 
-        x = [vars["prb"], vars["obj"], vars["pos"], vars["ewave"]]  # assume ewave is precalculated
+        x = [vars["prb"], vars["obj"], vars["pos"], vars["proj"]]  # assume proj is precalculated
         
         # part1, parallelization over angles
         gradprb = [None]*self.ngpus
@@ -271,27 +295,26 @@ class Rec:
                 gradprb[igpu] = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
         
         gradpos = np.empty([self.ntheta,self.ndist, 2], dtype="float32")
-        gradewave = np.empty([self.ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
+        gradproj = np.empty([self.ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
         
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
-        def _gradients_cascade(self,gradewave,gradpos,gradprb,d,ewave,pos,prb):
-            x = [prb, ewave, pos]
-            y = x  # forming output
-            # compute functional by applying operators in reverse order
-            for id in range(1, len(self.F) - 1)[::-1]:  ####dont take last one, ignore F3
-                y = self.F[id](y)
+        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):
+            nvtx.push_range("gradients_cascade")
+            x = [prb, proj, pos]
+            y = d 
             # compute gradient by applying operators in forward order
-            y = self.gF[0](x, y, d)
-            for id in range(1, len(self.gF) - 1):  
-                y = self.gF[id](x,y)            
+            for id in range(0, len(self.gF) - 1):  #last one computed separately because of different chunking
+                y = self.gF[id](x,y)                           
             gradprb[:] += y[0]
-            gradewave[:] = y[1]
+            gradproj[:] = y[1]
             gradpos[:] = y[2]
-        _gradients_cascade(self,gradewave,gradpos,gradprb,self.data,vars["ewave"],vars["pos"],vars["prb"])
+            nvtx.pop_range()
+        _gradients_cascade(self,gradproj,gradpos,gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
         gradprb = sum(gradprb[1:], gradprb[0])
     
         # part2, parallelization over object slices
-        y = [gradprb,gradewave,gradpos]                
+        
+        y = [gradprb,gradproj,gradpos]                
         y = self.gF[-1](x, y)
         return y        
     
@@ -366,39 +389,39 @@ class Rec:
             out += self.redot_batch(Lobj1, Lobj2)
         return 2 * self.lam_reg * out / self.obj_size
 
-    def fwd_ewave(self, ewave, pos, prb):
-        """Forward operator with precalculated ewave=exp(1j R(u))"""
+    def fwd_proj(self, proj, pos, prb):
+        """Forward operator with precalculated proj=R(u)"""
 
         out = np.empty([self.ntheta, self.ndist, self.nz, self.n], dtype="complex64")
 
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
-        def _fwd_ewave(self, out, ewave, pos, prb):
-            x = [prb, ewave, pos]
+        def _fwd_proj(self, out, proj, pos, prb):
+            nvtx.push_range("fwd_proj")
+            x = [prb, proj, pos]
             y = x  # forming output
             # compute functional by applying operators in reverse order
-            for id in range(1, len(self.F) - 1)[::-1]:  ####dont take last one, ignore F3
+            for id in range(1, len(self.F))[::-1]:  
                 y = self.F[id](y)
+                
             out[:] = y
+            nvtx.pop_range()
 
-        _fwd_ewave(self, out, ewave, pos, prb)
+        _fwd_proj(self, out, proj, pos, prb)
         return out
 
-    def fwd_tomo(self, obj, exp=False, out=None):
+    def fwd_tomo(self, obj, out=None):
         """Forward tomography operator"""
 
         if out is None:
-            if exp:
-                out = np.empty([self.ntheta, obj.shape[0], self.nobj], dtype="complex64")
-            else:
-                out = np.empty([self.ntheta, obj.shape[0], self.nobj], dtype=obj.dtype)
+            out = np.empty([self.ntheta, obj.shape[0], self.nobj], dtype=obj.dtype)
 
         @self.gpu_batch(axis_out=1, axis_inp=0,nout=1)
         def _fwd_tomo(self, out, obj):
+            nvtx.push_range("fwd_tomo")
             igpu = cp.cuda.Device().id
             out[:] = self.cl_tomo[igpu].R(obj)
-            if exp:
-                out[:] = cp.exp(1j * out)
-
+            nvtx.push_range("fwd_tomo")
+            
         _fwd_tomo(self, out, obj)
         return out    
 
@@ -410,90 +433,198 @@ class Rec:
     #######################################################################################
 
 
-    ####### F0(x0) = 1/n\||x|-d\|_2^2
+    ####### F0(x0) = 1/n\||x0|-d\|_2^2
+    @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
-        return cp.linalg.norm(cp.abs(x) - d) ** 2 / self.data_size
+        """In: (x0), Out: const"""
+        x0 = x
+        return cp.linalg.norm(cp.abs(x0) - d) ** 2 / self.data_size
 
+    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
-        tmp = 2 * (x - d * (x / cp.abs(x)))
-        return redot(tmp, y) / self.data_size
+        """In: (x0,y0), Out: const"""
+        
+        x0 = x
+        y0 = y
 
+        tmp = 2 * (x - d * (x0 / cp.abs(x0)))
+        return redot(tmp, y0) / self.data_size
+    
+    @nvtx.annotate("d2F0", color="green")
     def d2F0(self, x, y, z, d):
-        l0 = x / (cp.abs(x))
-        d0 = d / (cp.abs(x))
-        v1 = cp.sum((1 - d0) * reprod(y, z))
-        v2 = cp.sum(d0 * reprod(l0, y) * reprod(l0, z))
+        """In: (x0,y0,z0), Out: const"""
+        
+        x0 = x
+        y0 = y
+        z0 = z
+
+        l0 = x0 / (cp.abs(x0))
+        d0 = d / (cp.abs(x0))
+        v1 = cp.sum((1 - d0) * reprod(y0, z0))
+        v2 = cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))
         return 2 * (v1 + v2)/ self.data_size
     
-    def gF0(self, x, y, d):
-        td = d * (y / (cp.abs(y)))
-        y11 = (2 / self.data_size) * (y - td) 
-        return y11
+    @nvtx.annotate("gF0", color="green")
+    def gF0(self, x, y):
+        """In: x, y = F0(F1(..(x)))), Out: y0"""
+        
+        # calc fwd starting from 1
+        for id in range(1, 4)[::-1]: 
+            x = self.F[id](x)
+                
+        td = y * (x / (cp.abs(x)))
+        y0 = (2 / self.data_size) * (x - td) 
+        return y0
     
-    ####### F1(x21,x22) = D(x21\cdot x22)
+    ####### x0 = F1(x11,x12) = D(x11\cdot x12)
+    @nvtx.annotate("F1", color="green")
     def F1(self, x):
-        x21, x22 = x
-        igpu = cp.cuda.Device().id
-        out = cp.empty([x22.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
-        for j in range(self.ndist):
-            out[:, j] = self.cl_prop[igpu].D(x21[j] * x22[:, j], j)
-        return out
+        """In: (x11,x12), Out: x0"""
 
+        x11, x12 = x
+
+        igpu = cp.cuda.Device().id
+        x0 = cp.empty([x12.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
+        for j in range(self.ndist):
+            x0[:, j] = self.cl_prop[igpu].D(x11[j] * x12[:, j], j)
+        
+        return x0
+    
+    @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
+        """In: (x11,x12),(y11,y12) Out: y0"""
+
+        x11, x12 = x
+        y11, y12 = y
+
+        y0 = cp.empty([x12.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
+        x0 = cp.empty_like(y0) if return_x else None
+
+        igpu = cp.cuda.Device().id
+        for j in range(self.ndist):
+            y0[:, j] = self.cl_prop[igpu].D(y11[j] * x12[:, j] + x11[j] * y12[:, j], j)
+            if return_x:
+                x0[:, j] = self.cl_prop[igpu].D(x11[j] * x12[:, j], j)
+
+        return (x0, y0) if return_x else y0
+    
+    @nvtx.annotate("d2F1", color="green")
+    def d2F1(self, x, y, z):
+        """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
+
+        x11, x12 = x
+        y11, y12 = y
+        z11, z12 = z
+        y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
+        igpu = cp.cuda.Device().id
+        if y12 is z12:
+            for j in range(self.ndist):
+                y0[:, j] = 2 * self.cl_prop[igpu].D(y11[j] * y12[:, j], j)
+        else:
+            for j in range(self.ndist):
+                y0[:, j] = self.cl_prop[igpu].D(y11[j] * z12[:, j], j) + self.cl_prop[igpu].D(z11[j] * y12[:, j], j)
+
+        return y0
+    
+    @nvtx.annotate("gF1", color="green")
+    def gF1(self, x, y):
+        """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
+
+        y0 = y
+        
+        # calc fwd starting from 2        
+        for id in range(2, 4)[::-1]: 
+            x = self.F[id](x)
+
+        x11, x12 = x
+                    
+        igpu = cp.cuda.Device().id
+        y11 = cp.zeros([self.ndist,self.nz,self.n], dtype="complex64")
+        y12 = cp.empty([y0.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
+        for j in range(self.ndist):
+            tmp = self.cl_prop[igpu].DT(y0[:, j], j)             
+            y11[j] += cp.sum(tmp* np.conj(x12[:,j]), axis=0)
+            y12[:, j] = tmp * np.conj(x11[j])
+        return y11, y12        
+
+    ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
+    @nvtx.annotate("F2", color="green")
+    def F2(self, x):
+        """In: (x21,x22) Out: (x11,x12)"""
+
+        x21, x22 = x
+        x11 = x21
+        x12 = cp.exp(1j*x22)
+        return x11, x12
+
+    @nvtx.annotate("dF2", color="green")
+    def dF2(self, x, y, return_x=True):
+        """In: (x21,x22),(y21,y22) Out: (x11,x12),(y11,y12)"""
+
         x21, x22 = x
         y21, y22 = y
 
-        y1 = cp.empty([x22.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
-        x1 = cp.empty_like(y1) if return_x else None
+        x12 = cp.exp(1j*x22)             
+        y12 = x12 * 1j * y22
 
-        igpu = cp.cuda.Device().id
-        for j in range(self.ndist):
-            y1[:, j] = self.cl_prop[igpu].D(y21[j] * x22[:, j] + x21[j] * y22[:, j], j)
-            if return_x:
-                x1[:, j] = self.cl_prop[igpu].D(x21[j] * x22[:, j], j)
+        x11 = x21
+        y11 = y21        
 
-        return (x1, y1) if return_x else y1
-    
-    def d2F1(self, x, y, z):
+        return ([x11, x12], [y11, y12]) if return_x else [y11, y12]
+
+    @nvtx.annotate("d2F2", color="green")
+    def d2F2(self, x, y, z):
+        """In: (x21,x22),(y21,y22),(z21,z22) Out: (y11,y12)"""
+
         x21, x22 = x
         y21, y22 = y
         z21, z22 = z
-        y1 = cp.empty([len(y22), self.ndist, self.nz, self.n], dtype="complex64")
-        igpu = cp.cuda.Device().id
-        if y22 is z22:
-            for j in range(self.ndist):
-                y1[:, j] = 2 * self.cl_prop[igpu].D(y21[j] * y22[:, j], j)
-        else:
-            for j in range(self.ndist):
-                y1[:, j] = self.cl_prop[igpu].D(y21[j] * z22[:, j], j) + self.cl_prop[igpu].D(z21[j] * y22[:, j], j)
-
-        return y1
-    
-    def gF1(self, x, y):
-        x11, x12, x13 = x
-        y11 = y
-                    
-        igpu = cp.cuda.Device().id
-        y21 = cp.zeros([self.ndist,self.nz,self.n], dtype="complex64")
-        y22 = cp.empty([y11.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
-        for j in range(self.ndist):
-            mspsi = self.cl_shift[igpu].curlyS(x12, x13[:, j], j)
-            tmp = self.cl_prop[igpu].DT(y11[:, j], j)             
-            y21[j] += cp.sum(tmp* np.conj(mspsi), axis=0)
-            y22[:, j] = tmp * np.conj(x11[j])
-        return [y21,y22]        
         
-    ####### F2(x32,x33) = S_{x_33}(x32)
-    def F2(self, x):
+        if y22 is z22:
+            y12 = x22 * (-(y22**2))
+        else:
+            y12 = x22 * (-y22 * z22)
+
+        y11 = cp.zeros_like(y21)
+        
+        return [y11, y12]
+    
+    @nvtx.annotate("gF2", color="green")
+    def gF2(self,x,y):
+        """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
+
+        y11, y12 = y
+
+        # calc fwd starting from 3        
+        for id in range(3, 4)[::-1]: 
+            x = self.F[id](x)
+        x21,x22 = x
+
+        y22 = (-1j) * y12 * cp.conj(cp.exp(1j*x22))
+        y22 = y22.real if self.obj_dtype == 'float32' else y22
+
+        y21 = y11
+        return [y21, y22]
+    
+    ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
+    @nvtx.annotate("F3", color="green")
+    def F3(self, x):
+        """In: (x31, x32, x33)  Out: (x21,x22)"""
+
         x31, x32, x33 = x
+
         x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype="complex64")
         igpu = cp.cuda.Device().id
         for k in range(self.ndist):
             x22[:, k] = self.cl_shift[igpu].curlyS(x32, x33[:, k], k)
 
-        return [x31, x22]
+        x21 = x31
+        return [x21, x22]
 
-    def dF2(self, x, y, return_x=True):
+    @nvtx.annotate("dF3", color="green")
+    def dF3(self, x, y, return_x=True):
+        """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
+        
         x31, x32, x33 = x
         y31, y32, y33 = y
 
@@ -511,9 +642,14 @@ class Rec:
             Deltar = y33[:, k]
             y22[:, k] = self.cl_shift[igpu].dcurlyS(x32, r, k, y32, Deltar)
 
-        return ([x31, x22], [y31, y22]) if return_x else [y31, y22]
+        x21 = x31
+        y21 = y31
+        return ([x21, x22], [y21, y22]) if return_x else [y21, y22]
 
-    def d2F2(self, x, y, z):
+    @nvtx.annotate("d2F3", color="green")
+    def d2F3(self, x, y, z):
+        """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33)  Out: (y21, y22)"""
+        
         x31, x32, x33 = x
         y31, y32, y33 = y
         z31, z32, z33 = z
@@ -525,77 +661,48 @@ class Rec:
             Deltar_z = z33[:, k]
             y22[:, k] = self.cl_shift[igpu].d2curlyS(x32, r, k, y32, Deltar_y, z32, Deltar_z)
 
-        return [cp.zeros_like(y31), y22]
+        y21 = cp.zeros_like(y31)
+        
+        return [y21, y22]
     
-    def gF2(self, x, y):        
-        x21,x22, x23 = x
+    @nvtx.annotate("gF3", color="green")
+    def gF3(self, x, y):     
+        """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""   
+
         y21, y22 = y
 
+        for id in range(4, 4)[::-1]: 
+            x = self.F[id](x)
+        x31,x32,x33 = x
+
+        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype=self.obj_dtype)
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
-        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype="complex64")
         igpu = cp.cuda.Device().id
+        
         for k in range(self.ndist):
-            Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadj(x22, x23[:, k], k, y22[:, k])
+            Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadj(x32, x33[:, k], k, y22[:, k])
             y32[:] += Deltapsi
             y33[:, k] = Deltar
         
-        return [y21, y32, y33]
+        y31 = y21
+        return [y31, y32, y33]     
     
-    ######## F3(x41,x42,x43)=(x41,e^{1j R(x42)},x43)
-    def F3(self, x):
-
-        x41, x42, x43, x44 = x
-        # out = self.expR(self.cl_tomo[cp.cuda.Device().id].R(x42))
-        out = x44
-        return x41, out, x43
-
-    def dF3(self, x, y, return_x=True):
-
-        x41, x43, x44 = x
-        y41, y43, y44 = y
-
-        if return_x:
-            x32 = x44  # already computed
-        y32 = cp.zeros([len(y44), self.nzobj, self.nobj], dtype="complex64")
-
-        y32[:] = x44 * 1j * y44
-
-        return ([x41, x32, x43], [y41, y32, y43]) if return_x else [y41, y32, y43]
-
-    def d2F3(self, x, y, z):
-        x41, x43, x44 = x
-        y41, y43, y44 = y
-        z41, z43, z44 = z
-        y32 = cp.empty([len(y44), self.nzobj, self.nobj], dtype="complex64")
-
-        if y44 is z44:
-            y32[:] = x44 * (-(y44**2))
-        else:
-            y32[:] = x44 * (-y44 * z44)
-
-        return [cp.zeros_like(y41), y32, cp.zeros_like(y43)]
-    
-    def gF31(self,x,y):
-        x31,x32,x33 = x
-        y31,y32,y33 = y
-
-        y42 = (-1j)*y32 * cp.conj(x32)
-        y42 = y42.real if self.obj_dtype == 'float32' else y42
-
-        y41,y43 = y31,y33
-        return [y41,y42,y43]
-    
-    def gF32(self, x, y):
+    ######## (x31,x32,x33) = F4(x41,x42,x43) = (x41,R(x42),x43)
+    # F4=R(x),dF4=R(y),d2F4=0: Rx,Ry are stored between iterations    
+    @nvtx.annotate("gF4", color="green")
+    def gF4(self, x, y):
+        """In: x(x01, x02, x03) ,(y31,y32,y33) Out: (y41,y42,y43)"""   
         y31, y32, y33 = y
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
-        def _gF32(self, y42, y32):
+        def _gF4(self, y42, y32):
             igpu = cp.cuda.Device().id
             y42[:] = self.cl_tomo[igpu].RT(y32)
             
         y42 = np.empty([self.nzobj, self.nobj, self.nobj], dtype=self.obj_dtype)
 
-        _gF32(self, y42, y32)
-        y41,y43 = y31,y33
+        _gF4(self, y42, y32)
+        y41 = y31
+        y43 = y33
         return [y41, y42, y43]    
 
     ############################ Regularization #########################
@@ -639,7 +746,7 @@ class Rec:
         _laplacian_sq1(self, out, out, obj)
         return out
 
-    def min(self, prb, obj, pos,ewave):
+    def min(self, prb, obj, pos,proj):
         """Minimization functional
         1/data.size F0(F1(F2(F3(prb,pbj,pos))),data) +
         lam_prbfit/prb.size ||Dprb|-ref|_2^2 +
@@ -656,7 +763,7 @@ class Rec:
         def _min(self, out, x, data):
             out[:] += self.F0(x, data)
 
-        x = self.fwd_ewave(ewave, pos, prb)
+        x = self.fwd_proj(proj, pos, prb)
         _min(self, out, x, self.data)
 
         ### regularization term
@@ -699,10 +806,12 @@ class Rec:
         for k in range(0, npp):            
             self.linear_batch(obj,dobj,1,t[k],out=objt)
             self.linear_batch(prb,dprb,1,t[k],out=prbt)
-            self.linear_batch(pos,dpos,1,t[k],out=post)            
-            err_real[k] = self.min(prbt, objt, post)
-
-        err_approx = self.min(prb, obj, pos) - top * t + 0.5 * bottom * t**2
+            self.linear_batch(pos,dpos,1,t[k],out=post)  
+            proj = self.fwd_tomo(objt)
+            err_real[k] = self.min(prbt, objt, post,proj)
+        
+        proj = self.fwd_tomo(obj)
+        err_approx = self.min(prb, obj, pos,proj) - top * t + 0.5 * bottom * t**2
         mshow_approx(t,err_real,err_approx,self.show)
 
     def vis_debug(self, vars, i):
@@ -716,7 +825,7 @@ class Rec:
         self.mulc_batch(objs, obj, self.norm_const)
 
         # visualization
-        mshow(objs[obj.shape[0] // 2].real, self.show)
+        mshow_complex(objs[obj.shape[0] // 2].real+1j*objs[:,obj.shape[1] // 2].real, self.show)
         mshow_polar(prb[0], self.show)
         mshow_pos(vars["pos"] - self.pos_init,self.show)
         plt.savefig(f"{self.path_out}/rerr{i:04}.png")
@@ -729,9 +838,11 @@ class Rec:
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
             
-        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["ewave"])
-        print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {err=:1.5e}", flush=True)
-        self.table.loc[len(self.table)] = [i, err, time.time()]
+        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
+        ittime = time.time()-self.time_start
+        print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {ittime=:.0f}s {err=:1.5e} ", flush=True)                
+        self.table.loc[len(self.table)] = [i, err, ittime]
+        self.time_start = time.time()
         name = f"{self.path_out}/conv.csv"
         os.makedirs(os.path.dirname(name), exist_ok=True)
         self.table.to_csv(name, index=False)

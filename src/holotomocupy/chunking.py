@@ -156,8 +156,7 @@ class Chunking:
             inp[k] = cp.asarray(inp[k])
         nvtx.pop_range()
 
-        # run by chunks, overlap data transfers and computations
-        nvtx.push_range("run_loop", color="yellow")
+       
         
         def c2p(buf_id, k):
             st = k * self.chunk
@@ -214,7 +213,9 @@ class Chunking:
 
         # Pipeline processing
         th_inp, th_out = [], []
-
+        
+        # run by chunks, overlap data transfers and computations
+        nvtx.push_range("run_loop", color="yellow")
         for k in range(nchunk + 4):
             if k < nchunk:
                 th_inp = c2p(k % 2, k) 
@@ -242,7 +243,7 @@ class Chunking:
             for f in th_out:
                 wait(f)
 
-            nvtx.pop_range()         
+        nvtx.pop_range()         
             
 
     def alloc_double_buffers(self, arrs, axis, pinned_mem, gpu_mem, offset, chunk):

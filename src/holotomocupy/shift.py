@@ -7,19 +7,20 @@ from .utils import *
 class Shift():    
     """Functionality for Shifts"""
 
-    def __init__(self,n,npsi,nz,nzpsi,mag):
+    def __init__(self,n,npsi,nz,nzpsi,mag,obj_dtype):
         self.n = n    
         self.npsi = npsi
         self.nz = nz    
         self.nzpsi = nzpsi
-        self.mag = mag        
-        self.fB3 = cp.zeros([len(mag),nzpsi,npsi],dtype='float32')
+        self.mag = cp.array(mag).astype('float32')        
+        self.ifB3 = cp.zeros([len(mag),nzpsi,npsi],dtype='float32')
 
         x=cp.linspace(-1/2,1/2-1/npsi,npsi).astype('float32')
         y=cp.linspace(-1/2,1/2-1/nzpsi,nzpsi).astype('float32')
         divx=(self.phi(0)+2*self.phi(1)*cp.cos(2*cp.pi*x)).astype('float32')
         divy=(self.phi(0)+2*self.phi(1)*cp.cos(2*cp.pi*y)).astype('float32')
-        self.fB3 = cp.fft.fftshift(cp.outer(divy,divx),axes=(-1,-2))
+        self.ifB3 = 1/cp.fft.fftshift(cp.outer(divy,divx),axes=(-1,-2))
+        self.obj_dtype=obj_dtype
 
     def phi(self,t):
         out=(-2<t)*(t<=-1)*(t+2)**3+(-1<t)*(t<=1)*(4-6*t**2+3*t**3*cp.sign(t))+(1<t)*(t<=2)*(2-t)**3
@@ -34,7 +35,7 @@ class Shift():
         return out  
 
     def coeff(self,psi):
-        out=cp.fft.ifft2(cp.fft.fft2(psi)/self.fB3)
+        out=cp.fft.ifft2(cp.fft.fft2(psi)*self.ifB3)
         return out      
 
     def S(self, c, r, imagn):
@@ -42,24 +43,6 @@ class Shift():
         spsi = cp.zeros([ntheta,self.nz,self.n], dtype="complex64")
         c = cp.ascontiguousarray(c)
         r = cp.ascontiguousarray(r)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
-        s_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (spsi, c, r, maga , self.n, self.npsi, self.nz, self.nzpsi, ntheta,0),
-                )
-        return spsi
-    
-    def Sadj(self, spsi, r, imagn):
-        ntheta = spsi.shape[0]
-        c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype="complex64")
-        spsi = cp.ascontiguousarray(spsi)
-        r = cp.ascontiguousarray(r)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         
         s_kernel(
                     (
@@ -68,7 +51,25 @@ class Shift():
                         ntheta,
                     ),
                     (32, 32, 1),
-                    (spsi, c, r, maga , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
+                    (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi, self.nz, self.nzpsi, ntheta,0),
+                )
+        return spsi
+    
+    def Sadj(self, spsi, r, imagn):
+        ntheta = spsi.shape[0]
+        c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype="complex64")
+        spsi = cp.ascontiguousarray(spsi)
+        r = cp.ascontiguousarray(r)
+        
+        
+        s_kernel(
+                    (
+                        math.ceil(self.n / 32),
+                        math.ceil(self.nz / 32),
+                        ntheta,
+                    ),
+                    (32, 32, 1),
+                    (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
                 )
         return c
     
@@ -85,9 +86,9 @@ class Shift():
         ntheta = c.shape[0]        
         res = cp.zeros([ntheta,self.nz,self.n], dtype="complex64")
         c = cp.ascontiguousarray(c)
+        
         r = cp.ascontiguousarray(r)
         Deltar = cp.ascontiguousarray(Deltar)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
         dt_kernel(
                     (
                         math.ceil(self.n / 32),
@@ -95,7 +96,7 @@ class Shift():
                         ntheta,
                     ),
                     (32, 32, 1),
-                    (res, c, r, maga, Deltar, self.n,self.npsi,self.nz,self.nzpsi, ntheta),
+                    (res, c, r, self.mag[imagn:imagn+1], Deltar, self.n,self.npsi,self.nz,self.nzpsi, ntheta),
                 )
         return res   
 
@@ -107,7 +108,7 @@ class Shift():
         c = cp.ascontiguousarray(c)
         r = cp.ascontiguousarray(r)
         Deltaphi = cp.ascontiguousarray(Deltaphi)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
+        
         dtadj_kernel(
                     (
                         math.ceil(self.n / 32),
@@ -115,7 +116,7 @@ class Shift():
                         ntheta,
                     ),
                     (32, 32, 1),
-                    (dt1, dt2, c, r, maga, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    (dt1, dt2, c, r, self.mag[imagn:imagn+1], self.n, self.npsi,self.nz, self.nzpsi, ntheta),
                 )
         
         out[:, 0] = redot(Deltaphi, dt1, axis=(1, 2))
@@ -130,7 +131,7 @@ class Shift():
         r = cp.ascontiguousarray(r)
         Deltar1 = cp.ascontiguousarray(Deltar1)
         Deltar2 = cp.ascontiguousarray(Deltar2)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
+        
         d2t_kernel(
                     (
                         math.ceil(self.n / 32),
@@ -138,7 +139,7 @@ class Shift():
                         ntheta,
                     ),
                     (32, 32, 1),
-                    (res, c, r, maga, Deltar1, Deltar2, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    (res, c, r, self.mag[imagn:imagn+1], Deltar1, Deltar2, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
                 )
     
         return res   
@@ -146,18 +147,18 @@ class Shift():
 
     def curlyS(self, psi, r, imagn):
         out=self.S(self.coeff(psi),r,imagn)
-        if psi.dtype=='float32':
+        if self.obj_dtype=='float32':
             out=out.real
         return out
-       
-        
+    
     def dcurlyS(self, psi, r, imagn, Deltapsi, Deltar):
         c=self.coeff(psi) 
         c1=self.coeff(Deltapsi)
         out = self.dS(c,r,imagn,c1)+self.dT(c,r,imagn,Deltar)
-        if psi.dtype=='float32':
+        if self.obj_dtype=='float32':
             out=out.real
         return out
+    
    
     def dcurlySadj(self, psi, r, imagn, Deltaphi):
         Deltaphi = Deltaphi.astype('complex64')# temporarily
@@ -165,7 +166,7 @@ class Shift():
         out1 = self.coeff(self.dSadj(c, r, imagn, Deltaphi))
         
         out2 = self.dTadj(c, r, imagn, Deltaphi)
-        if psi.dtype=='float32':
+        if self.obj_dtype=='float32':
             out1=out1.real
         out = [out1, out2]
         return out
@@ -176,7 +177,7 @@ class Shift():
         c1=self.coeff(Deltapsi1)
         c2=self.coeff(Deltapsi2)
         out = self.dT(c1, r, imagn, Deltar2)+self.dT(c2, r, imagn, Deltar1)+self.d2T(c, r, imagn, Deltar1, Deltar2)
-        if psi.dtype=='float32':
+        if self.obj_dtype=='float32':
             out=out.real
         return out        
 
@@ -186,7 +187,7 @@ class Shift():
         c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype="complex64")
         spsi = cp.ascontiguousarray(spsi)
         r = cp.ascontiguousarray(r)
-        maga = cp.array(self.mag[imagn:imagn+1].astype('float32'))
+        
         
         sback_kernel(
                     (
@@ -195,7 +196,7 @@ class Shift():
                         ntheta,
                     ),
                     (32, 32, 1),
-                    (spsi, c, r, maga , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
+                    (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
                 )
         return c
     
@@ -207,11 +208,44 @@ class Shift():
         for k  in range(1,5):#max
             divx = divx+(2*self.phi(k/self.mag[imagn])*cp.cos(2*cp.pi*k*x)).astype('float32')        
             divy = divy+(2*self.phi(k/self.mag[imagn])*cp.cos(2*cp.pi*k*y)).astype('float32')        
-        fB3 = cp.fft.fftshift(cp.outer(divy,divx),axes=(-1,-2))
-        out=cp.fft.ifft2(cp.fft.fft2(psi)/fB3)
+        ifB3 = 1/cp.fft.fftshift(cp.outer(divy,divx),axes=(-1,-2))
+        out=cp.fft.ifft2(cp.fft.fft2(psi)*ifB3)
         return out 
             
 
     def curlySback(self, psi, r, imagn):
         out = self.coeffback(self.Sback(psi, r, imagn),imagn)
         return out
+    
+
+
+
+    def curlySc(self, c, r, imagn):
+        out=self.S(c,r,imagn)
+        if self.obj_dtype=='float32':
+            out=out.real
+        return out
+    
+    def dcurlySc(self, c, r, imagn, c1, Deltar):
+        
+        out = self.dS(c,r,imagn,c1)+self.dT(c,r,imagn,Deltar)
+        if self.obj_dtype=='float32':
+            out=out.real
+        return out
+    
+   
+    def dcurlySadjc(self, c, r, imagn, Deltaphi):
+        Deltaphi = Deltaphi.astype('complex64')# temporarily        
+        out1 = self.dSadj(c, r, imagn, Deltaphi)
+        
+        out2 = self.dTadj(c, r, imagn, Deltaphi)
+        out = [out1, out2]
+        return out
+   
+    def d2curlySc(self, c, r, imagn, c1, Deltar1, c2, Deltar2):
+        """dcurlyS following formula below (33) in the ptychography paper"""
+        
+        out = self.dT(c1, r, imagn, Deltar2)+self.dT(c2, r, imagn, Deltar1)+self.d2T(c, r, imagn, Deltar1, Deltar2)
+        if self.obj_dtype=='float32':
+            out=out.real
+        return out        

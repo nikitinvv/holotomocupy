@@ -13,9 +13,11 @@ class Propagation:
         fy = cp.fft.fftfreq(2*nz, d=voxelsize).astype("float32")
         [fx, fy] = cp.meshgrid(fx, fy)
         self.fker = cp.empty([ndist, 2*nz, 2*n], dtype="complex64")
+        self.ifker = cp.empty([ndist, 2*nz, 2*n], dtype="complex64")
         for j in range(ndist):
             # propagation sample-detector
             self.fker[j] = cp.exp(-1j * cp.pi * wavelength * distance[j] * (fx**2 + fy**2))
+            self.ifker[j] = cp.exp(1j * cp.pi * wavelength * distance[j] * (fx**2 + fy**2))
 
         self.n = n
         self.nz = nz
@@ -29,7 +31,7 @@ class Propagation:
             (32, 32, 1),
             (fpad, f, n, nz, ntheta, 0),
         )
-        return fpad / 2
+        return fpad 
 
     def _adj_pad(self, fpad):
         """Adj data padding"""
@@ -42,7 +44,7 @@ class Propagation:
             (32, 32, 1),
             (fpad, f, n, nz, ntheta, 1),
         )
-        return f / 2
+        return f 
 
     def D(self, psi, j):
         """Forward propagator"""
@@ -54,7 +56,6 @@ class Propagation:
         big_psi = cp.empty([len(psi), self.nz, self.n], dtype="complex64")
 
         ff = self._fwd_pad(psi)
-        ff *= 2
         ff = cp.fft.ifft2(cp.fft.fft2(ff) * self.fker[j])
         ff = ff[:, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2]
         big_psi[:] = ff
@@ -77,8 +78,7 @@ class Propagation:
         # pad to the probe size
         ff = big_psi
         ff = cp.pad(ff, ((0, 0), (self.nz // 2, self.nz // 2), (self.n // 2, self.n // 2)))
-        ff = cp.fft.ifft2(cp.fft.fft2(ff) / self.fker[j])
-        ff *= 2
+        ff = cp.fft.ifft2(cp.fft.fft2(ff) * self.ifker[j])
         psi[:] = self._adj_pad(ff)
 
         # psi[:] = cp.fft.ifft2(cp.fft.fft2(big_psi) * 1 / self.fker[j])

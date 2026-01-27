@@ -59,7 +59,7 @@ class Rec:
                 # initialize processing classes per gpu
                 self.cl_tomo[igpu] = Tomo(self.nobj, self.theta, self.mask)
                 self.cl_prop[igpu] = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
-                self.cl_shift[igpu] = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications)
+                self.cl_shift[igpu] = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications,self.obj_dtype)
 
         # preallocate memory for the gradient and conjugate direction
         self.grads, self.etas = {}, {}
@@ -141,7 +141,7 @@ class Rec:
             # calc alpha (step length)            
             nvtx.push_range(":::BH:redot_batch")
             top = 0
-            for v in ["obj", "prb", "pos"]:
+            for v in ["obj", "prb", "pos"]:                
                 top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
 
             nvtx.pop_range()
@@ -471,9 +471,10 @@ class Rec:
         # calc fwd starting from 1
         for id in range(1, 4)[::-1]: 
             x = self.F[id](x)
-                
+               
         td = y * (x / (cp.abs(x)))
         y0 = (2 / self.data_size) * (x - td) 
+        
         return y0
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
@@ -615,8 +616,9 @@ class Rec:
 
         x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype="complex64")
         igpu = cp.cuda.Device().id
+        c = self.cl_shift[igpu].coeff(x32)
         for k in range(self.ndist):
-            x22[:, k] = self.cl_shift[igpu].curlyS(x32, x33[:, k], k)
+            x22[:, k] = self.cl_shift[igpu].curlySc(c, x33[:, k], k)
 
         x21 = x31
         return [x21, x22]
@@ -630,17 +632,18 @@ class Rec:
 
         y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
         igpu = cp.cuda.Device().id
-
+        c = self.cl_shift[igpu].coeff(x32)
+        c1 = self.cl_shift[igpu].coeff(y32)
         if return_x:
             x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype="complex64")
             for k in range(self.ndist):
                 r = x33[:, k]
-                x22[:, k] = self.cl_shift[igpu].curlyS(x32, r, k)
+                x22[:, k] = self.cl_shift[igpu].curlySc(c, r, k)
 
         for k in range(self.ndist):
             r = x33[:, k]
             Deltar = y33[:, k]
-            y22[:, k] = self.cl_shift[igpu].dcurlyS(x32, r, k, y32, Deltar)
+            y22[:, k] = self.cl_shift[igpu].dcurlySc(c, r, k, c1, Deltar)
 
         x21 = x31
         y21 = y31
@@ -655,11 +658,14 @@ class Rec:
         z31, z32, z33 = z
         y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
         igpu = cp.cuda.Device().id
+        c = self.cl_shift[igpu].coeff(x32)
+        c1 = self.cl_shift[igpu].coeff(y32)
+        c2 = self.cl_shift[igpu].coeff(z32)
         for k in range(self.ndist):
             r = x33[:, k]
             Deltar_y = y33[:, k]
             Deltar_z = z33[:, k]
-            y22[:, k] = self.cl_shift[igpu].d2curlyS(x32, r, k, y32, Deltar_y, z32, Deltar_z)
+            y22[:, k] = self.cl_shift[igpu].d2curlySc(c, r, k, c1, Deltar_y, c2, Deltar_z)
 
         y21 = cp.zeros_like(y31)
         
@@ -675,14 +681,19 @@ class Rec:
             x = self.F[id](x)
         x31,x32,x33 = x
 
-        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype=self.obj_dtype)
+        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype='complex64')
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
         igpu = cp.cuda.Device().id
-        
+        c = self.cl_shift[igpu].coeff(x32)
         for k in range(self.ndist):
-            Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadj(x32, x33[:, k], k, y22[:, k])
+            Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadjc(c, x33[:, k], k, y22[:, k])
             y32[:] += Deltapsi
             y33[:, k] = Deltar
+        
+        y32[:] = self.cl_shift[igpu].coeff(y32)
+        if self.obj_dtype=='float32':
+            y32=y32.real
+        
         
         y31 = y21
         return [y31, y32, y33]     

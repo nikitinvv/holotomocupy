@@ -52,6 +52,8 @@ def read_initial_guess(args):
     prb = cp.ones([args.ndist, nz, n], dtype='complex64')
     
     pos = np.load('/data2/vnikitin/brain_rec/20251115/Y350a/Y350a1234/run3/0/pos0160.npy')[args.ids]
+    for k in range(bin):
+        pos = (pos - 0.5) / 2
     vars = {"obj":obj, "prb":prb, "pos":pos}    
     return vars    
 

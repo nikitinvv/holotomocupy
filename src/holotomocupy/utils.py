@@ -79,12 +79,15 @@ def mshow_approx(t,err_real,err_approx,show=False):
         plt.grid()
         plt.show()
 
-def reprod(a, b):
-    return a.real * b.real + a.imag * b.imag
+def reprod(a,b):
+    return a.real*b.real+a.imag*b.imag
+    
 
-
-def redot(a, b, axis=None):
-    res = cp.sum(reprod(a, b), axis=axis)
+def redot(a, b,axis=None):
+    if axis is None:
+        res = cp.vdot(a.view('float32'),b.view('float32'))
+    else:
+        res = cp.sum(reprod(a, b),axis=axis)
     return res
 
 def write_tiff(a, name, **args):

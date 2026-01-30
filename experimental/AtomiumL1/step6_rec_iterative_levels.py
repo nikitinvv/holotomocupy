@@ -40,7 +40,8 @@ def read_initial_guess(args):
             s = (s - 0.5) / 2
         pos[..., 1] += s
         # object initial guess   
-        obj = fid[f'/exchange/obj_init_re{args.paganin}_{bin}']
+        obj = fid[f'/exchange/obj_init_re{args.paganin}_{bin}'][:]
+        # obj = np.zeros([nzobj,nobj,nobj],dtype='complex64')
         nzobj0,nobj0 = obj.shape[:2]
         stz,endz = (nzobj0//2-nzobj//2),(nzobj0//2+nzobj//2)
         stx,endx = (nobj0//2-nobj//2),(nobj0//2+nobj//2)
@@ -178,7 +179,7 @@ for bin in range(args.start_bin,args.start_bin-args.nbins,-1):
     
     if bin < args.start_bin:
         vars = upsample_vars(vars)
-    
+   
     # create class and run reconstruction by the BH method
     vars = Rec(rec_args).BH(data, ref, vars)          
 

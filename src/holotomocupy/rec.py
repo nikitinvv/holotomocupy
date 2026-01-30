@@ -71,7 +71,6 @@ class Rec:
 
         # normalization constant to address work with normal operators
         self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))
-        
         # save convergence results
         self.table=pd.DataFrame(columns=["iter", "err", "time"])    
 
@@ -86,6 +85,45 @@ class Rec:
         self.linear_batch = self.cl_chunking.linear_batch
         self.mulc_batch = self.cl_chunking.mulc_batch
 
+    # def change_rho(self,vars,grads):
+    #     niter = 2
+    #     nzobj = self.nzobj
+    #     nobj = self.nobj
+    #     nz = self.nz
+    #     n = self.n
+    #     ntheta = self.ntheta
+    #     ndist = self.ndist
+    #     energy = np.zeros(3)#[0,0,0]
+    #     for j in range(niter):
+
+    #         gobj = grads['obj']/np.linalg.norm(grads['obj'])
+    #         gprb = cp.zeros([ndist,nz,n],dtype='complex64')    
+    #         gpos = np.zeros([ntheta,ndist,2],dtype='float32')
+            
+    #         ggrads = {'obj':gobj,'prb':gprb,'pos':gpos, 'proj':self.fwd_tomo(gobj)}    
+    #         energy[0] += self.hessian(vars,ggrads,ggrads)
+            
+    #     for j in range(niter):
+    #         gobj = np.zeros([nzobj,nobj,nobj],dtype='complex64')
+            
+    #         gprb = grads['prb']/np.linalg.norm(grads['prb'])#cp.random.random([ndist,nz,n]).astype('float32')+1j*cp.random.random([ndist,nz,n]).astype('float32')            
+    #         gpos = np.zeros([ntheta,ndist,2],dtype='float32')            
+    #         ggrads = {'obj':gobj,'prb':gprb,'pos':gpos, 'proj':self.fwd_tomo(gobj)}    
+            
+    #         energy[1] += self.hessian(vars,ggrads,ggrads)
+            
+    #     for j in range(niter):
+    #         gobj = np.zeros([nzobj,nobj,nobj],dtype='complex64')            
+    #         gprb = cp.zeros([ndist,nz,n],dtype='complex64')            
+    #         gpos = grads['pos']/np.linalg.norm(grads['pos'])#np.random.random([ntheta,ndist,2]).astype('float32')
+    #         # gpos /= np.linalg.norm(gpos)
+            
+    #         ggrads = {'obj':gobj,'prb':gprb,'pos':gpos, 'proj':self.fwd_tomo(gobj)}        
+
+    #         energy[2] += self.hessian(vars,ggrads,ggrads)
+    #     rho = np.sqrt(energy[0]/energy)
+    #     return rho
+        
     def BH(self, data, ref, vars):
 
         # keep data and initial shifts in class
@@ -109,14 +147,20 @@ class Rec:
             self.vis_debug(vars, i)
 
             # compute gradients
-            self.gradients(vars, grads)            
-            
+            self.gradients(vars, grads)     
+
+            # if i==0:
+            #     rho = self.change_rho(vars,grads)
+            #     print(f'set rho to {rho}')
+            #     self.rho_sq['obj'],self.rho_sq['prb'],self.rho_sq['pos'] = rho**2
+
             # scale
             for v in ["obj", "prb", "pos"]:                
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
             # keep projections in memory
             
             self.fwd_tomo(grads["obj"], out=grads["proj"])
+            
             
             if i == self.start_iter:
                 nvtx.push_range(":::BH:mulc_batch")
@@ -852,6 +896,8 @@ class Rec:
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
         ittime = time.time()-self.time_start
         print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {ittime=:.0f}s {err=:1.5e} ", flush=True)                
+        # print(f"{i} {err=:1.5e} ", flush=True)                
+        
         self.table.loc[len(self.table)] = [i, err, ittime]
         self.time_start = time.time()
         name = f"{self.path_out}/conv.csv"

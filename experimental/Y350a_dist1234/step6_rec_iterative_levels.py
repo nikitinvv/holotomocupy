@@ -18,7 +18,7 @@ def read_acquisition_pars(args):
         args.energy = fid['/exchange/energy'][0] 
         args.focustodetectordistance = fid['/exchange/focusdetectordistance'][0] 
         
-        ntheta0 = np.array(fid[f'/exchange/data0'].shape[0])
+        ntheta0 = np.array(fid[f'/exchange/theta'].shape[0])
         args.ids = np.arange(args.start_theta, ntheta0, ntheta0 / args.ntheta).astype('int')
         args.theta = -fid['/exchange/theta'][args.ids, 0] / 180 * np.pi
     

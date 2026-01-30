@@ -39,9 +39,10 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
             w1 = ell1 / (float)(2 * n) - y0;
 
             w = coeff0 * __expf(coeff1 * (w0 * w0 + w1 * w1));
-
+            
             f_indx = (n + ell0 + 2 * n) % (2 * n);
             f_indy = (n + ell1 + 2 * n) % (2 * n);
+
             f_ind = f_indx + (2 * n) * f_indy + tz * (2 * n) * (2 * n);
 
             if (dir == 0)
@@ -210,7 +211,7 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
     int ix, iy;
-    int f_indx, f_indy, f_ind, g_ind;
+    int indy, indx, g_ind;
     float x, y;
     float dx, dy;
     float dxm, dym;
@@ -239,19 +240,25 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
 
             w = phi(dxm) * phi(dym);
 
-            f_indx = (ix + jx + npsi) % npsi;
-            f_indy = (iy + jy + nzpsi) % nzpsi;
-            f_ind = f_indx + f_indy * npsi + tz * npsi * nzpsi;
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
+            
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
             if (dir == 0)
             {
-                g0.x += w * f[f_ind].x;
-                g0.y += w * f[f_ind].y;
+                g0.x += w * f[idx].x;
+                g0.y += w * f[idx].y;
             }
             else
             {
-                atomicAdd(&(f[f_ind].x), w * g0.x);
-                atomicAdd(&(f[f_ind].y), w * g0.y);
+                atomicAdd(&(f[idx].x), w * g0.x);
+                atomicAdd(&(f[idx].y), w * g0.y);
             }
         }
 
@@ -309,8 +316,13 @@ void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
             w = dphi(dxm) * phi(dym) * Deltarx
               + dphi(dym) * phi(dxm) * Deltary;
 
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
             r0.x -= w * c[idx].x;
@@ -378,8 +390,13 @@ void __global__ d2t(float2* res, float2* c, float* r, float* mag,
                  * (Deltar1x * Deltar2y + Deltar1y * Deltar2x);
             w += phi(dxm) * d2phi(dym) * Deltar1y * Deltar2y;
 
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
             r0.x += w * c[idx].x;
@@ -438,8 +455,13 @@ void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
             w1 = -dphi(dym) * phi(dxm);
             w2 = -dphi(dxm) * phi(dym);
 
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
@@ -511,7 +533,7 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
     int ix, iy;
-    int f_indx, f_indy, f_ind, g_ind;
+    int indx, indy, f_ind, g_ind;
     float x, y;
     float dx, dy;
     float dxm, dym;
@@ -540,9 +562,15 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
 
             w = phi(dxm, mag[0]) * phi(dym, mag[0]);
 
-            f_indx = (ix + jx + npsi) % npsi;
-            f_indy = (iy + jy + nzpsi) % nzpsi;
-            f_ind = f_indx + f_indy * npsi + tz * npsi * nzpsi;
+            /*indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            */
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
+
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
             if (dir == 0)
             {

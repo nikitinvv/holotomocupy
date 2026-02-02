@@ -182,6 +182,7 @@ class Shift():
         return out        
 
     ##extra shifts for forming the intiial guess for paganin
+
     def Sback(self, spsi, r, imagn):
         ntheta = spsi.shape[0]
         c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype="complex64")
@@ -217,8 +218,9 @@ class Shift():
         out = self.coeffback(self.Sback(psi, r, imagn),imagn)
         return out
     
-
-
+    def curlySadj(self, psi, r, imagn):
+        out = self.coeff(self.Sadj(psi, r, imagn))
+        return out
 
     def curlySc(self, c, r, imagn):
         out=self.S(c,r,imagn)

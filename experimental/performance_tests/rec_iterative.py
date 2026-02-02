@@ -103,6 +103,11 @@ rec_args = SimpleNamespace(
 ### Read initial guess and data
 vars = read_initial_guess(args)    
 data, ref = read_data(args)
-    
+
+
+data = copy_to_pinned(data)
+vars['obj'] = copy_to_pinned(vars['obj'] )
+vars['pos'] =  copy_to_pinned(vars['pos'] )
+
 # create class and run reconstruction by the BH method
 vars = Rec(rec_args).BH(data, ref, vars)          

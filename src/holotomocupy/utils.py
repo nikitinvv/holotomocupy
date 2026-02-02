@@ -12,6 +12,18 @@ from functools import wraps
 from matplotlib_scalebar.scalebar import ScaleBar
 
 
+def copy_to_pinned(data):
+    data_buf =  cp.cuda.alloc_pinned_memory(data.nbytes)
+    data_buf = np.frombuffer(data_buf, dtype=data.dtype, count=data.size).reshape(data.shape)
+    data_buf[:] = data
+    data = data_buf
+    return data
+
+def make_pinned(shape,dtype):
+    data_buf =  cp.cuda.alloc_pinned_memory(np.prod(shape)* np.dtype(dtype).itemsize)
+    data_buf = np.frombuffer(data_buf, dtype=dtype, count=np.prod(shape)).reshape(shape)
+    return data_buf
+
 def mshow(a, show=False, **args):
     if show:
         if isinstance(a, cp.ndarray):

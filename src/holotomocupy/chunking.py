@@ -156,43 +156,35 @@ class Chunking:
             inp[k] = cp.asarray(inp[k])
         nvtx.pop_range()
 
-       
-        
-        def c2p(buf_id, k):
+        def p2g(buf_id,k):
+
             st = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
             
             src = self.mk_slices(axis_inp, slice(st, end))
             dst = self.mk_slices(axis_inp, slice(0, end-st))
+            for j in range(proper_inp):
+                if axis_inp==1:
+                    for i in range(inp[j].shape[0]):
+                        inp_gpu[buf_id][j][(i,) + dst[1:]].set(inp[j][(i,) + src[1:]])
+                else: 
+                    inp_gpu[buf_id][j][dst].set(inp[j][src])
 
-            return [
-                self.copy(inp[j][src], inp_pinned[buf_id][j][dst], pool_inp)
-                for j in range(proper_inp)
-            ]
+            
 
-
-        def p2c(buf_id, k):
+        def g2p(buf_id,k):
             st = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
             
             src = self.mk_slices(axis_out, slice(0, end-st))
             dst = self.mk_slices(axis_out, slice(st, end))
-
-            return [
-                self.copy(out_pinned[buf_id][j][src], out[j][dst], pool_out)
-                for j in range(proper_out)
-            ]
-
-
-        def p2g(buf_id):
-            for j in range(proper_inp):
-                inp_gpu[buf_id][j].set(inp_pinned[buf_id][j])
-
-
-        def g2p(buf_id):
             for j in range(proper_out):
-                out_gpu[buf_id][j].get(out=out_pinned[buf_id][j], blocking=False)
-
+                if axis_out==1:
+                    for i in range(out[j].shape[0]):
+                        out_gpu[buf_id][j][(i,) + src[1:]].get(out=out[j][(i,) + dst[1:]], blocking=False)
+                else:
+                    out_gpu[buf_id][j][src].get(out=out[j][dst], blocking=False)
+                
 
         def p(buf_id, k):
             st = k * self.chunk
@@ -217,12 +209,12 @@ class Chunking:
         # run by chunks, overlap data transfers and computations
         nvtx.push_range("run_loop", color="yellow")
         for k in range(nchunk + 4):
-            if k < nchunk:
-                th_inp = c2p(k % 2, k) 
+            # if k < nchunk:
+            #     th_inp = c2p(k % 2, k) 
             
             if 0 < k < nchunk + 1:
                 with stream[(k - 1) % 3]:
-                    p2g((k - 1) % 2)
+                    p2g((k - 1) % 2,(k-1))
 
             if 1 < k < nchunk + 2:
                 with stream[(k - 2) % 3]:
@@ -230,18 +222,18 @@ class Chunking:
 
             if 2 < k < nchunk + 3:
                 with stream[(k - 3) % 3]:
-                    g2p((k - 3) % 2)
+                    g2p((k - 3) % 2, k-3)
 
-            if k > 3: 
-                th_out = p2c((k - 4) % 2, k - 4) 
+            # if k > 3: 
+            #     th_out = p2c((k - 4) % 2, k - 4) 
 
             # Sync
             for s in stream:
                 s.synchronize()
-            for f in th_inp:
-                wait(f)
-            for f in th_out:
-                wait(f)
+            # for f in th_inp:
+            #     wait(f)
+            # for f in th_out:
+            #     wait(f)
 
         nvtx.pop_range()         
             

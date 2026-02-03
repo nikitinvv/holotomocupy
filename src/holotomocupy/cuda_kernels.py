@@ -240,13 +240,13 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
 
             w = phi(dxm) * phi(dym);
 
-            indx = ix + jx;
-            indy = iy + jy;
-            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
-            continue;
+            //indx = ix + jx;
+            //indy = iy + jy;
+            //if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            //continue;
             
-            //indx = (ix + jx + npsi) % npsi;
-            //indy = (iy + jy + nzpsi) % nzpsi;
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
             
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
@@ -316,13 +316,13 @@ void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
             w = dphi(dxm) * phi(dym) * Deltarx
               + dphi(dym) * phi(dxm) * Deltary;
 
-            indx = ix + jx;
-            indy = iy + jy;
-            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
-            continue;
+            //indx = ix + jx;
+            //indy = iy + jy;
+            //if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            //continue;
             
-            //indx = (ix + jx + npsi) % npsi;
-            //indy = (iy + jy + nzpsi) % nzpsi;
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
             r0.x -= w * c[idx].x;
@@ -390,13 +390,13 @@ void __global__ d2t(float2* res, float2* c, float* r, float* mag,
                  * (Deltar1x * Deltar2y + Deltar1y * Deltar2x);
             w += phi(dxm) * d2phi(dym) * Deltar1y * Deltar2y;
 
-            indx = ix + jx;
-            indy = iy + jy;
-            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
-            continue;
+            //indx = ix + jx;
+            //indy = iy + jy;
+            //if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            //continue;
             
-            //indx = (ix + jx + npsi) % npsi;
-            //indy = (iy + jy + nzpsi) % nzpsi;
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
             r0.x += w * c[idx].x;
@@ -455,13 +455,13 @@ void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
             w1 = -dphi(dym) * phi(dxm);
             w2 = -dphi(dxm) * phi(dym);
 
-            indx = ix + jx;
-            indy = iy + jy;
-            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
-            continue;
+            //indx = ix + jx;
+            //indy = iy + jy;
+            //if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            //continue;
             
-            //indx = (ix + jx + npsi) % npsi;
-            //indy = (iy + jy + nzpsi) % nzpsi;
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
@@ -562,13 +562,13 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
 
             w = phi(dxm, mag[0]) * phi(dym, mag[0]);
 
-            indx = ix + jx;
-            indy = iy + jy;
-            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
-            continue;
+            //indx = ix + jx;
+            //indy = iy + jy;
+            //if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            //continue;
             
-            //indx = (ix + jx + npsi) % npsi;
-            //indy = (iy + jy + nzpsi) % nzpsi;
+            indx = (ix + jx + npsi) % npsi;
+            indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
 

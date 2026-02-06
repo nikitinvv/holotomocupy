@@ -533,7 +533,7 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
     int ix, iy;
-    int indx, indy, f_ind, g_ind;
+    int indx, indy, g_ind;
     float x, y;
     float dx, dy;
     float dxm, dym;
@@ -562,25 +562,25 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
 
             w = phi(dxm, mag[0]) * phi(dym, mag[0]);
 
-            /*indx = ix + jx;
+            indx = ix + jx;
             indy = iy + jy;
             if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
             continue;
-            */
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
 
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
 
             if (dir == 0)
             {
-                g0.x += w * f[f_ind].x;
-                g0.y += w * f[f_ind].y;
+                g0.x += w * f[idx].x;
+                g0.y += w * f[idx].y;
             }
             else
             {
-                atomicAdd(&(f[f_ind].x), w * g0.x);
-                atomicAdd(&(f[f_ind].y), w * g0.y);
+                atomicAdd(&(f[idx].x), w * g0.x);
+                atomicAdd(&(f[idx].y), w * g0.y);
             }
         }
 

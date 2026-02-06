@@ -12,28 +12,17 @@ class Chunking:
     def __init__(self, nbytes, chunk, ngpus):
         # prepare containers
         self.stream = [[None for _ in range(3)] for _ in range(ngpus)]
-        self.pinned_mem = [None for _ in range(ngpus)]
         self.gpu_mem = [None for _ in range(ngpus)]
-        self.pool_inp = [None for _ in range(ngpus)]
-        self.pool_out = [None for _ in range(ngpus)]
-
-        # thread sizing for io operations for each gpu
-        per_gpu_threads = os.cpu_count() // 2 // ngpus
-
+        
         for igpu in range(ngpus):
             with cp.cuda.Device(igpu):
-                # pinned and device memory allocations
-                self.pinned_mem[igpu] = cp.cuda.alloc_pinned_memory(nbytes)
+                # device memory allocations
                 self.gpu_mem[igpu] = cp.cuda.alloc(nbytes)
 
                 # create dedicated streams (non_blocking for overlaps)
                 for k in range(3):
                     self.stream[igpu][k] = cp.cuda.Stream(non_blocking=True)
-
-                # per-GPU thread pools for IO/CPU-side work
-                self.pool_inp[igpu] = ThreadPoolExecutor(max_workers=per_gpu_threads)
-                self.pool_out[igpu] = ThreadPoolExecutor(max_workers=per_gpu_threads)
-
+                
         # pool to run different gpus
         self.pool = ThreadPoolExecutor(ngpus)
         self.chunk = chunk
@@ -135,64 +124,81 @@ class Chunking:
     def run(self, cl, out, inp, proper_inp, nonproper_inp, proper_out, nonproper_out, axis_out, axis_inp, func, igpu):
         """Run by chunks, the case where the size of chunking dimension is the same for inp and out"""
 
-        # set gpu and get references to pinned and gpu memory, and streams
+        # set gpu and get references to  gpu memory, and streams
         nvtx.push_range("run_init", color="red")
         cp.cuda.Device(igpu).use()
-        pinned_mem = self.pinned_mem[igpu]
         gpu_mem = self.gpu_mem[igpu]
         stream = self.stream[igpu]
-        pool_inp = self.pool_inp[igpu]
-        pool_out = self.pool_out[igpu]
-
+        
         size = inp[0].shape[axis_inp]
         nchunk = int(np.ceil(size / self.chunk))
 
-        # allocate pinned and gpu memory buffers
-        out_pinned, out_gpu, offset = self.alloc_double_buffers(out[:proper_out], axis_out, pinned_mem, gpu_mem, 0, self.chunk)
-        inp_pinned, inp_gpu, offset = self.alloc_double_buffers(inp[:proper_inp], axis_inp, pinned_mem, gpu_mem, offset, self.chunk)
+        # allocate gpu memory buffers
+        out_gpu, offset = self.alloc_double_buffers(out[:proper_out], axis_out, gpu_mem, 0, self.chunk)
+        inp_gpu, offset = self.alloc_double_buffers(inp[:proper_inp], axis_inp, gpu_mem, offset, self.chunk)
 
         # if any proper_inp:nonproper_inp array is numpy, copy it to gpu
         for k in range(proper_inp, proper_inp + nonproper_inp):
             inp[k] = cp.asarray(inp[k])
         nvtx.pop_range()
 
-       
-        
-        def c2p(buf_id, k):
+        def p2g(buf_id,k):
+
             st = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
             
             src = self.mk_slices(axis_inp, slice(st, end))
             dst = self.mk_slices(axis_inp, slice(0, end-st))
 
-            return [
-                self.copy(inp[j][src], inp_pinned[buf_id][j][dst], pool_inp)
-                for j in range(proper_inp)
-            ]
+            cur_stream = cp.cuda.get_current_stream()
+            for j in range(proper_inp): 
+                if axis_inp==1:       
+                    c_src = inp[j][src]
+                    c_dst = inp_gpu[buf_id][j][dst]
+                    rows = c_src.shape[0]
+                    row_bytes = c_src[0].nbytes
+                    dst_pitch = c_dst.strides[0]
+                    src_pitch = c_src.strides[0]
 
+                    cp.cuda.runtime.memcpy2DAsync(
+                        c_dst.data.ptr, dst_pitch,   
+                        c_src.ctypes.data,  src_pitch,      
+                        row_bytes, rows,
+                        cp.cuda.runtime.memcpyHostToDevice,
+                        cur_stream.ptr
+                    )
+                else:
+                    inp_gpu[buf_id][j][dst].set(inp[j][src])
+                
 
-        def p2c(buf_id, k):
+        def g2p(buf_id,k):
             st = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
             
             src = self.mk_slices(axis_out, slice(0, end-st))
             dst = self.mk_slices(axis_out, slice(st, end))
-
-            return [
-                self.copy(out_pinned[buf_id][j][src], out[j][dst], pool_out)
-                for j in range(proper_out)
-            ]
-
-
-        def p2g(buf_id):
-            for j in range(proper_inp):
-                inp_gpu[buf_id][j].set(inp_pinned[buf_id][j])
-
-
-        def g2p(buf_id):
+            cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_out):
-                out_gpu[buf_id][j].get(out=out_pinned[buf_id][j], blocking=False)
-
+                if axis_out==1:
+                    # for i in range(out[j].shape[0]):
+                    #     out_gpu[buf_id][j][(i,) + src[1:]].get(out=out[j][(i,) + dst[1:]], blocking=False)
+                    c_src = out_gpu[buf_id][j][src]
+                    c_dst = out[j][dst]
+                    rows = c_src.shape[0]
+                    row_bytes = c_src[0].nbytes
+                    dst_pitch = c_dst.strides[0]
+                    src_pitch = c_src.strides[0]
+                   
+                    cp.cuda.runtime.memcpy2DAsync(
+                        c_dst.ctypes.data, dst_pitch,    
+                        c_src.data.ptr,  src_pitch,       
+                        row_bytes, rows,
+                        cp.cuda.runtime.memcpyDeviceToHost,
+                        cur_stream.ptr
+                    )
+                else:
+                    out_gpu[buf_id][j][src].get(out=out[j][dst], blocking=False)
+                
 
         def p(buf_id, k):
             st = k * self.chunk
@@ -210,46 +216,31 @@ class Chunking:
                 *inp[proper_inp + nonproper_inp :],
             )
 
-
-        # Pipeline processing
-        th_inp, th_out = [], []
         
         # run by chunks, overlap data transfers and computations
         nvtx.push_range("run_loop", color="yellow")
-        for k in range(nchunk + 4):
+        for k in range(nchunk + 2):            
             if k < nchunk:
-                th_inp = c2p(k % 2, k) 
-            
+                with stream[k % 3]:
+                    p2g(k % 2, k)
+
             if 0 < k < nchunk + 1:
                 with stream[(k - 1) % 3]:
-                    p2g((k - 1) % 2)
+                    p((k - 1) % 2, k - 1)
 
-            if 1 < k < nchunk + 2:
+            if 1 < k:
                 with stream[(k - 2) % 3]:
-                    p((k - 2) % 2, k - 2)
-
-            if 2 < k < nchunk + 3:
-                with stream[(k - 3) % 3]:
-                    g2p((k - 3) % 2)
-
-            if k > 3: 
-                th_out = p2c((k - 4) % 2, k - 4) 
-
-            # Sync
+                    g2p((k - 2) % 2, k-2)
+            
             for s in stream:
                 s.synchronize()
-            for f in th_inp:
-                wait(f)
-            for f in th_out:
-                wait(f)
 
         nvtx.pop_range()         
             
 
-    def alloc_double_buffers(self, arrs, axis, pinned_mem, gpu_mem, offset, chunk):
-        """Allocate pinned and gpu memory buffers for each chunk for each variable (double for streaming)"""
+    def alloc_double_buffers(self, arrs, axis, gpu_mem, offset, chunk):
+        """Allocate gpu memory buffers for each chunk for each variable (double for streaming)"""
 
-        pinned = [[], []]
         gpu = [[], []]
 
         for j in (0, 1):  # double buffer
@@ -263,26 +254,13 @@ class Chunking:
                 nbytes = n * itemsize
 
                 try:
-                    pinned[j].append(np.frombuffer(pinned_mem + offset, a.dtype, n).reshape(shape0))
                     gpu[j].append(cp.ndarray(shape0, dtype=a.dtype, memptr=gpu_mem + offset))
                 except Exception as e:
-                    raise RuntimeError(f"Failed to allocate pinned/gpu buffers") from e
+                    raise RuntimeError(f"Failed to allocate gpu buffers") from e
 
                 offset += nbytes
 
-        return pinned, gpu, offset
-    
-    def copy(self, u, out, pool):
-        """Parallel array copy, numpy is too slow"""
-
-        def _copy(out, u, st, end):
-            out[st:end] = u[st:end]
-            return out
-
-        nthreads = min(pool._max_workers, u.shape[0])
-        nchunk = int(np.ceil(u.shape[0] / nthreads))
-        futures = [pool.submit(_copy, out, u, k * nchunk, min((k + 1) * nchunk, u.shape[0])) for k in range(nthreads)]
-        return futures
+        return gpu, offset    
 
     ####################### Slicing       #########################
     def slice_bufs(self, bufs, axis, n):

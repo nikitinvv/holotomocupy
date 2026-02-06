@@ -1,12 +1,16 @@
 
 ssh -t tomo@tomo5 "bash -c 'source ~/.bashrc; pkill -9 python; conda activate holotomocupy; \\
-cd /home/beams/TOMO/vnikitin/holotomocupy/experimental/Y350a_dist1234;ls; \\
-nohup python step6_rec_iterative_levels_denoising.py configs/config4.conf > out/run4.out & bash'" 
+cd /home/beams/TOMO/vnikitin/holotomocupy_work_perf/experimental/Y350a_dist1234;ls; \\
+nohup python step6_rec_iterative_levels.py configs/config10.conf > out/run10.out & bash'" 
 
 
-ssh -t tomo@tomo3 "bash -c 'source ~/.bashrc; pkill -9 python; conda activate holotomocupy; \\
-cd /home/beams/TOMO/vnikitin/holotomocupy/experimental/Y350a_dist1234;ls; \\
-nohup python step6_rec_iterative_levels_denoising.py configs/config5.conf > out/run5.out & bash'" 
+# ssh -t tomo@tomo3 "bash -c 'source ~/.bashrc; pkill -9 python; conda activate holotomocupy; \\
+# cd /home/beams/TOMO/vnikitin/holotomocupy/experimental/Y350a_dist1234;ls; \\
+# nohup python step6_rec_iterative_levels.py configs/config9.conf > out/run9.out & bash'" 
+
+# # ssh -t tomo@tomo3 "bash -c 'source ~/.bashrc; pkill -9 python; conda activate holotomocupy; \\
+# cd /home/beams/TOMO/vnikitin/holotomocupy/experimental/Y350a_dist1234;ls; \\
+# nohup python step6_rec_iterative_levels_denoising.py configs/config5.conf > out/run5.out & bash'" 
 
 
 

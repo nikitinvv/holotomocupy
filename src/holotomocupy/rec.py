@@ -95,6 +95,7 @@ class Rec:
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
+        vars["obj"] *= self.cl_tomo[0].mask.get()
 
         # precalculate proj        
         vars['proj'] = make_pinned([self.ntheta,self.nzobj,self.nobj],dtype=self.obj_dtype)

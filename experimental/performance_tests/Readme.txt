@@ -41,4 +41,6 @@ On Tesla A100 I typically set nchunk=32 for bin=2, nchunk=16 for bin=1, nchunk=2
 
 
 
+MPI support
 
+mpirun -np 2 ./bind.sh python rec_iterative_mpi.py config1.conf 

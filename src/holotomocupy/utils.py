@@ -8,7 +8,6 @@ import psutil
 import scipy as sp
 from functools import wraps
 
-
 from matplotlib_scalebar.scalebar import ScaleBar
 
 
@@ -96,7 +95,7 @@ def reprod(a,b):
     
 
 def redot(a, b,axis=None):
-    if axis is None:
+    if axis is None:        
         res = cp.vdot(a.view('float32'),b.view('float32'))
     else:
         res = cp.sum(reprod(a, b),axis=axis)
@@ -145,7 +144,7 @@ def timer(func):
         end_time = time.time()
         process = psutil.Process(os.getpid())
         # if (end_time - start_time>0.1):
-        #     print(f"{func.__name__}: {end_time - start_time:.4f} sec, {process.memory_info().rss / (1024**3):.2f} GB", flush=True)
+            # print(f"{func.__name__}: {end_time - start_time:.4f} sec, {process.memory_info().rss / (1024**3):.2f} GB", flush=True)
         return result
     return wrapper
 

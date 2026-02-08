@@ -72,10 +72,9 @@ class Rec:
         for ge in self.grads, self.etas:
             ge["obj"] = make_pinned([self.local_nzobj, self.nobj, self.nobj], dtype=self.obj_dtype)            
             ge["pos"] = make_pinned([self.local_ntheta, self.ndist, 2], dtype="float32")
-            ge["proj_tmp"] = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)            
             ge["prb"] = cp.empty([self.ndist, self.nz, self.n], dtype="complex64")
-
+        self.proj_tmp = make_pinned([self.ntheta,self.local_nzobj,self.nobj],dtype=self.obj_dtype)
         # normalization constant to address work with normal operators
         self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))
         # save convergence results
@@ -109,17 +108,17 @@ class Rec:
         # refs to preallocated memory for gradients
         grads = self.grads
         etas = self.etas
+        proj_tmp = self.proj_tmp
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
         # vars["obj"] *= self.cl_tomo[0].mask.get()
 
         # precalculate proj     
-        vars['proj_tmp'] = make_pinned([self.ntheta,self.local_nzobj,self.nobj],dtype=self.obj_dtype)        
         vars['proj'] = make_pinned([self.local_ntheta,self.nzobj,self.nobj],dtype=self.obj_dtype)                   
         
-        self.fwd_tomo(vars["obj"],out = vars['proj_tmp'])                    
-        self.redist(vars['proj_tmp'], vars['proj'])
+        self.fwd_tomo(vars["obj"],out = proj_tmp)                    
+        self.redist(proj_tmp, vars['proj'])
         
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
@@ -137,8 +136,8 @@ class Rec:
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
                         
             # keep projections in memory            
-            self.fwd_tomo(grads["obj"], out=grads["proj_tmp"])
-            self.cl_mpi.redist(grads['proj_tmp'], grads['proj'])
+            self.fwd_tomo(grads["obj"], out=proj_tmp)
+            self.cl_mpi.redist(proj_tmp, grads['proj'])
             
             if i == self.start_iter:
                 nvtx.push_range(":::BH:mulc_batch")
@@ -165,8 +164,8 @@ class Rec:
             # keep projections in memory  
             nvtx.push_range(":::BH:fwd_tomo")          
 
-            self.fwd_tomo(etas["obj"], out=etas["proj_tmp"])
-            self.cl_mpi.redist(etas['proj_tmp'], etas['proj'])
+            self.fwd_tomo(etas["obj"], out=proj_tmp)
+            self.cl_mpi.redist(proj_tmp, etas['proj'])
 
             nvtx.pop_range()
             
@@ -196,8 +195,8 @@ class Rec:
             # update proj for current u  
             nvtx.push_range(":::BH:fwd_tomo")          
 
-            self.fwd_tomo(vars["obj"], out=vars["proj_tmp"])
-            self.cl_mpi.redist(vars['proj_tmp'], vars['proj'])
+            self.fwd_tomo(vars["obj"], out=proj_tmp)
+            self.cl_mpi.redist(proj_tmp, vars['proj'])
 
             nvtx.pop_range()
             nvtx.pop_range()         
@@ -350,7 +349,7 @@ class Rec:
         _gradients_cascade(self,grads['proj'],grads['pos'],gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
 
         grads['prb'][:] = sum(gradprb[1:], gradprb[0])                
-        self.cl_mpi.redist(grads['proj'], grads['proj_tmp'],direction='backward')
+        self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         
         # part2, parallelization over object slices, formally gF4
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
@@ -358,7 +357,7 @@ class Rec:
             igpu = cp.cuda.Device().id
             gradu[:] = self.cl_tomo[igpu].RT(gradproj)
                     
-        _gF4(self, grads['obj'], grads['proj_tmp'])        
+        _gF4(self, grads['obj'], self.proj_tmp)        
     
     #### probe fit term
     def gradient_prbfit(self, grad_prb, prb):

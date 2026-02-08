@@ -7,6 +7,7 @@ import time
 import psutil
 import scipy as sp
 from functools import wraps
+from .logger_config import logger
 
 from matplotlib_scalebar.scalebar import ScaleBar
 
@@ -143,8 +144,8 @@ def timer(func):
         result = func(*args, **kwargs)
         end_time = time.time()
         process = psutil.Process(os.getpid())
-        # if (end_time - start_time>0.1):
-            # print(f"{func.__name__}: {end_time - start_time:.4f} sec, {process.memory_info().rss / (1024**3):.2f} GB", flush=True)
+        if (end_time - start_time>0.1):
+            logger.debug(f"{func.__name__}: {end_time - start_time:.4f} sec, process memory {process.memory_info().rss / (1024**3):.2f} GB")
         return result
     return wrapper
 

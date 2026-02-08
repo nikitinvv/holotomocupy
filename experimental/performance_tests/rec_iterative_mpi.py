@@ -7,10 +7,12 @@ from holotomocupy.rec_mpi import Rec
 from holotomocupy.config import parse_args
 from holotomocupy.utils import *
 from holotomocupy.reader import *
+from holotomocupy.logger_config import logger
 
 cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
-## read acquisition parameters from file
+
+logger.info(f"Read acquisition parameters")
 args = parse_args(sys.argv[1])
 read_acquisition_pars(args)
 
@@ -43,31 +45,33 @@ rargs = SimpleNamespace(
     comm=MPI.COMM_WORLD
 )
 
-## Create class
+
+
+logger.info(f"Create class")
 cl = Rec(rargs)
 
-## distrbution by chunks
-cl.cl_mpi.comm.Barrier()
-for r in range(cl.cl_mpi.size):
-    if cl.rank == r:
-        print(f"Rank {cl.rank}: obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.nobj} x {cl.nobj}")
-        print(f"Rank {cl.rank}: proj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.ntheta} x {cl.nobj}")
-        print(f"Rank {cl.rank}: projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta}x {cl.nzobj} x {cl.nobj}")
-cl.cl_mpi.comm.Barrier()
+logger.info(f"obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.nobj} x {cl.nobj}")
+logger.info(f"proj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.ntheta} x {cl.nobj}")
+logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta}x {cl.nzobj} x {cl.nobj}")
 
-## Read data
-obj = read_obj(args, cl.st_obj, cl.end_obj)    
-pos = read_pos(args, cl.st_theta, cl.end_theta)    
+
+logger.info(f'Read data')
+vars = {}
+vars['obj'] = read_obj(args, cl.st_obj, cl.end_obj)    
+vars['pos'] = read_pos(args, cl.st_theta, cl.end_theta)    
 data = read_data(args, cl.st_theta, cl.end_theta)
-prb = read_prb(args)    
+vars['prb'] = read_prb(args)    
 ref = read_ref(args)
 
-# copy to pinned
-vars = {'obj': obj, 'prb': prb, 'pos': pos}
-vars['prb'] = prb # gpu 
-vars['obj'] = copy_to_pinned(obj)
-vars['pos'] = copy_to_pinned(pos)
+
+
+logger.info(f'Copy to pinned')
+vars['obj'] = copy_to_pinned(vars['obj'] )
+vars['pos'] = copy_to_pinned(vars['pos'])
 data = copy_to_pinned(data)
 
+
+
+logger.info(f'Run reconstruction')
 vars = cl.BH(data, ref, vars)   
 

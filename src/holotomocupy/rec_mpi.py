@@ -6,6 +6,7 @@ import warnings
 import pandas as pd
 from datetime import datetime
 import nvtx
+import dxchange
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -13,6 +14,7 @@ from .shift import Shift
 from .chunking import Chunking 
 from .utils import *
 from .mpi_functions import *
+from .logger_config import logger
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
@@ -110,7 +112,7 @@ class Rec:
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
-        vars["obj"] *= self.cl_tomo[0].mask.get()
+        # vars["obj"] *= self.cl_tomo[0].mask.get()
 
         # precalculate proj     
         vars['proj_tmp'] = make_pinned([self.ntheta,self.local_nzobj,self.nobj],dtype=self.obj_dtype)        
@@ -716,18 +718,21 @@ class Rec:
             return
 
         (prb, obj, pos) = (vars["prb"], vars["obj"], vars["pos"])
-        # denormalize u for visualization
-        objs = make_pinned(obj.shape,obj.dtype)
-        self.mulc_batch(objs, obj, self.norm_const)
-
-        # visualization
-        mshow_complex(objs[obj.shape[0] // 2].real+1j*objs[:,obj.shape[1] // 2].real, self.show)
-        mshow_polar(prb[0], self.show)
-        mshow_pos(vars["pos"] - self.pos_init,self.show)
-        plt.savefig(f"{self.path_out}/rerr{i:04}.png")
-        plt.close()
         
-        save_intermediate(objs,prb,pos,f'{self.path_out}',i)
+        c = self.norm_const
+        if self.rank==0:
+            logger.info(f"Save prb to {self.path_out}/rec_prb_angle[0..{self.ndist}]/{i:04}")
+            for k in range(prb.shape[0]):
+                write_tiff(np.angle(prb[k]), f"{self.path_out}/rec_prb_angle{k}/{i:04}")
+                write_tiff(np.abs(prb[k]), f"{self.path_out}/rec_prb_abs{k}/{i:04}")
+        
+        logger.info(f"Save obj[{self.st_obj},{self.end_obj}].real to {self.path_out}/rec_obj_real/obj_{self.rank}_{i:04}.tiff")                
+        write_tiff(obj.real*c, f"{self.path_out}/rec_obj_real/obj_{self.rank}_{i:04}")
+        if obj.dtype=='complex64':
+            logger.info(f"Save obj[{self.st_obj},{self.end_obj}].imag to {self.path_out}/rec_obj_imag/obj_{self.rank}_{i:04}.tiff")                        
+            write_tiff(obj.imag*c, f"{self.path_out}/rec_obj_imag/obj_{self.rank}_{i:04}")
+        logger.info(f"Save pos[{self.st_obj},{self.end_obj}] to {self.path_out}/pos_{self.rank}_{i:04}.npy")                        
+        np.save(f"{self.path_out}/pos_{self.rank}_{i:04}", pos)
 
     def error_debug(self, vars, i):
         """Visualization and data saving"""
@@ -737,9 +742,11 @@ class Rec:
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])        
         if self.rank==0:
             ittime = time.time()-self.time_start           
-            print(f"{datetime.now().strftime("%H:%M:%S")} ngpus={self.ngpus} n={self.n} ntheta={self.ntheta} iter={i} {ittime=:.0f}s {err=:1.5e} ", flush=True)                        
+            logger.warning(f"iter={i} {ittime:.0f}s {err=:1.5e} ")                        
             self.table.loc[len(self.table)] = [i, err, ittime]
             self.time_start = time.time()
             name = f"{self.path_out}/conv.csv"
+            if i==0:
+                logger.info(f"Saving iter time and error to {self.path_out}/conv.csv")
             os.makedirs(os.path.dirname(name), exist_ok=True)
             self.table.to_csv(name, index=False)

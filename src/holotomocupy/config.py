@@ -41,7 +41,13 @@ def parse_args(config_file):
     args.start_iter = cfg.getint("start_iter") 
     args.rotation_center_shift = cfg.getfloat("rotation_center_shift") 
     args.ngpus = cfg.getint("ngpus") 
-    args.bin = cfg.getint("bin") 
-    args.smul = cfg.getfloat("smul") 
+    try:
+        args.bin = cfg.getint("bin") 
+    except:
+        pass
+    try:
+        args.unbin = cfg.getint("unbin") 
+    except:
+        pass
 
     return args

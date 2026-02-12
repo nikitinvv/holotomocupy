@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 import cupy as cp
+import scipy.ndimage as ndimage
 
 def read_acquisition_pars(args):
     """Read data acquisition parameters for holotomography"""
@@ -32,6 +33,22 @@ def read_obj(args,st,end):
         
     return obj
 
+def read_obj_unbin(args,st,end,out):    
+    """Read initial guess for the object"""
+    with h5py.File(args.in_file) as fid:        
+        obj = fid[f'/exchange/obj']        
+        if args.obj_dtype=='float32':
+            obj = obj[st//2**args.unbin:end//2**args.unbin, :].real
+        else:
+            obj = obj[st//2**args.unbin:end//2**args.unbin, :]
+
+        #out[:] = ndimage.zoom(obj,2**args.unbin,order=0).astype(args.obj_dtype)
+        for axis in [2,1,0]:
+            obj = np.repeat(obj, 2**args.unbin, axis=axis)
+        out[:] = obj
+        
+    return out    
+
 
 def read_pos(args,st,end):
     """Read initial guess for positions"""
@@ -49,6 +66,30 @@ def read_pos(args,st,end):
         
     return pos
 
+
+def read_pos_unbin(args,st,end,out):
+    """Read initial guess for positions"""
+    
+    with h5py.File(args.in_file) as fid:        
+        # positions initial guess        
+        pos = (fid[f'/exchange/cshifts_final'][args.ids[st:end],:args.ndist]).astype('float32')        
+        s = args.rotation_center_shift
+        pos[..., 1] += s
+    out[:] = pos*2**args.unbin
+    return out
+
+
+def read_pos_error_unbin(args,st,end,out):
+    """Read initial guess for positions"""
+    
+    with h5py.File(args.in_file) as fid:        
+        # positions initial guess        
+        pos = (fid[f'/exchange/cshifts_error'][args.ids[st:end],:args.ndist]).astype('float32')        
+        s = args.rotation_center_shift
+        pos[..., 1] += s
+    out[:] = pos*2**args.unbin
+    return out
+
 def read_prb(args):
     """"Read initial guess for the probe"""
     
@@ -57,6 +98,16 @@ def read_prb(args):
     n = args.n // 2**bin    
     prb = cp.ones([args.ndist, nz, n], dtype='complex64')    
     return prb    
+
+def read_prb_unbin(args, out):    
+    """Read initial guess for the probe"""
+    with h5py.File(args.in_file) as fid:        
+        prb = fid[f'/exchange/prb']        
+        #prb = ndimage.zoom(prb,[1,2**args.unbin,2**args.unbin],order=0).astype('complex64')
+        for axis in [2,1]:
+            prb = np.repeat(prb, 2**args.unbin, axis=axis)
+        out[:]=cp.array(prb).astype('complex64')
+    return out    
 
 
 def read_data(args,st_theta,end_theta):

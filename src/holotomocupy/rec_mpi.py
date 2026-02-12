@@ -4,9 +4,7 @@ import matplotlib.pyplot as plt
 import os
 import warnings
 import pandas as pd
-from datetime import datetime
 import nvtx
-import dxchange
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -35,7 +33,7 @@ class Rec:
         self.d2F = [self.d2F0, self.d2F1, self.d2F2, self.d2F3]
 
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
-        multiplier = 16  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
+        multiplier = 8  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
         complex_item = np.dtype("complex64").itemsize
         max_dim = max(self.nzobj, self.ntheta)
         nbytes = int(multiplier * self.nchunk * self.nobj * max_dim * complex_item)
@@ -111,8 +109,7 @@ class Rec:
         proj_tmp = self.proj_tmp
 
         # normalize to work with normal operators (do this once, restore in finally)
-        vars["obj"] /= self.norm_const
-        # vars["obj"] *= self.cl_tomo[0].mask.get()
+        vars["obj"] *= (self.cl_tomo[0].mask.get()/self.norm_const)
 
         # precalculate proj     
         vars['proj'] = make_pinned([self.local_ntheta,self.nzobj,self.nobj],dtype=self.obj_dtype)                   
@@ -120,14 +117,15 @@ class Rec:
         self.fwd_tomo(vars["obj"],out = proj_tmp)                    
         self.redist(proj_tmp, vars['proj'])
         
+        # calc init error
+        self.error_debug(vars, -1)
+        
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
+            if self.rank==0:
+                logger.warning(f"start iter {i}")
             nvtx.push_range("::BH:"+str(i))
-            
-            # error and visualization debug
-            self.error_debug(vars, i)
-            self.vis_debug(vars, i)
-
+                        
             # compute gradients
             self.gradients(vars, grads)             
                 
@@ -200,6 +198,11 @@ class Rec:
 
             nvtx.pop_range()
             nvtx.pop_range()         
+            
+            # error and visualization debug
+            self.error_debug(vars, i)
+            self.vis_debug(vars, i)
+
                         
         # normalize back
         vars["obj"] *= self.norm_const        
@@ -401,10 +404,8 @@ class Rec:
         
         @self.gpu_batch(axis_out=1, axis_inp=0,nout=1)
         def _fwd_tomo(self, out, obj):
-            nvtx.push_range("fwd_tomo")
             igpu = cp.cuda.Device().id
             out[:] = self.cl_tomo[igpu].R(obj)
-            nvtx.push_range("fwd_tomo")
             
         _fwd_tomo(self, out, obj)
         return out    
@@ -682,6 +683,7 @@ class Rec:
         y31 = y21
         return [y31, y32, y33]         
 
+    
     def min(self, prb, obj, pos,proj):
         ## batched computation
         out = [None]*self.ngpus
@@ -740,12 +742,38 @@ class Rec:
             
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])        
         if self.rank==0:
-            ittime = time.time()-self.time_start           
-            logger.warning(f"iter={i} {ittime:.0f}s {err=:1.5e} ")                        
-            self.table.loc[len(self.table)] = [i, err, ittime]
-            self.time_start = time.time()
-            name = f"{self.path_out}/conv.csv"
-            if i==0:
+            if i==-1:
                 logger.info(f"Saving iter time and error to {self.path_out}/conv.csv")
+                logger.warning(f"Initial {err=:1.5e} ")                        
+                self.table.loc[len(self.table)] = [i, err, 0]
+            else:                
+                ittime = time.time()-self.time_start           
+                logger.warning(f"iter={i} {ittime:.0f}s {err=:1.5e} ")                        
+                self.table.loc[len(self.table)] = [i, err, ittime]
+            self.time_start = time.time()
+            name = f"{self.path_out}/conv.csv"            
             os.makedirs(os.path.dirname(name), exist_ok=True)
             self.table.to_csv(name, index=False)
+
+    def gen_sqrt_data(self, vars, out):
+        """Generate synthetic data"""
+
+        vars["obj"] /= self.norm_const        
+        self.fwd_tomo(vars["obj"],out = self.proj_tmp)                    
+        self.redist(self.proj_tmp, vars['proj'])
+        @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
+        def _gen_data(self, out, proj, pos, prb):
+            x = [prb, proj, pos]
+            y = x  # forming output
+            # compute functional by applying operators in reverse order
+            for id in range(1, len(self.F))[::-1]:  
+                y = self.F[id](y)                
+            out[:] = cp.abs(y)
+        _gen_data(self, out, vars['proj'], vars['pos'], vars['prb'])                  
+        vars["obj"] *= self.norm_const        
+
+    def gen_sqrt_ref(self, prb, out):
+        """Generate synthetic reference"""
+        for j in range(self.ndist):
+            out[j] = cp.abs(self.cl_prop[0].D(prb[j : j + 1], j)[0])
+            

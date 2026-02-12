@@ -125,7 +125,6 @@ class Chunking:
         """Run by chunks, the case where the size of chunking dimension is the same for inp and out"""
 
         # set gpu and get references to  gpu memory, and streams
-        nvtx.push_range("run_init", color="red")
         cp.cuda.Device(igpu).use()
         gpu_mem = self.gpu_mem[igpu]
         stream = self.stream[igpu]
@@ -140,8 +139,7 @@ class Chunking:
         # if any proper_inp:nonproper_inp array is numpy, copy it to gpu
         for k in range(proper_inp, proper_inp + nonproper_inp):
             inp[k] = cp.asarray(inp[k])
-        nvtx.pop_range()
-
+        
         def p2g(buf_id,k):
 
             st = k * self.chunk
@@ -218,7 +216,7 @@ class Chunking:
 
         
         # run by chunks, overlap data transfers and computations
-        nvtx.push_range("run_loop", color="yellow")
+        nvtx.push_range("pipeline processing with streams", color="yellow")
         for k in range(nchunk + 2):            
             if k < nchunk:
                 with stream[k % 3]:

@@ -41,11 +41,15 @@ def read_obj_unbin(args,st,end,out):
             obj = obj[st//2**args.unbin:end//2**args.unbin, :].real
         else:
             obj = obj[st//2**args.unbin:end//2**args.unbin, :]
+        
+        # out[:] = ndimage.zoom(obj,scales,order=0).astype(args.obj_dtype)
+        for axis in [2,1]:
+            obj = np.repeat(obj, 2**args.unbin, axis=axis)        
 
-        #out[:] = ndimage.zoom(obj,2**args.unbin,order=0).astype(args.obj_dtype)
-        for axis in [2,1,0]:
-            obj = np.repeat(obj, 2**args.unbin, axis=axis)
-        out[:] = obj
+        n0 = end - st
+        idx0 = (np.arange(n0) / ((n0) / obj.shape[0])).astype(np.intp)  # floor mapping
+        idx0 = np.clip(idx0, 0, obj.shape[0] - 1)
+        out[:] = obj[idx0].astype(args.obj_dtype)
         
     return out    
 

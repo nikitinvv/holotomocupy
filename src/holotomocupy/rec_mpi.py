@@ -124,51 +124,59 @@ class Rec:
         for i in range(self.start_iter,self.niter):
             if self.rank==0:
                 logger.warning(f"start iter {i}")
+
             nvtx.push_range("::BH:"+str(i))
                         
             # compute gradients
-            self.gradients(vars, grads)             
+            nvtx.push_range("gradients")
+            self.gradients(vars, grads)      
+            nvtx.pop_range()       
                 
             # scale
             for v in ["obj", "prb", "pos"]:                
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
-                        
-            # keep projections in memory            
+
+            nvtx.push_range(":::BH:fwd_tomo")                                  
             self.fwd_tomo(grads["obj"], out=proj_tmp)
+            nvtx.pop_range()
+
+            nvtx.push_range(":::BH:redist",color='red')          
             self.cl_mpi.redist(proj_tmp, grads['proj'])
+            nvtx.pop_range()
             
             if i == self.start_iter:
-                nvtx.push_range(":::BH:mulc_batch")
-
                 # initial search direction (negative gradient)
                 for v in ["obj", "prb", "pos"]:
                     self.mulc_batch(etas[v], grads[v], -1)
 
-                nvtx.pop_range()
             else:
                 # calc beta using Hessian-weighted inner products
-                nvtx.push_range(":::BH:hessian")
+                nvtx.push_range(":::BH:calc beta")
 
                 top = self.hessian(vars, grads, etas)                         
                 bottom = self.hessian(vars, etas, etas)
                 beta = self.allreduce(top)/self.allreduce(bottom)      
 
+                nvtx.pop_range()
+
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)
 
-                nvtx.pop_range()
+                
             
             # keep projections in memory  
             nvtx.push_range(":::BH:fwd_tomo")          
-
             self.fwd_tomo(etas["obj"], out=proj_tmp)
-            self.cl_mpi.redist(proj_tmp, etas['proj'])
+            nvtx.pop_range()
 
+            nvtx.push_range(":::BH:redist",color='red')              
+            self.cl_mpi.redist(proj_tmp, etas['proj'])
             nvtx.pop_range()
             
+            
             # calc alpha (step length)            
-            nvtx.push_range(":::BH:redot_batch")
+            nvtx.push_range(":::BH:calc_alpha")
 
             top = 0
             for v in ["obj", "pos"]:                
@@ -176,33 +184,33 @@ class Rec:
             if self.cl_mpi.rank ==0:
                 top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
 
-            nvtx.pop_range()
-
-            nvtx.push_range(":::BH:hessian1")            
             bottom = self.hessian(vars, etas, etas)                              
+          
+            alpha = self.allreduce(top) / self.allreduce(bottom)      
             nvtx.pop_range()      
 
-            nvtx.push_range(":::BH:rest")
-            alpha = self.allreduce(top) / self.allreduce(bottom)      
             
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)
-            nvtx.pop_range()            
             
             # update proj for current u  
             nvtx.push_range(":::BH:fwd_tomo")          
-
             self.fwd_tomo(vars["obj"], out=proj_tmp)
-            self.cl_mpi.redist(proj_tmp, vars['proj'])
-
             nvtx.pop_range()
-            nvtx.pop_range()         
+
+            nvtx.push_range(":::BH:redist",color='red')   
+            self.cl_mpi.redist(proj_tmp, vars['proj'])
+            nvtx.pop_range()
+                   
             
             # error and visualization debug
+            nvtx.push_range(":::BH:calc error",color='gray')  
             self.error_debug(vars, i)
+            nvtx.pop_range()  
+            
             self.vis_debug(vars, i)
-
+            nvtx.pop_range()  
                         
         # normalize back
         vars["obj"] *= self.norm_const        
@@ -248,8 +256,7 @@ class Rec:
             x2, y2, z2, 
             x1, y1, z1, 
             x0, y0, z0, 
-        ):
-            nvtx.push_range("hessian_cascade")
+        ):            
             # reorganize inputs into ordered lists for cascade traversal
             x = [x0, x1, x2]
             y = [y0, y1, y2]
@@ -291,8 +298,7 @@ class Rec:
             # accumulate scalar result into per-GPU accumulator            
             out[:] += w
 
-            nvtx.pop_range()
-
+            
         _hessian_cascade(
             self, out, self.data,
             vars["pos"], grads["pos"], etas["pos"],
@@ -308,16 +314,14 @@ class Rec:
         """Full gradient, consists of 3 terms: 
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
-        """
+        """        
         
-        nvtx.push_range("gradients")
         self.gradients_cascade(vars,grads)
         
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
         ## copying to cpu before reduce for now
-        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
-        nvtx.pop_range()
+        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))        
         
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term
@@ -333,11 +337,10 @@ class Rec:
         gradprb = [None]*self.ngpus
         for igpu in range(self.ngpus):
             with cp.cuda.Device(igpu):
-                gradprb[igpu] = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
+                gradprb[igpu] = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")        
         
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
-        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):
-            nvtx.push_range("gradients_cascade")
+        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):            
 
             x = [prb, proj, pos]
             y = d 
@@ -348,19 +351,22 @@ class Rec:
             gradproj[:] = y[1]
             gradpos[:] = y[2]
 
-            nvtx.pop_range()
         _gradients_cascade(self,grads['proj'],grads['pos'],gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
-
-        grads['prb'][:] = sum(gradprb[1:], gradprb[0])                
-        self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         
-        # part2, parallelization over object slices, formally gF4
+        grads['prb'][:] = sum(gradprb[1:], gradprb[0])      
+        nvtx.push_range(":::BH:redist back",color='red')             
+        self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
+        nvtx.pop_range() 
+        
+        # part2, parallelization over object slices, formally gF4                
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
             igpu = cp.cuda.Device().id
             gradu[:] = self.cl_tomo[igpu].RT(gradproj)
-                    
-        _gF4(self, grads['obj'], self.proj_tmp)        
+        
+        nvtx.push_range("gF4",color='green')            
+        _gF4(self, grads['obj'], self.proj_tmp)      
+        nvtx.pop_range() 
     
     #### probe fit term
     def gradient_prbfit(self, grad_prb, prb):

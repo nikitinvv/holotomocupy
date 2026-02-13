@@ -146,7 +146,7 @@ class Rec:
             
             if i == self.start_iter:
                 # initial search direction (negative gradient)
-                for v in ["obj", "prb", "pos"]:
+                for v in ["obj", "prb", "pos", "proj"]:
                     self.mulc_batch(etas[v], grads[v], -1)
 
             else:
@@ -160,19 +160,19 @@ class Rec:
                 nvtx.pop_range()
 
                 # update search direction: eta = beta * previous_eta - grad
-                for v in ["obj", "prb", "pos"]:
+                for v in ["obj", "prb", "pos","proj"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)
 
                 
             
             # keep projections in memory  
-            nvtx.push_range(":::BH:fwd_tomo")          
-            self.fwd_tomo(etas["obj"], out=proj_tmp)
-            nvtx.pop_range()
+            # nvtx.push_range(":::BH:fwd_tomo")          
+            # self.fwd_tomo(etas["obj"], out=proj_tmp)
+            # nvtx.pop_range()
 
-            nvtx.push_range(":::BH:redist",color='red')              
-            self.cl_mpi.redist(proj_tmp, etas['proj'])
-            nvtx.pop_range()
+            # nvtx.push_range(":::BH:redist",color='red')              
+            # self.cl_mpi.redist(proj_tmp, etas['proj'])
+            # nvtx.pop_range()
             
             
             # calc alpha (step length)            
@@ -191,17 +191,17 @@ class Rec:
 
             
             # update variables: var = var+alpha*eta
-            for v in ["obj", "prb", "pos"]:
+            for v in ["obj", "prb", "pos", "proj"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)
             
-            # update proj for current u  
-            nvtx.push_range(":::BH:fwd_tomo")          
-            self.fwd_tomo(vars["obj"], out=proj_tmp)
-            nvtx.pop_range()
+            # # update proj for current u  
+            # nvtx.push_range(":::BH:fwd_tomo")          
+            # self.fwd_tomo(vars["obj"], out=proj_tmp)
+            # nvtx.pop_range()
 
-            nvtx.push_range(":::BH:redist",color='red')   
-            self.cl_mpi.redist(proj_tmp, vars['proj'])
-            nvtx.pop_range()
+            # nvtx.push_range(":::BH:redist",color='red')   
+            # self.cl_mpi.redist(proj_tmp, vars['proj'])
+            # nvtx.pop_range()
                    
             
             # error and visualization debug

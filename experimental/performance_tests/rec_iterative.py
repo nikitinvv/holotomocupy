@@ -8,7 +8,7 @@ from holotomocupy.rec import Rec
 from holotomocupy.config import parse_args
 from holotomocupy.utils import *
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
+cp.cuda.set_pinned_memory_allocator(None)
 
 def read_acquisition_pars(args):
     """Read data acquisition parameters for holotomography"""

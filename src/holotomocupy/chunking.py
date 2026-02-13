@@ -6,8 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
 import nvtx
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
-
 class Chunking:
     def __init__(self, nbytes, chunk, ngpus):
         # prepare containers

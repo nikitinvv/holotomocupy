@@ -16,7 +16,6 @@ from .utils import *
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
 class Rec:
     def __init__(self, args):

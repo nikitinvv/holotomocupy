@@ -9,7 +9,7 @@ from holotomocupy.utils import *
 from holotomocupy.reader import *
 from holotomocupy.logger_config import logger
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
+cp.cuda.set_pinned_memory_allocator(None)
 
 
 logger.info(f"Read acquisition parameters")

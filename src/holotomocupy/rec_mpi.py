@@ -17,7 +17,6 @@ from .logger_config import logger
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
 class Rec:
     def __init__(self, args):
@@ -97,7 +96,6 @@ class Rec:
         self.end_theta = self.cl_mpi.end_dst   
                         
     def BH(self, data, ref, vars):
-                
         # keep data and initial shifts in class
         self.data = data
         self.ref = ref
@@ -110,9 +108,8 @@ class Rec:
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] *= (self.cl_tomo[0].mask.get()/self.norm_const)
-
+        
         # precalculate proj     
-        vars['proj'] = make_pinned([self.local_ntheta,self.nzobj,self.nobj],dtype=self.obj_dtype)                   
         
         self.fwd_tomo(vars["obj"],out = proj_tmp)                    
         self.redist(proj_tmp, vars['proj'])

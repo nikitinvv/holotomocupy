@@ -1,4 +1,4 @@
-mpirun -np 6 -H tomo2-ib:2,tomo5-ib:4 bash -lc '
+mpirun -np 1 -H tomo5-ib:4 bash -lc '
 source ~/.bashrc
 which nvcc
 source ~/conda/miniforge3/etc/profile.d/conda.sh

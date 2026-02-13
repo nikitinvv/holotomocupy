@@ -358,7 +358,8 @@ class Rec:
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         nvtx.pop_range() 
         
-        # part2, parallelization over object slices, formally gF4                
+        # part2, parallelization over object slices, formally gF4  
+        @timer              
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
             igpu = cp.cuda.Device().id
@@ -689,7 +690,7 @@ class Rec:
         y31 = y21
         return [y31, y32, y33]         
 
-    
+    @timer
     def min(self, prb, obj, pos,proj):
         ## batched computation
         out = [None]*self.ngpus
@@ -741,6 +742,7 @@ class Rec:
         logger.info(f"Save pos[{self.st_obj},{self.end_obj}] to {self.path_out}/pos_{self.rank}_{i:04}.npy")                        
         np.save(f"{self.path_out}/pos_{self.rank}_{i:04}", pos)
 
+    
     def error_debug(self, vars, i):
         """Visualization and data saving"""
         if not (i % self.err_step == 0 and self.err_step != -1):
@@ -754,7 +756,7 @@ class Rec:
                 self.table.loc[len(self.table)] = [i, err, 0]
             else:                
                 ittime = time.time()-self.time_start           
-                logger.warning(f"iter={i} {ittime:.0f}s {err=:1.5e} ")                        
+                logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")                        
                 self.table.loc[len(self.table)] = [i, err, ittime]
             self.time_start = time.time()
             name = f"{self.path_out}/conv.csv"            

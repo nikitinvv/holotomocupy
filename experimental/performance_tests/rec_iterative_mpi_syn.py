@@ -56,22 +56,17 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 
 
 
-logger.info(f'Allocate large pinned and small gpu arrays')
+logger.info(f'Allocate memory and  read data with unbinning from {args.n} size to {cl.n}')
 vars = {}
 vars['prb'] = cp.empty([cl.ndist,cl.nz,cl.n],dtype="complex64")
-vars['pos'] = make_pinned([cl.end_theta-cl.st_theta,cl.ndist,2],dtype="float32")
-vars['obj'] = make_pinned([cl.end_obj-cl.st_obj,cl.nobj,cl.nobj],dtype=args.obj_dtype)
-vars['proj'] = make_pinned([cl.end_theta-cl.st_theta,cl.nzobj,cl.nobj],dtype=args.obj_dtype)
-data = make_pinned([cl.end_theta-cl.st_theta,cl.ndist,cl.nz,cl.n],dtype="float32")
-ref = cp.empty([cl.ndist,cl.nz,cl.n],dtype="float32")
-
-
-
-
-logger.info(f'Read and unbin (upsample) data from {args.n} size to {cl.n}')
 read_prb_unbin(args,out = vars['prb'])    
+
+vars['pos'] = make_pinned([cl.end_theta-cl.st_theta,cl.ndist,2],dtype="float32")
 read_pos_unbin(args, cl.st_theta, cl.end_theta,out = vars['pos'])    
+
+vars['obj'] = make_pinned([cl.end_obj-cl.st_obj,cl.nobj,cl.nobj],dtype=args.obj_dtype)
 read_obj_unbin(args, cl.st_obj, cl.end_obj,out = vars['obj'])    
+
 logger.debug(f"{vars['pos'].shape=}")
 logger.debug(f"{vars['prb'].shape=}")
 logger.debug(f"{vars['obj'].shape=}")
@@ -80,8 +75,14 @@ logger.debug(f"{vars['obj'].shape=}")
 
 cl.comm.Barrier()
 logger.info(f'Generate data')
+
+vars['proj'] = make_pinned([cl.end_theta-cl.st_theta,cl.nzobj,cl.nobj],dtype=args.obj_dtype)
+data = make_pinned([cl.end_theta-cl.st_theta,cl.ndist,cl.nz,cl.n],dtype="float32")
+ref = cp.empty([cl.ndist,cl.nz,cl.n],dtype="float32")
+
 cl.gen_sqrt_data(vars,data)
 cl.gen_sqrt_ref(vars['prb'],ref)
+
 logger.info(f'Save first from data for each node')
 write_tiff(data[0,0],f'{args.path_out}/data0_{cl.rank:03}',overwrite=True)
 write_tiff(data[0,-1],f'{args.path_out}/data1_{cl.rank:03}',overwrite=True)

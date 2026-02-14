@@ -108,7 +108,7 @@ class Rec:
         proj_tmp = self.proj_tmp
 
         # normalize to work with normal operators (do this once, restore in finally)
-        vars["obj"] *= (self.cl_tomo[0].mask.get()/self.norm_const)
+        vars["obj"] *= (self.cl_tomo[0].mask/self.norm_const)
         
         # precalculate proj     
         
@@ -600,7 +600,7 @@ class Rec:
             y12 = x22 * (-y22 * z22)
 
         if w22 is not None:
-            y12 += cp.exp(1j*x22) * 1j * w22
+            y12 = y12 + cp.exp(1j*x22) * 1j * w22
 
         y11 = w21
         
@@ -630,7 +630,7 @@ class Rec:
 
         x31, x32, x33 = x
 
-        x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype="complex64")
+        x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         igpu = cp.cuda.Device().id
         c = self.cl_shift[igpu].coeff(x32)
         for k in range(self.ndist):
@@ -646,12 +646,12 @@ class Rec:
         x31, x32, x33 = x
         y31, y32, y33 = y
 
-        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
+        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         igpu = cp.cuda.Device().id
         c = self.cl_shift[igpu].coeff(x32)
         c1 = self.cl_shift[igpu].coeff(y32)
         if return_x:
-            x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype="complex64")
+            x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
             for k in range(self.ndist):
                 r = x33[:, k]
                 x22[:, k] = self.cl_shift[igpu].curlySc(c, r, k)
@@ -672,7 +672,7 @@ class Rec:
         x31, x32, x33 = x
         y31, y32, y33 = y
         z31, z32, z33 = z
-        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
+        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         igpu = cp.cuda.Device().id
         c = self.cl_shift[igpu].coeff(x32)
         c1 = self.cl_shift[igpu].coeff(y32)
@@ -696,7 +696,7 @@ class Rec:
         z31, z32, z33 = z
         w31, w32, w33 = w
         
-        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
+        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         
         igpu = cp.cuda.Device().id
         
@@ -725,7 +725,7 @@ class Rec:
             x = self.F[id](x)
         x31,x32,x33 = x
 
-        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype='complex64')
+        y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype=self.obj_dtype)
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
         igpu = cp.cuda.Device().id
         c = self.cl_shift[igpu].coeff(x32)
@@ -734,10 +734,7 @@ class Rec:
             y32[:] += Deltapsi
             y33[:, k] = Deltar
         
-        y32[:] = self.cl_shift[igpu].coeff(y32)
-        if self.obj_dtype=='float32':
-            y32=y32.real
-        
+        y32[:] = self.cl_shift[igpu].coeff(y32)        
         
         y31 = y21
         return [y31, y32, y33]         

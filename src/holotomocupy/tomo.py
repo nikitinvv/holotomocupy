@@ -31,28 +31,25 @@ class Tomo:
         self.theta = cp.array(theta.astype("float32"))
 
         if mask_r > 0:
-            x = cp.linspace(-1, 1, self.n)
-            [x, y] = cp.meshgrid(x, x)
+            x = np.linspace(-1, 1, self.n)
+            [x, y] = np.meshgrid(x, x)
             circ = (x**2 + y**2 < mask_r).astype("float32")
-            g = cp.exp(-(20**2) * (x**2 + y**2))
+            g = np.exp(-(20**2) * (x**2 + y**2))
             # g/=np.linalg.norm(g)
-            fcirc = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(circ)))
-            fg = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(g)))
-            self.mask = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(fcirc * fg))).real.astype("float32")
-            self.mask /= cp.amax(self.mask)
+            fcirc = np.fft.fftshift(np.fft.fft2(np.fft.fftshift(circ)))
+            fg = np.fft.fftshift(np.fft.fft2(np.fft.fftshift(g)))
+            self.mask = np.fft.fftshift(np.fft.ifft2(np.fft.fftshift(fcirc * fg))).real.astype("float32")
+            self.mask /= np.amax(self.mask)
         else:
             self.mask = 1
 
-        phi *= self.mask/(cp.float32(n) * np.sqrt(n * self.ntheta))
+        phi *= cp.array(self.mask/(n * np.sqrt(n * self.ntheta)))
         self.pars = m, mua, phi, c1dfftshift, c2dfftshift
 
     def R(self, obj):
         """Radon transform"""
         [nz, n, n] = obj.shape
-        
-        ### if obj is float convert it to complex, and save type to convert the result back
-        dtype = obj.dtype
-        
+                
         m, mua, phi, c1dfftshift, c2dfftshift = self.pars
         sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
 
@@ -82,7 +79,7 @@ class Tomo:
         sino /= 4
 
         ### convert the result back
-        if dtype=='float32':
+        if obj.dtype=='float32':
             sino=sino.real
         return cp.ascontiguousarray(sino)
 
@@ -90,9 +87,6 @@ class Tomo:
         """Adjoint Radon transform"""
 
         [ntheta, nz, n] = data.shape
-        
-        ### if data is float convert it to complex, and save type to convert the result back
-        dtype = data.dtype
         
         m, mua, phi, c1dfftshift, c2dfftshift = self.pars
 
@@ -122,7 +116,7 @@ class Tomo:
         # STEP4: unpadding, multiplication by phi
         fde = fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi
         ## convert the result back
-        if dtype=='float32':
+        if data.dtype=='float32':
             fde=fde.real
         return cp.ascontiguousarray(fde)
 

@@ -269,6 +269,80 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
     "s",
 )
 
+
+sf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + r"""
+void __global__ s(float* g, float* f, float* r, float* mag,
+                  int n, int npsi, int nz, int nzpsi, int ntheta, bool dir)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int ix, iy;
+    int indy, indx, g_ind;
+    float x, y;
+    float dx, dy;
+    float dxm, dym;
+    float w;
+    float g0;
+
+    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
+    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+
+    ix = (int)floorf(x);
+    iy = (int)floorf(y);
+
+    dx = x - ix;
+    dy = y - iy;
+
+    g_ind = tx + ty * n + tz * n * nz;
+
+    if (dir == 0) g0 = {};
+    else g0 = g[g_ind];
+
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
+        {
+            dxm = dx - jx;
+            dym = dy - jy;
+
+            w = phi(dxm) * phi(dym);
+
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
+            
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
+
+            if (dir == 0)
+            {
+                g0 += w * f[idx];
+            }
+            else
+            {
+                atomicAdd(&(f[idx]), w * g0);
+            }
+        }
+
+    if (dir == 0) g[g_ind] = g0;
+}
+}
+""",
+    "s",
+)
+
 dt_kernel = cp.RawKernel(
     r"""
 extern "C"
@@ -328,6 +402,74 @@ void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
             int idx = indx + indy * npsi + tz * npsi * nzpsi;
             r0.x -= w * c[idx].x;
             r0.y -= w * c[idx].y;
+        }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "dt",
+)
+
+
+dtf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dt(float* res, float* c, float* r, float* mag, float* Deltar,
+                   int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int ix, iy;
+    int indx, indy;
+    float x, y;
+    float dx, dy;
+    float dxm, dym;
+    float Deltarx, Deltary;
+    float w;
+    float r0 = {};
+
+    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
+    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+
+    ix = (int)floorf(x);
+    iy = (int)floorf(y);
+
+    dx = x - ix;
+    dy = y - iy;
+
+    Deltarx = Deltar[2 * tz + 1];
+    Deltary = Deltar[2 * tz + 0];
+
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
+        {
+            dxm = dx - jx;
+            dym = dy - jy;
+
+            w = dphi(dxm) * phi(dym) * Deltarx
+              + dphi(dym) * phi(dxm) * Deltary;
+
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
+            
+
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
+            r0 -= w * c[idx];
         }
 
     res[tx + ty * n + tz * n * nz] = r0;
@@ -412,6 +554,81 @@ void __global__ d2t(float2* res, float2* c, float* r, float* mag,
     "d2t",
 )
 
+
+d2tf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + fun_d2phi
+    + r"""
+void __global__ d2t(float* res, float* c, float* r, float* mag,
+                    float* Deltar1, float* Deltar2,
+                    int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int ix, iy;
+    int indx, indy;
+    float x, y;
+    float dx, dy;
+    float dxm, dym;
+    float Deltar1x, Deltar1y;
+    float Deltar2x, Deltar2y;
+    float w;
+    float r0 = {};
+
+    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
+    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+
+    ix = (int)floorf(x);
+    iy = (int)floorf(y);
+
+    dx = x - ix;
+    dy = y - iy;
+
+    Deltar1x = Deltar1[2 * tz + 1];
+    Deltar1y = Deltar1[2 * tz + 0];
+    Deltar2x = Deltar2[2 * tz + 1];
+    Deltar2y = Deltar2[2 * tz + 0];
+
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
+        {
+            dxm = dx - jx;
+            dym = dy - jy;
+
+            w  = d2phi(dxm) * phi(dym) * Deltar1x * Deltar2x;
+            w += dphi(dxm) * dphi(dym)
+                 * (Deltar1x * Deltar2y + Deltar1y * Deltar2x);
+            w += phi(dxm) * d2phi(dym) * Deltar1y * Deltar2y;
+
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
+            
+
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
+            r0 += w * c[idx];
+        }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "d2t",
+)
+
 dtadj_kernel = cp.RawKernel(
     r"""
 extern "C"
@@ -483,6 +700,75 @@ void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
     "dtadj",
 )
 
+
+
+dtadjf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dtadj(float* dt1, float* dt2, float* c, float* r, float* mag,
+                      int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int ix, iy;
+    int indx, indy;
+    float x, y;
+    float dx, dy;
+    float dxm, dym;
+    float w1, w2;
+
+    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
+    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+
+    ix = (int)floorf(x);
+    iy = (int)floorf(y);
+
+    dx = x - ix;
+    dy = y - iy;
+
+    float dt10 = {};
+    float dt20 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+        for (int jx = -1; jx < 3; jx++)
+        {
+            dxm = dx - jx;
+            dym = dy - jy;
+
+            w1 = -dphi(dym) * phi(dxm);
+            w2 = -dphi(dxm) * phi(dym);
+
+            indx = ix + jx;
+            indy = iy + jy;
+            if (indx<0 ||indx>=npsi||indy<0||indy>=nzpsi) 
+            continue;
+            
+            //indx = (ix + jx + npsi) % npsi;
+            //indy = (iy + jy + nzpsi) % nzpsi;
+            
+
+            int idx = indx + indy * npsi + tz * npsi * nzpsi;
+
+            dt10 += w1 * c[idx];            
+            dt20 += w2 * c[idx];
+        }
+
+    dt1[tx + ty * n + tz * n * nz] = dt10;
+    dt2[tx + ty * n + tz * n * nz] = dt20;
+}
+}
+""",
+    "dtadj",
+)
 
 
 

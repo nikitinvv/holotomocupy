@@ -30,6 +30,7 @@ class Rec:
         self.gF = [self.gF0, self.gF1, self.gF2, self.gF3]
         self.dF = [self.dF0, self.dF1, self.dF2, self.dF3]
         self.d2F = [self.d2F0, self.d2F1, self.d2F2, self.d2F3]
+        self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2,self.d2F_dF3]
 
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
         multiplier = 8  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
@@ -158,19 +159,7 @@ class Rec:
 
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos","proj"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)
-
-                
-            
-            # keep projections in memory  
-            # nvtx.push_range(":::BH:fwd_tomo")          
-            # self.fwd_tomo(etas["obj"], out=proj_tmp)
-            # nvtx.pop_range()
-
-            # nvtx.push_range(":::BH:redist",color='red')              
-            # self.cl_mpi.redist(proj_tmp, etas['proj'])
-            # nvtx.pop_range()
-            
+                    self.linear_batch(etas[v], grads[v], beta, -1)                
             
             # calc alpha (step length)            
             nvtx.push_range(":::BH:calc_alpha")
@@ -185,21 +174,10 @@ class Rec:
           
             alpha = self.allreduce(top) / self.allreduce(bottom)      
             nvtx.pop_range()      
-
             
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos", "proj"]:
-                self.linear_batch(vars[v], etas[v], 1, alpha)
-            
-            # # update proj for current u  
-            # nvtx.push_range(":::BH:fwd_tomo")          
-            # self.fwd_tomo(vars["obj"], out=proj_tmp)
-            # nvtx.pop_range()
-
-            # nvtx.push_range(":::BH:redist",color='red')   
-            # self.cl_mpi.redist(proj_tmp, vars['proj'])
-            # nvtx.pop_range()
-                   
+                self.linear_batch(vars[v], etas[v], 1, alpha)            
             
             # error and visualization debug
             nvtx.push_range(":::BH:calc error",color='gray')  
@@ -258,32 +236,15 @@ class Rec:
             x = [x0, x1, x2]
             y = [y0, y1, y2]
             z = [z0, z1, z2]
-            w = [cp.zeros_like(x0),cp.zeros_like(x1),cp.zeros_like(x2)]
+            w = [None,None,None]
             
-            for id in range(len(self.F))[::-1]:
-                # compute second derivative and first differentials for this level
-                if id == 0:
-                    d2f1 = self.d2F[id](x, y, z, d)
-                    d2f2 = self.dF[id](x, w, d, return_x=False)
-                else:
-                    d2f1 = self.d2F[id](x, y, z)                                        
-                    d2f2 = self.dF[id](x, w, return_x=False)
-                    
-                # reuse d2f1 as working accumulator and add contribution from d2f2
-                w = d2f1
-                if isinstance(w, list):
-                    for iv in range(len(w)):                        
-                        w[iv] += d2f2[iv]
-                else:
-                    w += d2f2
-                d2f2 = []  # clear memory
-                # last iteration produces scalar contribution -> accumulate and exit
-                if id == 0:
-                    break
-                    
-                # check whether y and z share same object (avoid duplicate work)
-                y_is_z = y[0] is z[0]
+            # check whether y and z share same object (avoid duplicate work)
+            y_is_z = y[0] is z[0]
 
+            for id in range(1,len(self.F))[::-1]:
+                # compute d2F(dFy,dFz)+dF(d2F(y,z))                                
+                w = self.d2F_dF[id](x, y, z, w)                        
+                
                 # propagate differentials to the next level: fx, dF(x)(y)
                 fx, y = self.dF[id](x, y)  # returns (fx, dfx(y))
                 if y_is_z:
@@ -292,8 +253,8 @@ class Rec:
                     z = self.dF[id](x, z, return_x=False)  # returns dfx(z)
                 x = fx
 
-            # accumulate scalar result into per-GPU accumulator            
-            out[:] += w
+            # outer functional
+            out[:] += self.d2F_dF[0](x, y, z, w, d)
 
             
         _hessian_cascade(
@@ -318,7 +279,7 @@ class Rec:
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
         ## copying to cpu before reduce for now
-        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))        
+        grads['prb'][:] = self.allreduce(grads['prb'])        
         
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term
@@ -373,14 +334,12 @@ class Rec:
         
         if self.lam_prbfit == 0:
             return
-        grad_prbfit = cp.zeros_like(prb)
         igpu = cp.cuda.Device().id
         for j in range(self.ndist):
             tmp = self.cl_prop[igpu].D(prb[j : j + 1], j)
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
-            grad_prbfit[j : j + 1] += self.cl_prop[igpu].DT(2 * (tmp - td), j)
-        grad_prb[:] += self.lam_prbfit / self.prb_size * grad_prbfit
-
+            grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop[igpu].DT(2 * (tmp - td), j)
+        
     def hessian_prbfit(self, prb, dprb1, dprb2):
         """Hessian with respect to the term 
         lam_prbfit|||Dprb|-ref||_2^2"""
@@ -452,7 +411,25 @@ class Rec:
         v1 = cp.sum((1 - d0) * reprod(y0, z0))
         v2 = cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))
         return 2 * (v1 + v2)/ self.data_size
-    
+
+    @nvtx.annotate("d2F0_dF0", color="purple")
+    def d2F_dF0(self, x, y, z, w, d):
+        """In: (x0,y0,z0,w0), Out: const"""
+        
+        x0 = x
+        y0 = y
+        z0 = z
+        w0 = w
+        
+        l0 = x0 / (cp.abs(x0))
+        d0 = d / (cp.abs(x0))
+        v = cp.sum((1 - d0) * reprod(y0, z0))
+        v += cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))        
+        if w is not None:
+            v +=  redot(x - d * l0, w0)
+        
+        return v * 2 / self.data_size
+     
     @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
@@ -513,6 +490,34 @@ class Rec:
         else:
             for j in range(self.ndist):
                 y0[:, j] = self.cl_prop[igpu].D(y11[j] * z12[:, j], j) + self.cl_prop[igpu].D(z11[j] * y12[:, j], j)
+
+        return y0
+
+    @nvtx.annotate("d2F_dF1", color="purple")
+    def d2F_dF1(self, x, y, z, w):
+        """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
+
+        x11, x12 = x
+        y11, y12 = y
+        z11, z12 = z
+        w11, w12 = w
+        
+        igpu = cp.cuda.Device().id
+        y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
+        
+        for j in range(self.ndist):
+                    
+            if y12 is z12:
+                y0[:, j] = 2 * y11[j] * y12[:, j]
+            else:
+                y0[:, j] = y11[j] * z12[:, j] + z11[j] * y12[:, j]
+            
+            if w11 is not None:
+                y0[:, j] += w11[j] * x12[:, j]
+            if w12 is not None:
+                y0[:, j] += x11[j] * w12[:, j]
+
+            y0[:, j] = self.cl_prop[igpu].D(y0[:, j],j)                
 
         return y0
     
@@ -576,6 +581,28 @@ class Rec:
             y12 = x22 * (-y22 * z22)
 
         y11 = cp.zeros_like(y21)
+        
+        return [y11, y12]
+    
+    @nvtx.annotate("d2F_dF2", color="purple")
+    def d2F_dF2(self, x, y, z, w):
+        """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
+
+        x21, x22 = x
+        y21, y22 = y
+        z21, z22 = z
+        w21, w22 = w
+        
+        
+        if y22 is z22:
+            y12 = x22 * (-(y22**2))
+        else:
+            y12 = x22 * (-y22 * z22)
+
+        if w22 is not None:
+            y12 += cp.exp(1j*x22) * 1j * w22
+
+        y11 = w21
         
         return [y11, y12]
     
@@ -657,6 +684,34 @@ class Rec:
             y22[:, k] = self.cl_shift[igpu].d2curlySc(c, r, k, c1, Deltar_y, c2, Deltar_z)
 
         y21 = cp.zeros_like(y31)
+        
+        return [y21, y22]
+    
+    @nvtx.annotate("d2F_dF3", color="purple")
+    def d2F_dF3(self, x, y, z, w):
+        """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
+        
+        x31, x32, x33 = x
+        y31, y32, y33 = y
+        z31, z32, z33 = z
+        w31, w32, w33 = w
+        
+        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype="complex64")
+        
+        igpu = cp.cuda.Device().id
+        
+        c = self.cl_shift[igpu].coeff(x32)        
+        cy = self.cl_shift[igpu].coeff(y32)
+        cz = self.cl_shift[igpu].coeff(z32)
+        for k in range(self.ndist):
+            y22[:, k] = self.cl_shift[igpu].d2curlySc(c, x33[:, k], k, cy, y33[:, k], cz, z33[:, k])
+
+        if w32 is not None:
+            cy = self.cl_shift[igpu].coeff(w32)                
+            for k in range(self.ndist):
+                y22[:, k] += self.cl_shift[igpu].dcurlySc(c, x33[:, k], k, cy, w33[:, k])      
+
+        y21 = w31
         
         return [y21, y22]
     

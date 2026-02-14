@@ -24,7 +24,8 @@ class Tomo:
         c2dtmp = 1 - 2 * ((cp.arange(1, 2 * n + 1) % 2)).astype("int8")
         c2dfftshift = cp.outer(c2dtmp, c2dtmp)
 
-        self.pars = m, mu, phi, c1dfftshift, c2dfftshift
+        mua = cp.array([mu], dtype="float32")        
+        
         self.n = n
         self.ntheta = len(theta)
         self.theta = cp.array(theta.astype("float32"))
@@ -42,41 +43,43 @@ class Tomo:
         else:
             self.mask = 1
 
+        phi *= self.mask/(cp.float32(n) * np.sqrt(n * self.ntheta))
+        self.pars = m, mua, phi, c1dfftshift, c2dfftshift
+
     def R(self, obj):
         """Radon transform"""
         [nz, n, n] = obj.shape
         
         ### if obj is float convert it to complex, and save type to convert the result back
         dtype = obj.dtype
-        obj = obj.astype('complex64')
-
-        theta = cp.array(self.theta, dtype="float32")
-
-        m, mu, phi, c1dfftshift, c2dfftshift = self.pars
+        
+        m, mua, phi, c1dfftshift, c2dfftshift = self.pars
         sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
 
         # STEP0: multiplication by phi, padding
-        fde = obj * phi * self.mask
+        fde = obj * phi
         fde = cp.pad(fde, ((0, 0), (n // 2, n // 2), (n // 2, n // 2)))
         # STEP1: fft 2d
-        fde = cp.fft.fft2(fde * c2dfftshift) * c2dfftshift
-
-        mua = cp.array([mu], dtype="float32")
+        fde*=c2dfftshift
+        fde = cp.fft.fft2(fde)
+        fde *= c2dfftshift
 
         gather_kernel(
             (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
             (32, 32, 1),
-            (sino, fde, theta, m, mua, n, self.ntheta, nz, 0),
+            (sino, fde, self.theta, m, mua, n, self.ntheta, nz, 0),
         )
         # STEP3: ifft 1d
-        sino = cp.fft.ifft(c1dfftshift * sino) * c1dfftshift
+        sino*=c1dfftshift
+        sino= cp.fft.ifft(sino) 
+        sino*= c1dfftshift
 
         # STEP4: Shift based on the rotation axis
         # t = cp.fft.fftfreq(n).astype("float32")
         # w = cp.exp(2 * cp.pi * 1j * t * (-self.rotation_axis + n / 2))
         # sino = cp.fft.ifft(w * cp.fft.fft(sino))
         # normalization for the unity test
-        sino /= cp.float32(4 * n) * np.sqrt(n * self.ntheta)
+        sino /= 4
 
         ### convert the result back
         if dtype=='float32':
@@ -90,11 +93,8 @@ class Tomo:
         
         ### if data is float convert it to complex, and save type to convert the result back
         dtype = data.dtype
-        data = data.astype('complex64')
         
-        theta = cp.array(self.theta, dtype="float32")
-
-        m, mu, phi, c1dfftshift, c2dfftshift = self.pars
+        m, mua, phi, c1dfftshift, c2dfftshift = self.pars
 
         # STEP0: Shift based on the rotation axis
         # t = cp.fft.fftfreq(n).astype("float32")
@@ -102,24 +102,25 @@ class Tomo:
         # sino = cp.fft.ifft(w * cp.fft.fft(sino))
 
         # STEP1: fft 1d
-        sino = cp.fft.fft(c1dfftshift * data) * c1dfftshift
+        sino = data.copy()
+        sino*=c1dfftshift
+        sino = cp.fft.fft(sino) 
+        sino*= c1dfftshift
 
         # STEP2: interpolation (gathering) in the frequency domain
-        # dont understand why RawKernel cant work with float, I have to send it as an array (TODO)
-        mua = cp.array([mu], dtype="float32")
         fde = cp.zeros([nz, 2 * n, 2 * n], dtype="complex64")
         gather_kernel(
             (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
             (32, 32, 1),
-            (sino, fde, theta, m, mua, n, self.ntheta, nz, 1),
+            (sino, fde, self.theta, m, mua, n, self.ntheta, nz, 1),
         )
         # STEP3: ifft 2d
-        fde = cp.fft.ifft2(fde * c2dfftshift) * c2dfftshift
+        fde*=c2dfftshift
+        fde[:] = cp.fft.ifft2(fde)
+        fde *= c2dfftshift
 
         # STEP4: unpadding, multiplication by phi
         fde = fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi
-        fde /= cp.float32(n) * np.sqrt(n * ntheta)  # normalization for the unity test
-        fde *= self.mask
         ## convert the result back
         if dtype=='float32':
             fde=fde.real

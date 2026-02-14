@@ -10,7 +10,10 @@ from holotomocupy.reader import *
 from holotomocupy.logger_config import logger
 
 cp.cuda.set_pinned_memory_allocator(None)
+pool = cp.get_default_memory_pool()
 
+# # Limit pool to 5 GiB
+# pool.set_limit(size=5 * 1024**3)
 
 logger.info(f"Read acquisition parameters")
 args = parse_args(sys.argv[1])

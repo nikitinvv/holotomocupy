@@ -34,43 +34,65 @@ class Shift():
         out=(-2<t)*(t<=-1)*6*(t+2)**1+(-1<t)*(t<=1)*(-12+18*t*cp.sign(t))+(1<t)*(t<=2)*6*(2-t)
         return out  
 
-    def coeff(self,psi):
+    def coeff(self,psi):        
         out=cp.fft.ifft2(cp.fft.fft2(psi)*self.ifB3)
+        if self.obj_dtype=='float32':
+            out = out.real
         return out      
 
     def S(self, c, r, imagn):
         ntheta = c.shape[0]
-        spsi = cp.zeros([ntheta,self.nz,self.n], dtype="complex64")
+        spsi = cp.zeros([ntheta,self.nz,self.n], dtype=self.obj_dtype)
         c = cp.ascontiguousarray(c)
         r = cp.ascontiguousarray(r)
-        
-        s_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi, self.nz, self.nzpsi, ntheta,0),
-                )
+        if self.obj_dtype=='complex64':
+            s_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi, self.nz, self.nzpsi, ntheta,0),
+                    )
+        else:
+            sf_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi, self.nz, self.nzpsi, ntheta,0),
+                    )
         return spsi
     
     def Sadj(self, spsi, r, imagn):
         ntheta = spsi.shape[0]
-        c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype="complex64")
+        c = cp.zeros([ntheta,self.nzpsi,self.npsi], dtype=self.obj_dtype)
         spsi = cp.ascontiguousarray(spsi)
         r = cp.ascontiguousarray(r)
         
-        
-        s_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
-                )
+        if self.obj_dtype=='complex64':
+            s_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
+                    )
+        else:
+            sf_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (spsi, c, r, self.mag[imagn:imagn+1] , self.n, self.npsi,self.nz, self.nzpsi, ntheta,1),
+                    )
         return c
     
     def dS(self, c, r, imagn, Deltac):
@@ -84,40 +106,64 @@ class Shift():
     def dT(self, c, r, imagn, Deltar):
         """dT following formula (32) in the ptychography paper"""  
         ntheta = c.shape[0]        
-        res = cp.zeros([ntheta,self.nz,self.n], dtype="complex64")
+        res = cp.zeros([ntheta,self.nz,self.n], dtype=self.obj_dtype)
         c = cp.ascontiguousarray(c)
         
         r = cp.ascontiguousarray(r)
         Deltar = cp.ascontiguousarray(Deltar)
-        dt_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (res, c, r, self.mag[imagn:imagn+1], Deltar, self.n,self.npsi,self.nz,self.nzpsi, ntheta),
-                )
+        
+        if self.obj_dtype=='complex64':
+            dt_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (res, c, r, self.mag[imagn:imagn+1], Deltar, self.n,self.npsi,self.nz,self.nzpsi, ntheta),
+                    )
+        else:
+            dtf_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (res, c, r, self.mag[imagn:imagn+1], Deltar, self.n,self.npsi,self.nz,self.nzpsi, ntheta),
+                    )
         return res   
 
     def dTadj(self, c, r, imagn, Deltaphi):
         ntheta = c.shape[0]     
         out = cp.zeros(r.shape, dtype="float32")
-        dt1 = cp.zeros(Deltaphi.shape, dtype="complex64")
-        dt2 = cp.zeros(Deltaphi.shape, dtype="complex64")      
+        dt1 = cp.zeros(Deltaphi.shape, self.obj_dtype)
+        dt2 = cp.zeros(Deltaphi.shape, self.obj_dtype)
         c = cp.ascontiguousarray(c)
         r = cp.ascontiguousarray(r)
         Deltaphi = cp.ascontiguousarray(Deltaphi)
         
-        dtadj_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (dt1, dt2, c, r, self.mag[imagn:imagn+1], self.n, self.npsi,self.nz, self.nzpsi, ntheta),
-                )
+        if self.obj_dtype=='complex64':
+            dtadj_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (dt1, dt2, c, r, self.mag[imagn:imagn+1], self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    )
+        else:
+            dtadjf_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (dt1, dt2, c, r, self.mag[imagn:imagn+1], self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    )
+
         
         out[:, 0] = redot(Deltaphi, dt1, axis=(1, 2))
         out[:, 1] = redot(Deltaphi, dt2, axis=(1, 2))
@@ -126,21 +172,33 @@ class Shift():
     def d2T(self, c, r, imagn, Deltar1,Deltar2):
         """d2T following formula (33) in the ptychography paper"""
         ntheta = c.shape[0]        
-        res = cp.zeros([ntheta,self.nz,self.n], dtype="complex64")
+        res = cp.zeros([ntheta,self.nz,self.n], self.obj_dtype)
         c = cp.ascontiguousarray(c)
         r = cp.ascontiguousarray(r)
         Deltar1 = cp.ascontiguousarray(Deltar1)
         Deltar2 = cp.ascontiguousarray(Deltar2)
         
-        d2t_kernel(
-                    (
-                        math.ceil(self.n / 32),
-                        math.ceil(self.nz / 32),
-                        ntheta,
-                    ),
-                    (32, 32, 1),
-                    (res, c, r, self.mag[imagn:imagn+1], Deltar1, Deltar2, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
-                )
+        if self.obj_dtype=='complex64':
+            d2t_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (res, c, r, self.mag[imagn:imagn+1], Deltar1, Deltar2, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    )
+        else:
+            d2tf_kernel(
+                        (
+                            math.ceil(self.n / 32),
+                            math.ceil(self.nz / 32),
+                            ntheta,
+                        ),
+                        (32, 32, 1),
+                        (res, c, r, self.mag[imagn:imagn+1], Deltar1, Deltar2, self.n, self.npsi,self.nz, self.nzpsi, ntheta),
+                    )
+
     
         return res   
 
@@ -224,22 +282,16 @@ class Shift():
 
     def curlySc(self, c, r, imagn):
         out=self.S(c,r,imagn)
-        if self.obj_dtype=='float32':
-            out=out.real
         return out
     
     def dcurlySc(self, c, r, imagn, c1, Deltar):
         
         out = self.dS(c,r,imagn,c1)+self.dT(c,r,imagn,Deltar)
-        if self.obj_dtype=='float32':
-            out=out.real
         return out
     
    
     def dcurlySadjc(self, c, r, imagn, Deltaphi):
-        Deltaphi = Deltaphi.astype('complex64')# temporarily        
         out1 = self.dSadj(c, r, imagn, Deltaphi)
-        
         out2 = self.dTadj(c, r, imagn, Deltaphi)
         out = [out1, out2]
         return out
@@ -247,7 +299,7 @@ class Shift():
     def d2curlySc(self, c, r, imagn, c1, Deltar1, c2, Deltar2):
         """dcurlyS following formula below (33) in the ptychography paper"""
         
-        out = self.dT(c1, r, imagn, Deltar2)+self.dT(c2, r, imagn, Deltar1)+self.d2T(c, r, imagn, Deltar1, Deltar2)
-        if self.obj_dtype=='float32':
-            out=out.real
+        out = self.dT(c1, r, imagn, Deltar2)
+        out+= self.dT(c2, r, imagn, Deltar1)
+        out+= self.d2T(c, r, imagn, Deltar1, Deltar2)
         return out        

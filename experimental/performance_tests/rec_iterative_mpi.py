@@ -69,6 +69,7 @@ logger.info(f'Copy to pinned')
 vars['obj'] = copy_to_pinned(vars['obj'] )
 vars['pos'] = copy_to_pinned(vars['pos'])
 data = copy_to_pinned(data)
+vars['proj'] = make_pinned([cl.end_theta-cl.st_theta,cl.nzobj,cl.nobj],dtype=args.obj_dtype)
 
 
 

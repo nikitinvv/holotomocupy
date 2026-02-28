@@ -167,3 +167,9 @@ class MPIClass:
 
     def allreduce(self, arr):
         return self.comm.allreduce(arr, op=MPI.SUM)
+
+    def allreduce2(self, a, b):
+        """Sum-reduce two scalars across ranks in a single MPI call."""
+        buf = np.array([a, b], dtype='float64')
+        self.comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.SUM)
+        return float(buf[0]), float(buf[1])

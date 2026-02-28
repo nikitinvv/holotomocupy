@@ -5,13 +5,14 @@ from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.reader import Reader
 from holotomocupy.writer import Writer
-from holotomocupy.logger_config import logger
+from holotomocupy.logger_config import logger, set_log_level
 
 import cupy as cp
 cp.cuda.set_pinned_memory_allocator(None)
 
 
 args = parse_args(sys.argv[1])
+set_log_level(args.log_level)
 comm = MPI.COMM_WORLD
 args.comm = comm
 

@@ -32,7 +32,12 @@ handler.setFormatter(ColorMessageFormatter(
 ))
 
 logger = logging.getLogger("")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 logger.handlers.clear()
 logger.addHandler(handler)
 logger.propagate = False
+
+
+def set_log_level(level: str):
+    """Set the root logger level from a string (DEBUG/INFO/WARNING/ERROR)."""
+    logger.setLevel(level.upper())

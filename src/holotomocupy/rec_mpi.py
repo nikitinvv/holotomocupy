@@ -82,7 +82,8 @@ class Rec:
         self.linear_batch = self.cl_chunking.linear_batch
         self.mulc_batch = self.cl_chunking.mulc_batch
         self.redist = self.cl_mpi.redist
-        self.allreduce = self.cl_mpi.allreduce
+        self.allreduce  = self.cl_mpi.allreduce
+        self.allreduce2 = self.cl_mpi.allreduce2
 
     def alloc_arrays(self):
         """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
@@ -159,9 +160,10 @@ class Rec:
                 # calc beta using Hessian-weighted inner products
                 nvtx.push_range(":::BH:calc beta")
 
-                top = self.hessian(vars, grads, etas)                         
+                top = self.hessian(vars, grads, etas)
                 bottom = self.hessian(vars, etas, etas)
-                beta = self.allreduce(top)/self.allreduce(bottom)      
+                top, bottom = self.allreduce2(top, bottom)
+                beta = top / bottom
 
                 nvtx.pop_range()
 
@@ -178,9 +180,10 @@ class Rec:
             if self.cl_mpi.rank ==0:
                 top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
 
-            bottom = self.hessian(vars, etas, etas)                              
-          
-            alpha = self.allreduce(top) / self.allreduce(bottom)      
+            bottom = self.hessian(vars, etas, etas)
+
+            top, bottom = self.allreduce2(top, bottom)
+            alpha = top / bottom
             nvtx.pop_range()      
             
             # update variables: var = var+alpha*eta

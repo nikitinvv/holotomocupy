@@ -35,6 +35,7 @@ def parse_args(config_file):
         args.start_iter = cfg.getint("start_iter")
         args.rotation_center_shift = cfg.getfloat("rotation_center_shift")
         args.bin = cfg.getint("bin")
+        args.log_level = cfg.get("log_level", fallback="WARNING")
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
     

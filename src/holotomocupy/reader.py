@@ -90,9 +90,9 @@ class Reader:
                     self.ids[self.st_theta:self.end_theta], :self.ndist
                 ].astype('float32')
             else:
-                out[:] = fid[f'/exchange/cshifts_final'][
+                out[:] = cp.array(fid[f'/exchange/cshifts_final'][
                     self.ids[self.st_theta:self.end_theta], :self.ndist
-                ]
+                ], dtype='float32')
         out /= 2**self.bin
         s = self.rotation_center_shift
         for _ in range(self.bin):
@@ -149,7 +149,7 @@ class Reader:
         If out_obj / out_pos / out_prb are provided (pre-allocated pinned / GPU arrays),
         data is written directly into them — no extra allocation or copy.
 
-        Returns dict with keys 'obj' (CPU NumPy), 'prb' (GPU CuPy), 'pos' (CPU NumPy).
+        Returns dict with keys 'obj' (CPU NumPy), 'prb' (GPU CuPy), 'pos' (GPU CuPy).
         """
         with h5py.File(path, 'r') as f:
             obj_dtype = f.attrs['obj_dtype']
@@ -172,9 +172,9 @@ class Reader:
                 out_prb[:] = cp.array(prb_arr)
 
             if out_pos is None:
-                out_pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
+                out_pos = cp.array(f['pos'][self.st_theta:self.end_theta].astype('float32'))
             else:
-                out_pos[:] = f['pos'][self.st_theta:self.end_theta]
+                out_pos[:] = cp.array(f['pos'][self.st_theta:self.end_theta], dtype='float32')
 
         return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos}
 
@@ -202,9 +202,9 @@ class Reader:
     def read_pos_unbin(self, out):
         """Read initial positions with optional upsampling."""
         with h5py.File(self.in_file, 'r') as fid:
-            pos = fid['/exchange/cshifts_final'][
+            pos = cp.array(fid['/exchange/cshifts_final'][
                 self.ids[self.st_theta:self.end_theta], :self.ndist
-            ].astype('float32')
+            ].astype('float32'))
         pos[..., 1] += self.rotation_center_shift
         out[:] = pos * 2**(-self.bin)
         return out
@@ -212,9 +212,9 @@ class Reader:
     def read_pos_error_unbin(self, out):
         """Read position errors with optional upsampling."""
         with h5py.File(self.in_file, 'r') as fid:
-            pos = fid['/exchange/cshifts_error'][
+            pos = cp.array(fid['/exchange/cshifts_error'][
                 self.ids[self.st_theta:self.end_theta], :self.ndist
-            ].astype('float32')
+            ].astype('float32'))
         pos[..., 1] += self.rotation_center_shift
         out[:] = pos * 2**(-self.bin)
         return out

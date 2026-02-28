@@ -17,11 +17,13 @@ class Chunking:
           inp1_proper, ..., inp1_nonproper, ..., inp1, inp2, ...)
 
         where
-        out*_proper  are output numpy arrays whose shape[axis_out] equals the
-                     chunking dimension size.
-        inp*_proper  are input  numpy arrays whose shape[axis_inp] equals the
-                     chunking dimension size.
-        out*_nonproper are lists-of-1 CuPy array (filled in-place on the GPU,
+        out*_proper  are numpy or cupy arrays whose shape[axis_out] equals the
+                     chunking dimension size. Numpy arrays are transferred D2H
+                     per chunk; CuPy arrays are written in-place on the GPU.
+        inp*_proper  are numpy or cupy arrays whose shape[axis_inp] equals the
+                     chunking dimension size. Numpy arrays are transferred H2D
+                     per chunk; CuPy arrays are sliced directly on the GPU.
+        out*_nonproper are CuPy arrays of non-chunking shape (filled in-place,
                      no CPU transfer).
         inp*_nonproper are numpy/CuPy arrays of non-chunking shape (replicated
                      to the GPU once).
@@ -44,7 +46,7 @@ class Chunking:
                 proper_out,   nonproper_out   = 0, 0
 
                 for k in range(len(out)):
-                    if (isinstance(out[k], np.ndarray)
+                    if ((isinstance(out[k], np.ndarray) or isinstance(out[k], cp.ndarray))
                             and len(out[k].shape) > axis_out + 1
                             and out[k].shape[axis_out] == size):
                         proper_out += 1
@@ -52,7 +54,7 @@ class Chunking:
                         nonproper_out += 1
 
                 for k in range(len(inp)):
-                    if (isinstance(inp[k], np.ndarray)
+                    if ((isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray))
                             and len(inp[k].shape) > axis_inp + 1
                             and inp[k].shape[axis_inp] == size):
                         proper_inp += 1
@@ -115,7 +117,10 @@ class Chunking:
                         cur_stream.ptr,
                     )
                 else:
-                    inp_gpu[buf_id][j][dst].set(inp[j][src])
+                    if isinstance(inp[j], cp.ndarray):
+                        cp.copyto(inp_gpu[buf_id][j][dst], inp[j][src])
+                    else:
+                        inp_gpu[buf_id][j][dst].set(inp[j][src])
 
         def g2p(buf_id, k):
             st  = k * self.chunk
@@ -137,7 +142,10 @@ class Chunking:
                         cur_stream.ptr,
                     )
                 else:
-                    out_gpu[buf_id][j][src].get(out=out[j][dst], blocking=False)
+                    if isinstance(out[j], cp.ndarray):
+                        cp.copyto(out[j][dst], out_gpu[buf_id][j][src])
+                    else:
+                        out_gpu[buf_id][j][src].get(out=out[j][dst], blocking=False)
 
         def p(buf_id, k):
             st  = k * self.chunk

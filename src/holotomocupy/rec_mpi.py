@@ -90,7 +90,7 @@ class Rec:
         # reconstruction variables
         self.vars = {
             'obj':  make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype),
-            'pos':  make_pinned([self.local_ntheta,  self.ndist, 2],       dtype='float32'),
+            'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
             'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
         }
@@ -101,7 +101,7 @@ class Rec:
         self.grads, self.etas = {}, {}
         for ge in self.grads, self.etas:
             ge["obj"]  = make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype)
-            ge["pos"]  = make_pinned([self.local_ntheta, self.ndist, 2],        dtype='float32')
+            ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
         self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)

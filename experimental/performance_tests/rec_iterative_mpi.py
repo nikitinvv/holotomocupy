@@ -1,78 +1,63 @@
-import numpy as np
-import cupy as cp
 import sys
-from types import SimpleNamespace
 from mpi4py import MPI
 from holotomocupy.rec_mpi import Rec
 from holotomocupy.config import parse_args
-from holotomocupy.utils import *
-from holotomocupy.reader import *
+from holotomocupy.mpi_functions import MPIClass
+from holotomocupy.reader import Reader, find_latest_checkpoint
+from holotomocupy.writer import Writer
 from holotomocupy.logger_config import logger
 
+import cupy as cp
 cp.cuda.set_pinned_memory_allocator(None)
 
 
-logger.info(f"Read acquisition parameters")
 args = parse_args(sys.argv[1])
-read_acquisition_pars(args)
+comm = MPI.COMM_WORLD
+args.comm = comm
 
-# Form reconstruction parameters
-rargs = SimpleNamespace(
-    ngpus=args.ngpus,
-    ndist=args.ndist,
-    ntheta=args.ntheta,
-    energy=args.energy,        
-    focustodetectordistance=args.focustodetectordistance,        
-    z1=args.z1,   
-    theta=args.theta,
-    mask=args.mask,        
-    lam_prbfit=args.lam_prbfit,
-    lam_reg=args.lam_reg,
-    obj_dtype=args.obj_dtype,
-    rho=args.rho,      
-    n = args.n // 2**args.bin,
-    nz = args.nz // 2**args.bin,
-    nobj = args.nobj // 2**args.bin,
-    nzobj = args.nzobj // 2**args.bin,
-    detector_pixelsize = args.detector_pixelsize * 2**args.bin,       
-    nchunk = args.nchunk[0],
-    niter = args.niter[0],
-    vis_step = args.vis_step[0],
-    err_step = args.err_step[0],
-    path_out = f"{args.path_out}/{args.bin}",    
-    start_iter = 0,
-    show=False,         
-    comm=MPI.COMM_WORLD
+cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
+
+reader = Reader(
+    args.in_file, comm,
+    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
+    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
+)
+writer = Writer(
+    args.path_out, comm,
+    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
+    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    args.ndist, args.nz, args.n, args.obj_dtype,
 )
 
+# physics parameters read from the data file
+args.energy                  = reader.energy
+args.focustodetectordistance = reader.focustodetectordistance
+args.z1                      = reader.z1
+args.detector_pixelsize      = reader.detector_pixelsize
+args.theta                   = reader.theta
 
-
-logger.info(f"Create class")
-cl = Rec(rargs)
+logger.info("Create class")
+cl = Rec(args)
 
 logger.info(f"obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.nobj} x {cl.nobj}")
 logger.info(f"proj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.ntheta} x {cl.nobj}")
-logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta}x {cl.nzobj} x {cl.nobj}")
+logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta} x {cl.nzobj} x {cl.nobj}")
 
+logger.info("Read data")
+reader.read_data(out=cl.data)
+reader.read_ref(out=cl.ref)
 
-logger.info(f'Read data')
-vars = {}
-vars['obj'] = read_obj(args, cl.st_obj, cl.end_obj)    
-vars['pos'] = read_pos(args, cl.st_theta, cl.end_theta)    
-data = read_data(args, cl.st_theta, cl.end_theta)
-vars['prb'] = read_prb(args)    
-ref = read_ref(args)
+logger.info("Read initial variables")
+ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
+if ckpt:
+    logger.info(f"Resuming from checkpoint: {ckpt}")
+    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+else:
+    reader.read_obj(out=cl.vars['obj'])
+    reader.read_pos(out=cl.vars['pos'])
+    reader.read_prb(out=cl.vars['prb'])
 
-
-
-logger.info(f'Copy to pinned')
-vars['obj'] = copy_to_pinned(vars['obj'] )
-vars['pos'] = copy_to_pinned(vars['pos'])
-data = copy_to_pinned(data)
-vars['proj'] = make_pinned([cl.end_theta-cl.st_theta,cl.nzobj,cl.nobj],dtype=args.obj_dtype)
-
-
-
-logger.info(f'Run reconstruction')
-vars = cl.BH(data, ref, vars)   
-
+logger.info("Run reconstruction")
+cl.BH(writer=writer)

@@ -9,7 +9,7 @@ import nvtx
 from .tomo import Tomo
 from .propagation import Propagation
 from .shift import Shift
-from .chunking import Chunking
+from .chunking import Chunking 
 from .utils import *
 from .mpi_functions import *
 from .logger_config import logger
@@ -23,7 +23,7 @@ class Rec:
 
         # copy args to elements of the class
         for key, value in vars(args).items():
-            setattr(self, key, value)
+            setattr(self, key, value)        
 
         # list of functionals, gradients, differentials, and second-order differentials
         self.F = [self.F0, self.F1, self.F2, self.F3]
@@ -38,47 +38,47 @@ class Rec:
         max_dim = max(self.nzobj, self.ntheta)
         nbytes = int(multiplier * self.nchunk * self.nobj * max_dim * complex_item)
 
+        # X-ray propagation and magnification parameters for classes
+        wavelength = 1.24e-09 / args.energy
+        z2 = args.focustodetectordistance - args.z1
+        magnifications = args.focustodetectordistance / args.z1
+        norm_magnifications = magnifications / magnifications[0]
+        distance = (args.z1 * z2) / args.focustodetectordistance * norm_magnifications**2
+        voxelsize = args.detector_pixelsize / magnifications[0]
+        self.rho_sq = {'obj':args.rho[0]**2,'prb':args.rho[1]**2,'pos':args.rho[2]**2}
+
         ### multinode processing
-        self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
+        self.cl_mpi = MPIClass(args.comm,self.nzobj,self.ntheta,self.nobj,args.obj_dtype)
         self.local_nzobj = self.cl_mpi.local_n_src
         self.local_ntheta = self.cl_mpi.local_n_dst
-        self.rank      = self.cl_mpi.rank
-        self.st_obj    = self.cl_mpi.st_src
-        self.end_obj   = self.cl_mpi.end_src
-        self.st_theta  = self.cl_mpi.st_dst
-        self.end_theta = self.cl_mpi.end_dst
-
-        # X-ray propagation and magnification parameters for classes
-        wavelength = 1.24e-09 / self.energy
-        z2 = self.focustodetectordistance - self.z1
-        magnifications = self.focustodetectordistance / self.z1
-        norm_magnifications = magnifications / magnifications[0]
-        distance = (self.z1 * z2) / self.focustodetectordistance * norm_magnifications**2
-        voxelsize = self.detector_pixelsize / magnifications[0]
-
-        # scaling variables
-        self.rho_sq = {'obj': args.rho[0]**2, 'prb': args.rho[1]**2, 'pos': args.rho[2]**2}
 
         # create classes
         self.cl_chunking = Chunking(nbytes, self.nchunk, self.ngpus)
         self.cl_tomo = [None for _ in range(self.ngpus)]
         self.cl_prop = [None for _ in range(self.ngpus)]
-        self.cl_shift = [None for _ in range(self.ngpus)]
-
+        self.cl_shift = [None for _ in range(self.ngpus)]        
+        
         for igpu in range(self.ngpus):
             with cp.cuda.Device(igpu):
+                # initialize processing classes per gpu
                 self.cl_tomo[igpu] = Tomo(self.nobj, self.theta, self.mask)
                 self.cl_prop[igpu] = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
-                self.cl_shift[igpu] = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
+                self.cl_shift[igpu] = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications,self.obj_dtype)
 
-        self.alloc_arrays()
-
-        # save convergence results
-        self.table = pd.DataFrame(columns=["iter", "err", "time"])
-
+        # preallocate memory for the gradient and conjugate direction
+        self.grads, self.grads1, self.etas = {}, {}, {}
+        for ge in self.grads, self.etas:
+            ge["obj"] = make_pinned([self.local_nzobj, self.nobj, self.nobj], dtype=self.obj_dtype)            
+            ge["pos"] = make_pinned([self.local_ntheta, self.ndist, 2], dtype="float32")
+            ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)            
+            ge["prb"] = cp.empty([self.ndist, self.nz, self.n], dtype="complex64")
+        self.proj_tmp = make_pinned([self.ntheta,self.local_nzobj,self.nobj],dtype=self.obj_dtype)
         # normalization constant to address work with normal operators
-        self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))        
-        # sizes for normalization        
+        self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))
+        # save convergence results
+        self.table = pd.DataFrame(columns=["iter", "err", "alpha", "time"])    
+
+        # sizes for normalization
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
         self.obj_size = self.nzobj * self.nobj**2
@@ -88,43 +88,64 @@ class Rec:
         self.redot_batch = self.cl_chunking.redot_batch
         self.linear_batch = self.cl_chunking.linear_batch
         self.mulc_batch = self.cl_chunking.mulc_batch
-        self.redist = self.cl_mpi.redist
+        self.redist = self.cl_mpi.redist 
         self.allreduce = self.cl_mpi.allreduce
+        self.rank = self.cl_mpi.rank 
+        self.st_obj = self.cl_mpi.st_src 
+        self.end_obj = self.cl_mpi.end_src 
+        self.st_theta = self.cl_mpi.st_dst 
+        self.end_theta = self.cl_mpi.end_dst   
 
-    def alloc_arrays(self):
-        """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
-        prb_shape = [self.ndist, self.nz, self.n]
-        # reconstruction variables
-        self.vars = {
-            'obj':  make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype),
-            'pos':  make_pinned([self.local_ntheta,  self.ndist, 2],       dtype='float32'),
-            'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
-            'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
-        }
-        # measurement data and reference
-        self.data = make_pinned([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
-        self.ref  = cp.empty(prb_shape,                                           dtype='float32')
-        # gradient and conjugate-direction buffers
-        self.grads, self.etas = {}, {}
-        for ge in self.grads, self.etas:
-            ge["obj"]  = make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype)
-            ge["pos"]  = make_pinned([self.local_ntheta, self.ndist, 2],        dtype='float32')
-            ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
-            ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
-        self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+    
+    def beta_pr(self,gk, gk1):
+        """
+        Polak–Ribière beta for real or complex gradients.
+        Uses Hermitian inner products; returns a real scalar.
+        """
+        top = 0
+        bottom = 0
+        for v in ['pos','prb','obj']:
+            y = gk1[v] - gk[v]
+            top += np.vdot(gk1[v].view('float32'), y.view('float32'))          # g_{k+1}^H (g_{k+1}-g_k)
+            bottom += np.vdot(gk[v].view('float32'), gk[v].view('float32'))          # g_k^H g_k  (real >= 0)
+        beta = self.allreduce(top)/self.allreduce(bottom)      
+        return beta
 
-    def BH(self, writer=None):
+    def beta_pr_plus(self,gk, gk1):
+        """PR+ safeguard: max(beta_PR, 0)."""
+        return max(0.0, self.beta_pr(gk, gk1))
 
-        self.pos_init = vars['pos'].copy()
-        # refs to preallocated memory for gradients        
+    def line_search(self,vars,etas,alpha):
+
+        
+        err0 = self.min(vars['prb'],vars['obj'],vars['pos'],vars['proj'])
+        # update variables: var = var+alpha*eta
+        for k in range(10):
+            for v in ["obj", "prb", "pos", "proj"]:
+                self.grads[v][:] = vars[v]+ alpha*etas[v]        
+                err1 = self.min(self.grads['prb'],self.grads['obj'],self.grads['pos'],self.grads['proj'])
+                if self.rank==0:
+                    print(alpha,err0,err1)
+                if err1<err0:
+                    err0 = err1
+                    return alpha
+                else:
+                    alpha/=1.5
+        
+    def BH(self, data, ref, vars):
+        # keep data and initial shifts in class
+        self.data = data
+        self.ref = ref
+        self.pos_init = vars["pos"].copy()
+
+        # refs to preallocated memory for gradients
         grads = self.grads
+        grads1 = self.grads1
         etas = self.etas
         proj_tmp = self.proj_tmp
 
         # normalize to work with normal operators (do this once, restore in finally)
-        vars["obj"] /= self.norm_const
-        if self.start_iter==0:
-            vars["obj"]*=self.cl_tomo[0].mask
+        vars["obj"] *= (self.cl_tomo[0].mask/self.norm_const)
         
         # precalculate proj     
         
@@ -132,15 +153,20 @@ class Rec:
         self.redist(proj_tmp, vars['proj'])
         
         # calc init error
-        self.error_debug(vars, -1)
+        self.error_debug(vars,1, -1)
         
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
-            
+            # if self.rank==0:
+            #     logger.warning(f"start iter {i}")
+
             nvtx.push_range("::BH:"+str(i))
                         
             # compute gradients
             nvtx.push_range("gradients")
+
+            for v in ["obj", "prb", "pos", 'proj']:                
+                grads1[v] = grads[v].copy()
             self.gradients(vars, grads)      
             nvtx.pop_range()       
                 
@@ -168,6 +194,12 @@ class Rec:
                 top = self.hessian(vars, grads, etas)                         
                 bottom = self.hessian(vars, etas, etas)
                 beta = self.allreduce(top)/self.allreduce(bottom)      
+                beta=max(0,beta)
+                if self.rank==0:
+                    print('BH',beta)
+                beta = self.beta_pr_plus(grads1,grads)                
+                if self.rank==0:
+                    print('Polak',beta)
 
                 nvtx.pop_range()
 
@@ -186,7 +218,10 @@ class Rec:
 
             bottom = self.hessian(vars, etas, etas)                              
           
-            alpha = self.allreduce(top) / self.allreduce(bottom)      
+            alpha = self.allreduce(top) / self.allreduce(bottom)  
+            alpha = self.line_search(vars,etas,4*495122800.0)
+            # alpha = 495122800.0 *1/3
+            print(alpha)
             nvtx.pop_range()      
             
             # update variables: var = var+alpha*eta
@@ -195,10 +230,10 @@ class Rec:
             
             # error and visualization debug
             nvtx.push_range(":::BH:calc error",color='gray')  
-            self.error_debug(vars, i)
+            self.error_debug(vars, alpha, i)
             nvtx.pop_range()  
             
-            self.vis_debug(vars, i, writer)
+            self.vis_debug(vars, i)
             nvtx.pop_range()  
                         
         # normalize back
@@ -783,19 +818,30 @@ class Rec:
                 out += self.lam_prbfit / self.prb_size * cp.linalg.norm(cp.abs(Dprb) - self.ref[j]) ** 2
         return self.allreduce(out.get())
 
-    def vis_debug(self, vars, i,writer=None):
-        """Save reconstruction checkpoint to HDF5."""
+    def vis_debug(self, vars, i):
+        """Visualization and data saving"""
         if not (i % self.vis_step == 0 and self.vis_step != -1):
             return
-        if writer is not None:
-            writer.write_checkpoint(vars, i, self.norm_const)
-        else:
-            mshow_complex(vars['obj'][self.nzobj//2],True)
-            mshow_polar(vars['prb'][0],True)
-            mshow_pos(vars['pos']-self.pos_init,True)
-            
+
+        (prb, obj, pos) = (vars["prb"], vars["obj"], vars["pos"])
+        
+        c = self.norm_const
+        if self.rank==0:
+            logger.info(f"Save prb to {self.path_out}/rec_prb_angle[0..{self.ndist}]/{i:04}")
+            for k in range(prb.shape[0]):
+                write_tiff(np.angle(prb[k]), f"{self.path_out}/rec_prb_angle{k}/{i:04}")
+                write_tiff(np.abs(prb[k]), f"{self.path_out}/rec_prb_abs{k}/{i:04}")
+        
+        logger.info(f"Save obj[{self.st_obj},{self.end_obj}].real to {self.path_out}/rec_obj_real/obj_{self.rank}_{i:04}.tiff")                
+        write_tiff(obj.real*c, f"{self.path_out}/rec_obj_real/obj_{self.rank}_{i:04}")
+        if obj.dtype=='complex64':
+            logger.info(f"Save obj[{self.st_obj},{self.end_obj}].imag to {self.path_out}/rec_obj_imag/obj_{self.rank}_{i:04}.tiff")                        
+            write_tiff(obj.imag*c, f"{self.path_out}/rec_obj_imag/obj_{self.rank}_{i:04}")
+        logger.info(f"Save pos[{self.st_obj},{self.end_obj}] to {self.path_out}/pos_{self.rank}_{i:04}.npy")                        
+        np.save(f"{self.path_out}/pos_{self.rank}_{i:04}", pos)
+
     
-    def error_debug(self, vars, i):
+    def error_debug(self, vars, alpha, i):
         """Visualization and data saving"""
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
@@ -803,17 +849,17 @@ class Rec:
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])        
         if self.rank==0:
             if i==-1:
+                logger.info(f"Saving iter time and error to {self.path_out}/conv.csv")
                 logger.warning(f"Initial {err=:1.5e} ")                        
-                self.table.loc[len(self.table)] = [i, err, 0]
+                self.table.loc[len(self.table)] = [i, err, alpha,0]
             else:                
                 ittime = time.time()-self.time_start           
                 logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")                        
-                self.table.loc[len(self.table)] = [i, err, ittime]
+                self.table.loc[len(self.table)] = [i, err, alpha, ittime]
             self.time_start = time.time()
-            if hasattr(self, 'path_out'):
-                name = f"{self.path_out}/conv.csv"
-                os.makedirs(os.path.dirname(name), exist_ok=True)
-                self.table.to_csv(name, index=False)
+            name = f"{self.path_out}/conv.csv"            
+            os.makedirs(os.path.dirname(name), exist_ok=True)
+            self.table.to_csv(name, index=False)
 
     def gen_sqrt_data(self, vars, out):
         """Generate synthetic data"""

@@ -29,7 +29,6 @@ class Rec:
         self.F = [self.F0, self.F1, self.F2, self.F3]
         self.gF = [self.gF0, self.gF1, self.gF2, self.gF3]
         self.dF = [self.dF0, self.dF1, self.dF2, self.dF3]
-        self.d2F = [self.d2F0, self.d2F1, self.d2F2, self.d2F3]
         self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2,self.d2F_dF3]
 
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
@@ -295,8 +294,7 @@ class Rec:
         """
 
         # part1, parallelization over angles
-        gradprb = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
-        
+        grads['prb'][:] = 0
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
         def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):            
 
@@ -309,9 +307,8 @@ class Rec:
             gradproj[:] = y[1]
             gradpos[:] = y[2]
 
-        _gradients_cascade(self,grads['proj'],grads['pos'],gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
+        _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],self.data,vars["proj"],vars["pos"],vars["prb"])
         
-        grads['prb'][:] = gradprb
         nvtx.push_range(":::BH:redist back",color='red')             
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         nvtx.pop_range() 
@@ -393,21 +390,7 @@ class Rec:
 
         tmp = 2 * (x - d * (x0 / cp.abs(x0)))
         return redot(tmp, y0) / self.data_size
-    
-    @nvtx.annotate("d2F0", color="green")
-    def d2F0(self, x, y, z, d):
-        """In: (x0,y0,z0), Out: const"""
         
-        x0 = x
-        y0 = y
-        z0 = z
-
-        l0 = x0 / (cp.abs(x0))
-        d0 = d / (cp.abs(x0))
-        v1 = cp.sum((1 - d0) * reprod(y0, z0))
-        v2 = cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))
-        return 2 * (v1 + v2)/ self.data_size
-
     @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
@@ -469,23 +452,6 @@ class Rec:
 
         return (x0, y0) if return_x else y0
     
-    @nvtx.annotate("d2F1", color="green")
-    def d2F1(self, x, y, z):
-        """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
-
-        x11, x12 = x
-        y11, y12 = y
-        z11, z12 = z
-        y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
-        if y12 is z12:
-            for j in range(self.ndist):
-                y0[:, j] = 2 * self.cl_prop.D(y11[j] * y12[:, j], j)
-        else:
-            for j in range(self.ndist):
-                y0[:, j] = self.cl_prop.D(y11[j] * z12[:, j], j) + self.cl_prop.D(z11[j] * y12[:, j], j)
-
-        return y0
-
     @nvtx.annotate("d2F_dF1", color="purple")
     def d2F_dF1(self, x, y, z, w):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
@@ -557,22 +523,7 @@ class Rec:
 
         return ([x11, x12], [y11, y12]) if return_x else [y11, y12]
 
-    @nvtx.annotate("d2F2", color="green")
-    def d2F2(self, x, y, z):
-        """In: (x21,x22),(y21,y22),(z21,z22) Out: (y11,y12)"""
-
-        x21, x22 = x
-        y21, y22 = y
-        z21, z22 = z
-        
-        if y22 is z22:
-            y12 = x22 * (-(y22**2))
-        else:
-            y12 = x22 * (-y22 * z22)
-
-        y11 = cp.zeros_like(y21)
-        
-        return [y11, y12]
+   
     
     @nvtx.annotate("d2F_dF2", color="purple")
     def d2F_dF2(self, x, y, z, w):
@@ -650,23 +601,7 @@ class Rec:
         y21 = y31
         return ([x21, x22], [y21, y22]) if return_x else [y21, y22]
 
-    @nvtx.annotate("d2F3", color="green")
-    def d2F3(self, x, y, z):
-        """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33)  Out: (y21, y22)"""
-
-        x31, x32, x33 = x
-        y31, y32, y33 = y
-        z31, z32, z33 = z
-        y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
-        c  = self.cl_shift.coeff(x32)
-        c1 = self.cl_shift.coeff(y32)
-        c2 = self.cl_shift.coeff(z32)
-        for k in range(self.ndist):
-            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], k, c1, y33[:, k], c2, z33[:, k])
-
-        y21 = cp.zeros_like(y31)
-
-        return [y21, y22]
+    
 
     @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):

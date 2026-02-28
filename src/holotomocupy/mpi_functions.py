@@ -1,7 +1,8 @@
 
 from mpi4py import MPI
 import numpy as np
-from .utils import *
+from .utils import timer
+
 
 def get_local_chunk(total_size, rank, size):
     chunk_size = total_size // size
@@ -31,7 +32,9 @@ class MPIClass:
       - nz is replicated everywhere
       - partitioning is defined by get_local_chunk()
 
-    This class allocates/commits MPI datatypes once and reuses them.
+    Only two lists of MPI datatypes are built (not four): forward-send and
+    forward-recv types are reused as backward-recv and backward-send respectively,
+    since the subarray layouts are identical by symmetry.
     """
 
     def __init__(self, comm: MPI.Comm, n_src: int, n_dst: int, nz: int, dtype):
@@ -62,100 +65,62 @@ class MPIClass:
         self.sdispls = np.zeros(self.size, dtype=np.int32)
         self.rdispls = np.zeros(self.size, dtype=np.int32)
 
-        # cached datatype lists
-        self._sendtypes_fwd = None
-        self._recvtypes_fwd = None
-        self._sendtypes_bwd = None
-        self._recvtypes_bwd = None
+        # Two type lists (forward send == backward recv, forward recv == backward send)
+        self._types_dst = None  # subarray over the n_dst axis — fwd send / bwd recv
+        self._types_src = None  # subarray over the n_src axis — fwd recv / bwd send
 
-        # Build all four lists once
         self._build_types()
 
     def _build_types(self):
-        # forward shapes
         src_shape_fwd = (self.n_dst, self.local_n_src, self.nz)
         dst_shape_fwd = (self.local_n_dst, self.n_src, self.nz)
 
-        sendtypes_fwd = []
-        recvtypes_fwd = []
+        types_dst = []
+        types_src = []
 
-        # forward send to p: src[dst_s[p]:dst_e[p], :, :]
         for p in range(self.size):
             ds, de = get_local_chunk(self.n_dst, p, self.size)
-            st = self.base.Create_subarray(
+            ss, se = get_local_chunk(self.n_src, p, self.size)
+
+            # Subarray over the n_dst axis: used as fwd-send-to-p / bwd-recv-from-p
+            t_dst = self.base.Create_subarray(
                 sizes=src_shape_fwd,
                 subsizes=(de - ds, self.local_n_src, self.nz),
                 starts=(ds, 0, 0),
                 order=MPI.ORDER_C,
             )
-            st.Commit()
-            sendtypes_fwd.append(st)
+            t_dst.Commit()
+            types_dst.append(t_dst)
 
-        # forward recv from r into dst[:, src_s[r]:src_e[r], :]
-        for r in range(self.size):
-            ss, se = get_local_chunk(self.n_src, r, self.size)
-            rt = self.base.Create_subarray(
+            # Subarray over the n_src axis: used as fwd-recv-from-p / bwd-send-to-p
+            t_src = self.base.Create_subarray(
                 sizes=dst_shape_fwd,
                 subsizes=(self.local_n_dst, se - ss, self.nz),
                 starts=(0, ss, 0),
                 order=MPI.ORDER_C,
             )
-            rt.Commit()
-            recvtypes_fwd.append(rt)
+            t_src.Commit()
+            types_src.append(t_src)
 
-        # backward shapes
-        src_shape_bwd = dst_shape_fwd              # (local_n_dst, n_src, nz)
-        dst_shape_bwd = src_shape_fwd              # (n_dst, local_n_src, nz)
-
-        sendtypes_bwd = []
-        recvtypes_bwd = []
-
-        # backward send to p: src[:, src_s[p]:src_e[p], :]
-        for p in range(self.size):
-            ss, se = get_local_chunk(self.n_src, p, self.size)
-            st = self.base.Create_subarray(
-                sizes=src_shape_bwd,
-                subsizes=(self.local_n_dst, se - ss, self.nz),
-                starts=(0, ss, 0),
-                order=MPI.ORDER_C,
-            )
-            st.Commit()
-            sendtypes_bwd.append(st)
-
-        # backward recv from r into dst[dst_s[r]:dst_e[r], :, :]
-        for r in range(self.size):
-            ds, de = get_local_chunk(self.n_dst, r, self.size)
-            rt = self.base.Create_subarray(
-                sizes=dst_shape_bwd,
-                subsizes=(de - ds, self.local_n_src, self.nz),
-                starts=(ds, 0, 0),
-                order=MPI.ORDER_C,
-            )
-            rt.Commit()
-            recvtypes_bwd.append(rt)
-
-        self._sendtypes_fwd = sendtypes_fwd
-        self._recvtypes_fwd = recvtypes_fwd
-        self._sendtypes_bwd = sendtypes_bwd
-        self._recvtypes_bwd = recvtypes_bwd
+        self._types_dst = types_dst
+        self._types_src = types_src
 
     def close(self):
         """Free committed MPI datatypes."""
-        for lst in (self._sendtypes_fwd, self._recvtypes_fwd, self._sendtypes_bwd, self._recvtypes_bwd):
+        for lst in (self._types_dst, self._types_src):
             if lst is None:
                 continue
             for t in lst:
                 t.Free()
-
-        self._sendtypes_fwd = None
-        self._recvtypes_fwd = None
-        self._sendtypes_bwd = None
-        self._recvtypes_bwd = None
+        self._types_dst = None
+        self._types_src = None
 
     def __del__(self):
-        # best-effort cleanup; explicit close() is preferred
+        # best-effort cleanup; explicit close() is preferred.
+        # Guard against being called after MPI.Finalize().
         try:
-            self.close()
+            if not MPI.Is_finalized():
+                self.close()
         except Exception:
             pass
 
@@ -170,11 +135,11 @@ class MPIClass:
         if dst.shape != (self.local_n_dst, self.n_src, self.nz):
             raise ValueError(f"dst.shape={dst.shape} expected {(self.local_n_dst, self.n_src, self.nz)}")
 
-        self.comm.Barrier()        
-        self.comm.Alltoallw([src, self.sendcounts, self.sdispls, self._sendtypes_fwd],
-                            [dst, self.recvcounts, self.rdispls, self._recvtypes_fwd])
-        self.comm.Barrier()
-        
+        self.comm.Alltoallw(
+            [src, self.sendcounts, self.sdispls, self._types_dst],
+            [dst, self.recvcounts, self.rdispls, self._types_src],
+        )
+
     def backward(self, src: np.ndarray, dst: np.ndarray):
         """
         src: (local_n_dst, n_src, nz) -> dst: (n_dst, local_n_src, nz)
@@ -186,12 +151,11 @@ class MPIClass:
         if dst.shape != (self.n_dst, self.local_n_src, self.nz):
             raise ValueError(f"dst.shape={dst.shape} expected {(self.n_dst, self.local_n_src, self.nz)}")
 
-        
-        self.comm.Barrier()
-        self.comm.Alltoallw([src, self.sendcounts, self.sdispls, self._sendtypes_bwd],
-                            [dst, self.recvcounts, self.rdispls, self._recvtypes_bwd])
-        self.comm.Barrier()
-        
+        self.comm.Alltoallw(
+            [src, self.sendcounts, self.sdispls, self._types_src],
+            [dst, self.recvcounts, self.rdispls, self._types_dst],
+        )
+
     @timer
     def redist(self, src: np.ndarray, dst: np.ndarray, direction="forward"):
         if direction == "forward":
@@ -200,9 +164,6 @@ class MPIClass:
             return self.backward(src, dst)
         else:
             raise ValueError("direction must be 'forward' or 'backward'")
-        
+
     def allreduce(self, arr):
-        self.comm.Barrier()                
-        out = self.comm.allreduce(arr, op=MPI.SUM)
-        self.comm.Barrier()                
-        return out
+        return self.comm.allreduce(arr, op=MPI.SUM)

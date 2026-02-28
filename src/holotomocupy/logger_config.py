@@ -32,7 +32,7 @@ handler.setFormatter(ColorMessageFormatter(
 ))
 
 logger = logging.getLogger("")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 logger.handlers.clear()
 logger.addHandler(handler)
 logger.propagate = False

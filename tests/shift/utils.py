@@ -7,7 +7,6 @@ import time
 import psutil
 import scipy as sp
 from functools import wraps
-from .logger_config import logger
 
 from matplotlib_scalebar.scalebar import ScaleBar
 

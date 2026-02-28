@@ -3,7 +3,7 @@ from mpi4py import MPI
 from holotomocupy.rec_mpi import Rec
 from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
-from holotomocupy.reader import Reader
+from holotomocupy.reader import Reader, find_latest_checkpoint
 from holotomocupy.writer import Writer
 from holotomocupy.logger_config import logger
 
@@ -45,31 +45,19 @@ logger.info(f"obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.s
 logger.info(f"proj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.ntheta} x {cl.nobj}")
 logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta} x {cl.nzobj} x {cl.nobj}")
 
+logger.info("Read data")
+reader.read_data(out=cl.data)
+reader.read_ref(out=cl.ref)
 
-logger.info(f'Read data with unbinning')
-reader.read_prb_unbin(out=cl.vars['prb'])
-reader.read_pos_unbin(out=cl.vars['pos'])
-reader.read_obj_unbin(out=cl.vars['obj'])
+logger.info("Read initial variables")
+ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
+if ckpt:
+    logger.info(f"Resuming from checkpoint: {ckpt}")
+    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+else:
+    reader.read_obj(out=cl.vars['obj'])
+    reader.read_pos(out=cl.vars['pos'])
+    reader.read_prb(out=cl.vars['prb'])
 
-logger.debug(f"{cl.vars['pos'].shape=}")
-logger.debug(f"{cl.vars['prb'].shape=}")
-logger.debug(f"{cl.vars['obj'].shape=}")
-
-
-comm.Barrier()
-logger.info(f'Generate data')
-
-cl.gen_sqrt_data(cl.vars, cl.data)
-cl.gen_sqrt_ref(cl.vars['prb'], cl.ref)
-
-
-comm.Barrier()
-logger.info(f'Set initial guess for obj, prb, pos')
-reader.read_pos_error_unbin(out=cl.vars['pos'])
-cl.vars['prb'][:] = 1
-cl.vars['obj'][:] = 0
-
-
-comm.Barrier()
-logger.info(f'Run reconstruction')
-vars = cl.BH(writer)
+logger.info("Run reconstruction")
+vars = cl.BH(cl.vars, cl.data, cl.ref, writer)

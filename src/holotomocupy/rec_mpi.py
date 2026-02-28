@@ -59,17 +59,11 @@ class Rec:
         # scaling variables
         self.rho_sq = {'obj': args.rho[0]**2, 'prb': args.rho[1]**2, 'pos': args.rho[2]**2}
 
-        # create classes
-        self.cl_chunking = Chunking(nbytes, self.nchunk, self.ngpus)
-        self.cl_tomo = [None for _ in range(self.ngpus)]
-        self.cl_prop = [None for _ in range(self.ngpus)]
-        self.cl_shift = [None for _ in range(self.ngpus)]
-
-        for igpu in range(self.ngpus):
-            with cp.cuda.Device(igpu):
-                self.cl_tomo[igpu] = Tomo(self.nobj, self.theta, self.mask)
-                self.cl_prop[igpu] = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
-                self.cl_shift[igpu] = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
+        # create classes (one GPU per MPI rank via CUDA_VISIBLE_DEVICES)
+        self.cl_chunking = Chunking(nbytes, self.nchunk)
+        self.cl_tomo  = Tomo(self.nobj, self.theta, self.mask)
+        self.cl_prop  = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
 
         self.alloc_arrays()
 
@@ -115,6 +109,7 @@ class Rec:
 
     def BH(self, writer=None):
 
+        vars = self.vars
         self.pos_init = vars['pos'].copy()
         # refs to preallocated memory for gradients        
         grads = self.grads
@@ -124,7 +119,7 @@ class Rec:
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
         if self.start_iter==0:
-            vars["obj"]*=self.cl_tomo[0].mask
+            vars["obj"]*=self.cl_tomo.mask
         
         # precalculate proj     
         
@@ -233,11 +228,7 @@ class Rec:
             parameters to functions are unified as (x,y,z,w)
         """
 
-        # allocate per-GPU accumulators (float32 scalars)
-        out = [None]*self.ngpus
-        for igpu in range(self.ngpus):
-            with cp.cuda.Device(igpu):
-                out[igpu] = cp.zeros(1, dtype="float32")
+        out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _hessian_cascade(
@@ -277,9 +268,7 @@ class Rec:
             vars["proj"], grads["proj"], etas["proj"],
             vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
         )
-        # reduce per-GPU accumulators to a single scalar
-        out = sum(out)[0]
-        return out.get()### copy to cpu
+        return out[0].get()
 
     @timer
     def gradients(self, vars, grads):
@@ -306,10 +295,7 @@ class Rec:
         """
 
         # part1, parallelization over angles
-        gradprb = [None]*self.ngpus
-        for igpu in range(self.ngpus):
-            with cp.cuda.Device(igpu):
-                gradprb[igpu] = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")        
+        gradprb = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
         
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
         def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):            
@@ -325,17 +311,16 @@ class Rec:
 
         _gradients_cascade(self,grads['proj'],grads['pos'],gradprb,self.data,vars["proj"],vars["pos"],vars["prb"])
         
-        grads['prb'][:] = sum(gradprb[1:], gradprb[0])      
+        grads['prb'][:] = gradprb
         nvtx.push_range(":::BH:redist back",color='red')             
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         nvtx.pop_range() 
         
         # part2, parallelization over object slices, formally gF4  
-        @timer              
+        @timer
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
-            igpu = cp.cuda.Device().id
-            gradu[:] = self.cl_tomo[igpu].RT(gradproj)
+            gradu[:] = self.cl_tomo.RT(gradproj)
         
         nvtx.push_range("gF4",color='green')            
         _gF4(self, grads['obj'], self.proj_tmp)      
@@ -348,11 +333,10 @@ class Rec:
         
         if self.lam_prbfit == 0:
             return
-        igpu = cp.cuda.Device().id
         for j in range(self.ndist):
-            tmp = self.cl_prop[igpu].D(prb[j : j + 1], j)
+            tmp = self.cl_prop.D(prb[j : j + 1], j)
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
-            grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop[igpu].DT(2 * (tmp - td), j)
+            grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
         
     def hessian_prbfit(self, prb, dprb1, dprb2):
         """Hessian with respect to the term 
@@ -361,12 +345,11 @@ class Rec:
         if self.lam_prbfit == 0:
             return 0
 
-        igpu = cp.cuda.Device().id
         out = 0
         for j in range(self.ndist):
-            Dprb = self.cl_prop[igpu].D(prb[j : j + 1], j)
-            Ddprb1 = self.cl_prop[igpu].D(dprb1[j : j + 1], j)
-            Ddprb2 = self.cl_prop[igpu].D(dprb2[j : j + 1], j)
+            Dprb   = self.cl_prop.D(prb[j : j + 1], j)
+            Ddprb1 = self.cl_prop.D(dprb1[j : j + 1], j)
+            Ddprb2 = self.cl_prop.D(dprb2[j : j + 1], j)
             l0 = Dprb / (cp.abs(Dprb))
             d0 = self.ref[j : j + 1] / (cp.abs(Dprb))
             v1 = cp.sum((1 - d0) * reprod(Ddprb1, Ddprb2))
@@ -381,8 +364,7 @@ class Rec:
         
         @self.gpu_batch(axis_out=1, axis_inp=0,nout=1)
         def _fwd_tomo(self, out, obj):
-            igpu = cp.cuda.Device().id
-            out[:] = self.cl_tomo[igpu].R(obj)
+            out[:] = self.cl_tomo.R(obj)
             
         _fwd_tomo(self, out, obj)
         return out    
@@ -464,13 +446,12 @@ class Rec:
 
         x11, x12 = x
 
-        igpu = cp.cuda.Device().id
         x0 = cp.empty([x12.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
         for j in range(self.ndist):
-            x0[:, j] = self.cl_prop[igpu].D(x11[j] * x12[:, j], j)
-        
+            x0[:, j] = self.cl_prop.D(x11[j] * x12[:, j], j)
+
         return x0
-    
+
     @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
         """In: (x11,x12),(y11,y12) Out: y0"""
@@ -481,11 +462,10 @@ class Rec:
         y0 = cp.empty([x12.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
         x0 = cp.empty_like(y0) if return_x else None
 
-        igpu = cp.cuda.Device().id
         for j in range(self.ndist):
-            y0[:, j] = self.cl_prop[igpu].D(y11[j] * x12[:, j] + x11[j] * y12[:, j], j)
+            y0[:, j] = self.cl_prop.D(y11[j] * x12[:, j] + x11[j] * y12[:, j], j)
             if return_x:
-                x0[:, j] = self.cl_prop[igpu].D(x11[j] * x12[:, j], j)
+                x0[:, j] = self.cl_prop.D(x11[j] * x12[:, j], j)
 
         return (x0, y0) if return_x else y0
     
@@ -497,13 +477,12 @@ class Rec:
         y11, y12 = y
         z11, z12 = z
         y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
-        igpu = cp.cuda.Device().id
         if y12 is z12:
             for j in range(self.ndist):
-                y0[:, j] = 2 * self.cl_prop[igpu].D(y11[j] * y12[:, j], j)
+                y0[:, j] = 2 * self.cl_prop.D(y11[j] * y12[:, j], j)
         else:
             for j in range(self.ndist):
-                y0[:, j] = self.cl_prop[igpu].D(y11[j] * z12[:, j], j) + self.cl_prop[igpu].D(z11[j] * y12[:, j], j)
+                y0[:, j] = self.cl_prop.D(y11[j] * z12[:, j], j) + self.cl_prop.D(z11[j] * y12[:, j], j)
 
         return y0
 
@@ -515,44 +494,41 @@ class Rec:
         y11, y12 = y
         z11, z12 = z
         w11, w12 = w
-        
-        igpu = cp.cuda.Device().id
+
         y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
-        
+
         for j in range(self.ndist):
-                    
             if y12 is z12:
                 y0[:, j] = 2 * y11[j] * y12[:, j]
             else:
                 y0[:, j] = y11[j] * z12[:, j] + z11[j] * y12[:, j]
-            
+
             if w11 is not None:
                 y0[:, j] += w11[j] * x12[:, j]
             if w12 is not None:
                 y0[:, j] += x11[j] * w12[:, j]
 
-            y0[:, j] = self.cl_prop[igpu].D(y0[:, j],j)                
+            y0[:, j] = self.cl_prop.D(y0[:, j], j)
 
         return y0
-    
+
     @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
         y0 = y
-        
-        # calc fwd starting from 2        
-        for id in range(2, 4)[::-1]: 
+
+        # calc fwd starting from 2
+        for id in range(2, 4)[::-1]:
             x = self.F[id](x)
 
         x11, x12 = x
-                    
-        igpu = cp.cuda.Device().id
-        y11 = cp.zeros([self.ndist,self.nz,self.n], dtype="complex64")
+
+        y11 = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
         y12 = cp.empty([y0.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
         for j in range(self.ndist):
-            tmp = self.cl_prop[igpu].DT(y0[:, j], j)             
-            y11[j] += cp.sum(tmp* np.conj(x12[:,j]), axis=0)
+            tmp = self.cl_prop.DT(y0[:, j], j)
+            y11[j] += cp.sum(tmp * np.conj(x12[:, j]), axis=0)
             y12[:, j] = tmp * np.conj(x11[j])
         return y11, y12        
 
@@ -645,10 +621,9 @@ class Rec:
         x31, x32, x33 = x
 
         x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
-        igpu = cp.cuda.Device().id
-        c = self.cl_shift[igpu].coeff(x32)
+        c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            x22[:, k] = self.cl_shift[igpu].curlySc(c, x33[:, k], k)
+            x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
 
         x21 = x31
         return [x21, x22]
@@ -656,24 +631,20 @@ class Rec:
     @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
         """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
-        
+
         x31, x32, x33 = x
         y31, y32, y33 = y
 
         y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
-        igpu = cp.cuda.Device().id
-        c = self.cl_shift[igpu].coeff(x32)
-        c1 = self.cl_shift[igpu].coeff(y32)
+        c  = self.cl_shift.coeff(x32)
+        c1 = self.cl_shift.coeff(y32)
         if return_x:
             x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
             for k in range(self.ndist):
-                r = x33[:, k]
-                x22[:, k] = self.cl_shift[igpu].curlySc(c, r, k)
+                x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
 
         for k in range(self.ndist):
-            r = x33[:, k]
-            Deltar = y33[:, k]
-            y22[:, k] = self.cl_shift[igpu].dcurlySc(c, r, k, c1, Deltar)
+            y22[:, k] = self.cl_shift.dcurlySc(c, x33[:, k], k, c1, y33[:, k])
 
         x21 = x31
         y21 = y31
@@ -682,104 +653,88 @@ class Rec:
     @nvtx.annotate("d2F3", color="green")
     def d2F3(self, x, y, z):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33)  Out: (y21, y22)"""
-        
+
         x31, x32, x33 = x
         y31, y32, y33 = y
         z31, z32, z33 = z
         y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
-        igpu = cp.cuda.Device().id
-        c = self.cl_shift[igpu].coeff(x32)
-        c1 = self.cl_shift[igpu].coeff(y32)
-        c2 = self.cl_shift[igpu].coeff(z32)
+        c  = self.cl_shift.coeff(x32)
+        c1 = self.cl_shift.coeff(y32)
+        c2 = self.cl_shift.coeff(z32)
         for k in range(self.ndist):
-            r = x33[:, k]
-            Deltar_y = y33[:, k]
-            Deltar_z = z33[:, k]
-            y22[:, k] = self.cl_shift[igpu].d2curlySc(c, r, k, c1, Deltar_y, c2, Deltar_z)
+            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], k, c1, y33[:, k], c2, z33[:, k])
 
         y21 = cp.zeros_like(y31)
-        
+
         return [y21, y22]
-    
+
     @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
-        
+
         x31, x32, x33 = x
         y31, y32, y33 = y
         z31, z32, z33 = z
         w31, w32, w33 = w
-        
+
         y22 = cp.zeros([len(y32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
-        
-        igpu = cp.cuda.Device().id
-        
-        c = self.cl_shift[igpu].coeff(x32)        
-        cy = self.cl_shift[igpu].coeff(y32)
-        cz = self.cl_shift[igpu].coeff(z32)
+        c  = self.cl_shift.coeff(x32)
+        cy = self.cl_shift.coeff(y32)
+        cz = self.cl_shift.coeff(z32)
         for k in range(self.ndist):
-            y22[:, k] = self.cl_shift[igpu].d2curlySc(c, x33[:, k], k, cy, y33[:, k], cz, z33[:, k])
+            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], k, cy, y33[:, k], cz, z33[:, k])
 
         if w32 is not None:
-            cy = self.cl_shift[igpu].coeff(w32)                
+            cy = self.cl_shift.coeff(w32)
             for k in range(self.ndist):
-                y22[:, k] += self.cl_shift[igpu].dcurlySc(c, x33[:, k], k, cy, w33[:, k])      
+                y22[:, k] += self.cl_shift.dcurlySc(c, x33[:, k], k, cy, w33[:, k])
 
         y21 = w31
-        
+
         return [y21, y22]
-    
+
     @nvtx.annotate("gF3", color="green")
-    def gF3(self, x, y):     
-        """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""   
+    def gF3(self, x, y):
+        """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""
 
         y21, y22 = y
 
-        for id in range(4, 4)[::-1]: 
+        for id in range(4, 4)[::-1]:
             x = self.F[id](x)
-        x31,x32,x33 = x
+        x31, x32, x33 = x
 
         y32 = cp.zeros([y22.shape[0], self.nzobj, self.nobj], dtype=self.obj_dtype)
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
-        igpu = cp.cuda.Device().id
-        c = self.cl_shift[igpu].coeff(x32)
+        c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            Deltapsi, Deltar = self.cl_shift[igpu].dcurlySadjc(c, x33[:, k], k, y22[:, k])
+            Deltapsi, Deltar = self.cl_shift.dcurlySadjc(c, x33[:, k], k, y22[:, k])
             y32[:] += Deltapsi
             y33[:, k] = Deltar
-        
-        y32[:] = self.cl_shift[igpu].coeff(y32)        
-        
+
+        y32[:] = self.cl_shift.coeff(y32)
+
         y31 = y21
         return [y31, y32, y33]         
 
     @timer
-    def min(self, prb, obj, pos,proj):
-        ## batched computation
-        out = [None]*self.ngpus
-        for igpu in range(self.ngpus):
-            with cp.cuda.Device(igpu):
-                out[igpu] = cp.zeros(1, dtype="float32")
+    def min(self, prb, obj, pos, proj):
+        out = cp.zeros(1, dtype="float32")
 
-        ### main term
-        @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _min(self, out, proj, pos, data, prb):
             x = [prb, proj, pos]
-            y = x  # forming output
-            # compute functional by applying operators in reverse order
-            for id in range(1, len(self.F))[::-1]:  
-                y = self.F[id](y)                
+            y = x
+            for id in range(1, len(self.F))[::-1]:
+                y = self.F[id](y)
             out[:] += self.F0(y, data)
 
         _min(self, out, proj, pos, self.data, prb)
 
-        # collect results
-        out = sum(out)[0]
+        out = out[0]
 
-        ### probe fit term
-        if self.rank==0:
+        if self.rank == 0:
             for j in range(self.ndist):
-                Dprb = self.cl_prop[0].D(prb[j : j + 1], j)[0]
+                Dprb = self.cl_prop.D(prb[j : j + 1], j)[0]
                 out += self.lam_prbfit / self.prb_size * cp.linalg.norm(cp.abs(Dprb) - self.ref[j]) ** 2
         return self.allreduce(out.get())
 
@@ -835,5 +790,5 @@ class Rec:
     def gen_sqrt_ref(self, prb, out):
         """Generate synthetic reference"""
         for j in range(self.ndist):
-            out[j] = cp.abs(self.cl_prop[0].D(prb[j : j + 1], j)[0])
+            out[j] = cp.abs(self.cl_prop.D(prb[j : j + 1], j)[0])
             

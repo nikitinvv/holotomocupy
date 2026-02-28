@@ -34,7 +34,6 @@ def parse_args(config_file):
         args.err_step = cfg.getint("err_step")
         args.start_iter = cfg.getint("start_iter")
         args.rotation_center_shift = cfg.getfloat("rotation_center_shift")
-        args.ngpus = cfg.getint("ngpus")
         args.bin = cfg.getint("bin")
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e

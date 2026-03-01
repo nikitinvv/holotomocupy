@@ -124,9 +124,8 @@ def timer(func):
         start  = time.time()
         result = func(*args, **kwargs)
         elapsed = time.time() - start
-        if elapsed > 0.1:
-            mem = _process.memory_info().rss / 1024**3
-            logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
+        mem = _process.memory_info().rss / 1024**3
+        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
         return result
     return wrapper
 

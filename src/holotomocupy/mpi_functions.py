@@ -164,10 +164,11 @@ class MPIClass:
             return self.backward(src, dst)
         else:
             raise ValueError("direction must be 'forward' or 'backward'")
-
+    @timer
     def allreduce(self, arr):
         return self.comm.allreduce(arr, op=MPI.SUM)
-
+    
+    @timer
     def allreduce2(self, a, b):
         """Sum-reduce two scalars across ranks in a single MPI call."""
         buf = np.array([a, b], dtype='float64')

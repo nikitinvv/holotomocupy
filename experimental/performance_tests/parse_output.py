@@ -29,48 +29,40 @@ def find_mem(rank):
                     mem_gb.append(float(m.group(1)))
     return mem_gb
 
+occurs = {'gradients_cascade:':1,
+          'redist:':2,
+          'gF4:': 1,
+          'gradient_prbfit:':1,
+         'allreduce:':2,
+         'allreduce2:':2,
+         'mulc_batch:':3,
+         'fwd_tomo:':1,
+         'hessian_cascade:':3,
+         'hessian_prbfit:':3,
+         'linear_batch:':8,
+         'redot_batch:':3,
+         'min:':1}
+
+times = {}
 rank = 0
-times = [0]*6
-#
-times[0] = sum(find_times('redist:',rank)[-2:])
 
-
-# 3 fwd_tomo
-times[1] = sum(find_times('fwd_tomo:',rank)[-1:])
-# add 1 adj_tomo
-times[1] += sum(find_times('inner:',rank)[-1:])
-
-
-# 3 hessian
-times[2] = sum(find_times('hessian:',rank)[-3:])
-
-
-# gradient - 1inner -1redist
-times[3] = sum(find_times('gradients:',rank)[-1:])-sum(find_times('inner:',rank)[-1:])-sum(find_times('redist:',rank)[-2:-1])
-
-#min
-times[4] = sum(find_times('min:',rank)[-1:])
-# print(f'min {times[4]:.1f}')
-
-total = sum(find_times('iter=1:',0)[-1:])
-times[5] = total-sum(times)
-
+for w in occurs.keys():
+    times[w] =sum(find_times(w,rank)[-occurs[w]:]) 
 mem = find_mem(0)[-1]
 
+total = 0
+for w in occurs.keys():
+    total+=times[w]
+    print(w,times[w])
 
-print(f'redist\t {times[0]:.1f}')
-print(f'tomo\t {times[1]:.1f}')
-print(f'hessians\t {times[2]:.1f}')
-print(f'gradients\t {times[3]:.1f}')
-print(f'other\t {times[5]:.1f}')
-print(f'total\t {(total-times[4]):.1f}')
-print(f'memory\t {mem:.1f}')
+print(f'total',total)
+print(f'mem',mem)
+
+print('no words:')
+for w in occurs.keys():
+    print(times[w])
+
+print(total)
+print(mem)
 
 
-print(f'{times[0]:.1f}')
-print(f'{times[1]:.1f}')
-print(f'{times[2]:.1f}')
-print(f'{times[3]:.1f}')
-print(f'{times[5]:.1f}')
-print(f'{(total-times[4]):.1f}')
-print(f'{mem:.1f}')

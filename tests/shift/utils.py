@@ -7,7 +7,6 @@ import time
 import psutil
 import scipy as sp
 from functools import wraps
-from .logger_config import logger
 
 from matplotlib_scalebar.scalebar import ScaleBar
 
@@ -25,7 +24,7 @@ def copy_to_pinned(data):
 def make_pinned(shape, dtype):
     n      = int(np.prod(shape))
     nbytes = n * np.dtype(dtype).itemsize
-    logger.debug(f'Allocate {shape} {dtype}: {nbytes / 1024**3:.3f} GB')
+    logger.warning(f'Allocate {shape} {dtype}: {nbytes / 1024**3:.3f} GB')
     buf = cp.cuda.alloc_pinned_memory(nbytes)
     return np.frombuffer(buf, dtype=dtype, count=n).reshape(shape, copy=False)
 
@@ -95,7 +94,7 @@ def mshow_approx(t, err_real, err_approx, show=False):
 
 
 def reprod(a, b):
-    return cp.real(a) * cp.real(b) + cp.imag(a) * cp.imag(b)
+    return a.real * b.real + a.imag * b.imag
 
 
 def redot(a, b, axis=None):
@@ -124,8 +123,9 @@ def timer(func):
         start  = time.time()
         result = func(*args, **kwargs)
         elapsed = time.time() - start
-        mem = _process.memory_info().rss / 1024**3
-        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
+        if elapsed > 0.1:
+            mem = _process.memory_info().rss / 1024**3
+            logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
         return result
     return wrapper
 

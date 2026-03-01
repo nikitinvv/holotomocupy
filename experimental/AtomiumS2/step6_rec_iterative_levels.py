@@ -18,7 +18,7 @@ def read_acquisition_pars(args):
         args.energy = fid['/exchange/energy'][0] 
         args.focustodetectordistance = fid['/exchange/focusdetectordistance'][0] 
         
-        ntheta0 = np.array(fid[f'/exchange/data0'].shape[0])
+        ntheta0 = np.array(fid[f'/exchange/theta'].shape[0])
         args.ids = np.arange(args.start_theta, ntheta0, ntheta0 / args.ntheta).astype('int')
         args.theta = -fid['/exchange/theta'][args.ids, 0] / 180 * np.pi
     
@@ -34,24 +34,26 @@ def read_initial_guess(args):
     with h5py.File(args.in_file) as fid:        
         # positions initial guess        
         pos = (fid[f'/exchange/cshifts_final'][args.ids,:args.ndist]).astype('float32')        
+        pos[...,0]+=400
+        
         pos /= 2**bin
         s = args.rotation_center_shift
         for k in range(bin):
             s = (s - 0.5) / 2
         pos[..., 1] += s
         # object initial guess   
-        obj = fid[f'/exchange/obj_init_re{args.paganin}_{bin}']
+        obj = fid[f'/exchange/obj_init_re{args.paganin}_{bin}'][:]
+        # obj = np.zeros([nzobj,nobj,nobj],dtype='complex64')
         nzobj0,nobj0 = obj.shape[:2]
         stz,endz = (nzobj0//2-nzobj//2),(nzobj0//2+nzobj//2)
         stx,endx = (nobj0//2-nobj//2),(nobj0//2+nobj//2)
         obj = obj[stz:endz,stx:endx,stx:endx].astype(args.obj_dtype)
         # if obj.dtype=='complex64':
-        #     obj+=1j*fid[f'/exchange/obj_init_im{args.paganin}_{bin}'][st:end]
+            # obj+=1j*fid[f'/exchange/obj_init_im{args.paganin}_{bin}'][:]
 
     # probe initial guess
     prb = cp.ones([args.ndist, nz, n], dtype='complex64')
     
-    pos = np.load('/data2/vnikitin/brain_rec/20251115/Y350a/Y350a1234/run3/0/pos0160.npy')[args.ids]
     vars = {"obj":obj, "prb":prb, "pos":pos}    
     return vars    
 
@@ -179,7 +181,7 @@ for bin in range(args.start_bin,args.start_bin-args.nbins,-1):
     
     if bin < args.start_bin:
         vars = upsample_vars(vars)
-    
+   
     # create class and run reconstruction by the BH method
     vars = Rec(rec_args).BH(data, ref, vars)          
 

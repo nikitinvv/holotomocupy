@@ -11,38 +11,46 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
 
     if (tx >= n || ty >= ntheta || tz >= nz) return;
 
-    float M_PI = 3.141592653589793238f;
-    float2 g0, g0t;
-    float w, coeff0;
-    float w0, w1, x0, y0, coeff1;
-    int ell0, ell1, g_ind, f_ind, f_indx, f_indy;
+    const float PI     = 3.141592653589793238f;
+    const int   twon   = 2 * n;
+    const float ftwon  = (float)twon;
+    const float mu0    = mu[0];
+    const float coeff0 = PI / mu0;
+    const float coeff1 = -PI * PI / mu0;
+    const float inv_twon = 1.0f / ftwon;
 
-    g_ind = tx + tz * n + ty * n * nz;  // swapped axes
+    const float x0 =  (tx - n / 2) / (float)n * __cosf(theta[ty]);
+    const float y0 = -(tx - n / 2) / (float)n * __sinf(theta[ty]);
 
-    if (dir == 0) g0 = {};
-    else g0 = g[g_ind];
+    const int g_ind = tx + tz * n + ty * n * nz;  // swapped axes
+    float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
 
-    coeff0 = M_PI / mu[0];
-    coeff1 = -M_PI * M_PI / mu[0];
+    const int base_x  = (int)floorf(ftwon * x0) - m;
+    const int base_y  = (int)floorf(ftwon * y0) - m;
+    const int tz_off  = tz * twon * twon;
+    const int len     = 2 * m + 1;
 
-    x0 = (tx - n / 2) / (float)n * __cosf(theta[ty]);
-    y0 = -(tx - n / 2) / (float)n * __sinf(theta[ty]);
+    // Precompute x-direction exponential factors once.
+    // Reduces expf calls from (2m+1)^2 to 2*(2m+1).
+    float ex[32];  // 2*m+1 entries; m is small (typically 4-5)
+    for (int i0 = 0; i0 < len; i0++) {
+        float w0 = (base_x + i0) * inv_twon - x0;
+        ex[i0] = __expf(coeff1 * w0 * w0);
+    }
 
-    for (int i1 = 0; i1 < 2 * m + 1; i1++)
+    for (int i1 = 0; i1 < len; i1++)
     {
-        ell1 = floorf(2 * n * y0) - m + i1;
-        for (int i0 = 0; i0 < 2 * m + 1; i0++)
+        int   ell1    = base_y + i1;
+        float w1      = ell1 * inv_twon - y0;
+        float ey      = coeff0 * __expf(coeff1 * w1 * w1);
+        int   f_indy  = (n + ell1 + twon) % twon;
+        int   row_off = twon * f_indy + tz_off;
+
+        for (int i0 = 0; i0 < len; i0++)
         {
-            ell0 = floorf(2 * n * x0) - m + i0;
-
-            w0 = ell0 / (float)(2 * n) - x0;
-            w1 = ell1 / (float)(2 * n) - y0;
-
-            w = coeff0 * __expf(coeff1 * (w0 * w0 + w1 * w1));
-
-            f_indx = (n + ell0 + 2 * n) % (2 * n);
-            f_indy = (n + ell1 + 2 * n) % (2 * n);
-            f_ind = f_indx + (2 * n) * f_indy + tz * (2 * n) * (2 * n);
+            float w    = ex[i0] * ey;
+            int   ell0 = base_x + i0;
+            int   f_ind = (n + ell0 + twon) % twon + row_off;
 
             if (dir == 0)
             {
@@ -104,92 +112,35 @@ extern "C" void __global__ pad(float2* g, float2* f, int n, int nz, int ntheta, 
     "pad",
 )
 
+# B-spline basis functions and derivatives.
+# Use fabsf instead of an integer sgn variable to avoid branching.
 fun_phi = r"""
-__device__ float phi(float t)
+__device__ __forceinline__ float phi(float t)
 {
-    int sgn = 0;
-    float w = 0;
-
-    
-
-    if (-2 < t && t <= -1)
-    {
-        w = (t + 2) * (t + 2) * (t + 2);
-    }
-    else if (-1 < t && t <= 1)
-    {
-        sgn = (t > 0) ? 1 : ((t < 0) ? -1 : 0);
-        w = 4 - 6 * t * t + 3 * t * t * t * sgn;
-    }
-    else if (1 < t && t <= 2)
-    {
-        w = (2 - t) * (2 - t) * (2 - t);
-    }
-    else
-    {
-        w = 0;
-    }
-
-    return w;
+    if (-2.0f < t && t <= -1.0f) return (t + 2.0f) * (t + 2.0f) * (t + 2.0f);
+    if (-1.0f < t && t <=  1.0f) return 4.0f - 6.0f*t*t + 3.0f*fabsf(t)*t*t;
+    if ( 1.0f < t && t <=  2.0f) return (2.0f - t) * (2.0f - t) * (2.0f - t);
+    return 0.0f;
 }
 """
 
 fun_dphi = r"""
-__device__ float dphi(float t)
+__device__ __forceinline__ float dphi(float t)
 {
-    int sgn = 0;
-    float w = 0;
-
-    
-
-    if (-2 < t && t <= -1)
-    {
-        w = 3 * (t + 2) * (t + 2);
-    }
-    else if (-1 < t && t <= 1)
-    {
-        sgn = (t > 0) ? 1 : ((t < 0) ? -1 : 0);
-        w = -12 * t + 9 * t * t * sgn;
-    }
-    else if (1 < t && t <= 2)
-    {
-        w = -3 * (2 - t) * (2 - t);
-    }
-    else
-    {
-        w = 0;
-    }
-
-    return w;
+    if (-2.0f < t && t <= -1.0f) return 3.0f * (t + 2.0f) * (t + 2.0f);
+    if (-1.0f < t && t <=  1.0f) return -12.0f*t + 9.0f*fabsf(t)*t;
+    if ( 1.0f < t && t <=  2.0f) return -3.0f * (2.0f - t) * (2.0f - t);
+    return 0.0f;
 }
 """
 
 fun_d2phi = r"""
-__device__ float d2phi(float t)
+__device__ __forceinline__ float d2phi(float t)
 {
-    int sgn = 0;
-    float w = 0;
-    
-
-    if (-2 < t && t <= -1)
-    {
-        w = 6 * (t + 2);
-    }
-    else if (-1 < t && t <= 1)
-    {
-        sgn = (t > 0) ? 1 : ((t < 0) ? -1 : 0);
-        w = -12 + 18 * t * sgn;
-    }
-    else if (1 < t && t <= 2)
-    {
-        w = 6 * (2 - t);
-    }
-    else
-    {
-        w = 0;
-    }
-
-    return w;
+    if (-2.0f < t && t <= -1.0f) return 6.0f * (t + 2.0f);
+    if (-1.0f < t && t <=  1.0f) return -12.0f + 18.0f*fabsf(t);
+    if ( 1.0f < t && t <=  2.0f) return 6.0f * (2.0f - t);
+    return 0.0f;
 }
 """
 
@@ -209,51 +160,50 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
 
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
-    int ix, iy;
-    int f_indx, f_indy, f_ind, g_ind;
-    float x, y;
-    float dx, dy;
-    float dxm, dym;
-    float w;
-    float2 g0;
+    const float mag0   = mag[0];
+    const float half   = (mag0 - 1.0f) / 2.0f;
+    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+    const int   tz_off = tz * npsi * nzpsi;
 
-    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
-    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+    // Precompute x-direction phi values once (4 evals instead of 16).
+    float px[4];
+    for (int jx = -1; jx < 3; jx++) px[jx + 1] = phi(dx - jx);
 
-    ix = (int)floorf(x);
-    iy = (int)floorf(y);
-
-    dx = x - ix;
-    dy = y - iy;
-
-    g_ind = tx + ty * n + tz * n * nz;
-
-    if (dir == 0) g0 = {};
-    else g0 = g[g_ind];
+    float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
 
     for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float pdym    = phi(dy - jy);
+        int   row_off = indy * npsi + tz_off;
+
         for (int jx = -1; jx < 3; jx++)
         {
-            dxm = dx - jx;
-            dym = dy - jy;
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
 
-            w = phi(dxm) * phi(dym);
-
-            f_indx = (ix + jx + npsi) % npsi;
-            f_indy = (iy + jy + nzpsi) % nzpsi;
-            f_ind = f_indx + f_indy * npsi + tz * npsi * nzpsi;
+            float w   = px[jx + 1] * pdym;
+            int   idx = indx + row_off;
 
             if (dir == 0)
             {
-                g0.x += w * f[f_ind].x;
-                g0.y += w * f[f_ind].y;
+                g0.x += w * f[idx].x;
+                g0.y += w * f[idx].y;
             }
             else
             {
-                atomicAdd(&(f[f_ind].x), w * g0.x);
-                atomicAdd(&(f[f_ind].y), w * g0.y);
+                atomicAdd(&(f[idx].x), w * g0.x);
+                atomicAdd(&(f[idx].y), w * g0.y);
             }
         }
+    }
 
     if (dir == 0) g[g_ind] = g0;
 }
@@ -262,16 +212,16 @@ void __global__ s(float2* g, float2* f, float* r, float* mag,
     "s",
 )
 
-dt_kernel = cp.RawKernel(
+
+sf_kernel = cp.RawKernel(
     r"""
 extern "C"
 {
 """
     + fun_phi
-    + fun_dphi
     + r"""
-void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
-                   int n, int npsi, int nz, int nzpsi, int ntheta)
+void __global__ s(float* g, float* f, float* r, float* mag,
+                  int n, int npsi, int nz, int nzpsi, int ntheta, bool dir)
 {
     int tx = blockDim.x * blockIdx.x + threadIdx.x;
     int ty = blockDim.y * blockIdx.y + threadIdx.y;
@@ -279,218 +229,62 @@ void __global__ dt(float2* res, float2* c, float* r, float* mag, float* Deltar,
 
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
-    int ix, iy;
-    int indx, indy;
-    float x, y;
-    float dx, dy;
-    float dxm, dym;
-    float Deltarx, Deltary;
-    float w;
-    float2 r0 = {};
+    const float mag0   = mag[0];
+    const float half   = (mag0 - 1.0f) / 2.0f;
+    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+    const int   tz_off = tz * npsi * nzpsi;
 
-    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
-    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+    // Precompute x-direction phi values once (4 evals instead of 16).
+    float px[4];
+    for (int jx = -1; jx < 3; jx++) px[jx + 1] = phi(dx - jx);
 
-    ix = (int)floorf(x);
-    iy = (int)floorf(y);
-
-    dx = x - ix;
-    dy = y - iy;
-
-    Deltarx = Deltar[2 * tz + 1];
-    Deltary = Deltar[2 * tz + 0];
+    float g0 = (dir == 0) ? 0.0f : g[g_ind];
 
     for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float pdym    = phi(dy - jy);
+        int   row_off = indy * npsi + tz_off;
+
         for (int jx = -1; jx < 3; jx++)
         {
-            dxm = dx - jx;
-            dym = dy - jy;
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
 
-            w = dphi(dxm) * phi(dym) * Deltarx
-              + dphi(dym) * phi(dxm) * Deltary;
+            float w   = px[jx + 1] * pdym;
+            int   idx = indx + row_off;
 
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
-
-            int idx = indx + indy * npsi + tz * npsi * nzpsi;
-            r0.x -= w * c[idx].x;
-            r0.y -= w * c[idx].y;
+            if (dir == 0)
+                g0 += w * f[idx];
+            else
+                atomicAdd(&(f[idx]), w * g0);
         }
+    }
 
-    res[tx + ty * n + tz * n * nz] = r0;
+    if (dir == 0) g[g_ind] = g0;
 }
 }
 """,
-    "dt",
+    "s",
 )
-
-d2t_kernel = cp.RawKernel(
-    r"""
-extern "C"
-{
-"""
-    + fun_phi
-    + fun_dphi
-    + fun_d2phi
-    + r"""
-void __global__ d2t(float2* res, float2* c, float* r, float* mag,
-                    float* Deltar1, float* Deltar2,
-                    int n, int npsi, int nz, int nzpsi, int ntheta)
-{
-    int tx = blockDim.x * blockIdx.x + threadIdx.x;
-    int ty = blockDim.y * blockIdx.y + threadIdx.y;
-    int tz = blockDim.z * blockIdx.z + threadIdx.z;
-
-    if (tx >= n || ty >= nz || tz >= ntheta) return;
-
-    int ix, iy;
-    int indx, indy;
-    float x, y;
-    float dx, dy;
-    float dxm, dym;
-    float Deltar1x, Deltar1y;
-    float Deltar2x, Deltar2y;
-    float w;
-    float2 r0 = {};
-
-    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
-    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
-
-    ix = (int)floorf(x);
-    iy = (int)floorf(y);
-
-    dx = x - ix;
-    dy = y - iy;
-
-    Deltar1x = Deltar1[2 * tz + 1];
-    Deltar1y = Deltar1[2 * tz + 0];
-    Deltar2x = Deltar2[2 * tz + 1];
-    Deltar2y = Deltar2[2 * tz + 0];
-
-    for (int jy = -1; jy < 3; jy++)
-        for (int jx = -1; jx < 3; jx++)
-        {
-            dxm = dx - jx;
-            dym = dy - jy;
-
-            w  = d2phi(dxm) * phi(dym) * Deltar1x * Deltar2x;
-            w += dphi(dxm) * dphi(dym)
-                 * (Deltar1x * Deltar2y + Deltar1y * Deltar2x);
-            w += phi(dxm) * d2phi(dym) * Deltar1y * Deltar2y;
-
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
-
-            int idx = indx + indy * npsi + tz * npsi * nzpsi;
-            r0.x += w * c[idx].x;
-            r0.y += w * c[idx].y;
-        }
-
-    res[tx + ty * n + tz * n * nz] = r0;
-}
-}
-""",
-    "d2t",
-)
-
-dtadj_kernel = cp.RawKernel(
-    r"""
-extern "C"
-{
-"""
-    + fun_phi
-    + fun_dphi
-    + r"""
-void __global__ dtadj(float2* dt1, float2* dt2, float2* c, float* r, float* mag,
-                      int n, int npsi, int nz, int nzpsi, int ntheta)
-{
-    int tx = blockDim.x * blockIdx.x + threadIdx.x;
-    int ty = blockDim.y * blockIdx.y + threadIdx.y;
-    int tz = blockDim.z * blockIdx.z + threadIdx.z;
-
-    if (tx >= n || ty >= nz || tz >= ntheta) return;
-
-    int ix, iy;
-    int indx, indy;
-    float x, y;
-    float dx, dy;
-    float dxm, dym;
-    float w1, w2;
-
-    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
-    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
-
-    ix = (int)floorf(x);
-    iy = (int)floorf(y);
-
-    dx = x - ix;
-    dy = y - iy;
-
-    float2 dt10 = {};
-    float2 dt20 = {};
-
-    for (int jy = -1; jy < 3; jy++)
-        for (int jx = -1; jx < 3; jx++)
-        {
-            dxm = dx - jx;
-            dym = dy - jy;
-
-            w1 = -dphi(dym) * phi(dxm);
-            w2 = -dphi(dxm) * phi(dym);
-
-            indx = (ix + jx + npsi) % npsi;
-            indy = (iy + jy + nzpsi) % nzpsi;
-
-            int idx = indx + indy * npsi + tz * npsi * nzpsi;
-
-            dt10.x += w1 * c[idx].x;
-            dt10.y += w1 * c[idx].y;
-
-            dt20.x += w2 * c[idx].x;
-            dt20.y += w2 * c[idx].y;
-        }
-
-    dt1[tx + ty * n + tz * n * nz] = dt10;
-    dt2[tx + ty * n + tz * n * nz] = dt20;
-}
-}
-""",
-    "dtadj",
-)
-
-
-
 
 # extra for paganin
 
-
 fun_phi_back = r"""
-__device__ float phi(float t, float m)
+__device__ __forceinline__ float phi(float t, float m)
 {
-    int sgn = 0;
-    float w = 0;
-
     t /= m;
-
-    if (-2 < t && t <= -1)
-    {
-        w = (t + 2) * (t + 2) * (t + 2);
-    }
-    else if (-1 < t && t <= 1)
-    {
-        sgn = (t > 0) ? 1 : ((t < 0) ? -1 : 0);
-        w = 4 - 6 * t * t + 3 * t * t * t * sgn;
-    }
-    else if (1 < t && t <= 2)
-    {
-        w = (2 - t) * (2 - t) * (2 - t);
-    }
-    else
-    {
-        w = 0;
-    }
-
-    return w;
+    if (-2.0f < t && t <= -1.0f) return (t + 2.0f) * (t + 2.0f) * (t + 2.0f);
+    if (-1.0f < t && t <=  1.0f) return 4.0f - 6.0f*t*t + 3.0f*fabsf(t)*t*t;
+    if ( 1.0f < t && t <=  2.0f) return (2.0f - t) * (2.0f - t) * (2.0f - t);
+    return 0.0f;
 }
 """
 
@@ -510,55 +304,526 @@ void __global__ sback(float2* g, float2* f, float* r, float* mag,
 
     if (tx >= n || ty >= nz || tz >= ntheta) return;
 
-    int ix, iy;
-    int f_indx, f_indy, f_ind, g_ind;
-    float x, y;
-    float dx, dy;
-    float dxm, dym;
-    float w;
-    float2 g0;
+    const float mag0   = mag[0];
+    const float half   = (mag0 - 1.0f) / 2.0f;
+    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+    const int   tz_off = tz * npsi * nzpsi;
+    const float span   = 2.0f * mag0;
 
-    x = (mag[0] * (tx - n / 2) - r[2 * tz + 1] + (mag[0] - 1) / 2) + npsi / 2;
-    y = (mag[0] * (ty - nz / 2) - r[2 * tz + 0] + (mag[0] - 1) / 2) + nzpsi / 2;
+    float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
 
-    ix = (int)floorf(x);
-    iy = (int)floorf(y);
+    for (int jy = (int)ceilf(dy - span); jy < (int)(dy + span); jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float pdym    = phi(dy - jy, mag0);
+        int   row_off = indy * npsi + tz_off;
 
-    dx = x - ix;
-    dy = y - iy;
-
-    g_ind = tx + ty * n + tz * n * nz;
-
-    if (dir == 0) g0 = {};
-    else g0 = g[g_ind];
-
-    for (int jy = ceil(dy - 2 * mag[0]); jy < dy + 2 * mag[0]; jy++)
-        for (int jx = ceil(dx - 2 * mag[0]); jx < dx + 2 * mag[0]; jx++)
+        for (int jx = (int)ceilf(dx - span); jx < (int)(dx + span); jx++)
         {
-            dxm = dx - jx;
-            dym = dy - jy;
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
 
-            w = phi(dxm, mag[0]) * phi(dym, mag[0]);
-
-            f_indx = (ix + jx + npsi) % npsi;
-            f_indy = (iy + jy + nzpsi) % nzpsi;
-            f_ind = f_indx + f_indy * npsi + tz * npsi * nzpsi;
+            float w   = phi(dx - jx, mag0) * pdym;
+            int   idx = indx + row_off;
 
             if (dir == 0)
             {
-                g0.x += w * f[f_ind].x;
-                g0.y += w * f[f_ind].y;
+                g0.x += w * f[idx].x;
+                g0.y += w * f[idx].y;
             }
             else
             {
-                atomicAdd(&(f[f_ind].x), w * g0.x);
-                atomicAdd(&(f[f_ind].y), w * g0.y);
+                atomicAdd(&(f[idx].x), w * g0.x);
+                atomicAdd(&(f[idx].y), w * g0.y);
             }
         }
+    }
 
     if (dir == 0) g[g_ind] = g0;
 }
 }
 """,
     "sback",
+)
+
+
+
+
+
+
+
+
+d2s_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + fun_d2phi
+    + r"""
+void __global__ d2s(float2* res, float2* c, float2* c1, float2* c2, float* r, float* mag,
+                    float* Deltar1, float* Deltar2,
+                    int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0     = mag[0];
+    const float half     = (mag0 - 1.0f) / 2.0f;
+    const float x        = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y        = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix       = (int)floorf(x);
+    const int   iy       = (int)floorf(y);
+    const float dx       = x - ix;
+    const float dy       = y - iy;
+    const float Deltar1x = Deltar1[2 * tz + 1];
+    const float Deltar1y = Deltar1[2 * tz + 0];
+    const float Deltar2x = Deltar2[2 * tz + 1];
+    const float Deltar2y = Deltar2[2 * tz + 0];
+    const float cross    = Deltar1x * Deltar2y + Deltar1y * Deltar2x;
+    const int   tz_off   = tz * npsi * nzpsi;
+
+    // Precompute x-direction phi, dphi, d2phi values (12 evals instead of 48).
+    float px[4], dpx[4], d2px[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d   = dx - jx;
+        px[jx + 1]   = phi(d);
+        dpx[jx + 1]  = dphi(d);
+        d2px[jx + 1] = d2phi(d);
+    }
+
+    float2 r0 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        float d2pdym  = d2phi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w  = d2px[jx + 1] * pdym    * Deltar1x * Deltar2x
+                     + dpx[jx + 1]  * dpdym   * cross
+                     + px[jx + 1]   * d2pdym  * Deltar1y * Deltar2y;
+            float w1 = dpx[jx + 1] * pdym  * Deltar1x
+                     + dpdym        * px[jx + 1] * Deltar1y;
+            float w2 = dpx[jx + 1] * pdym  * Deltar2x
+                     + dpdym        * px[jx + 1] * Deltar2y;
+            int idx = indx + row_off;
+            r0.x += w  * c[idx].x;
+            r0.y += w  * c[idx].y;
+            r0.x -= w1 * c1[idx].x;
+            r0.y -= w1 * c1[idx].y;
+            r0.x -= w2 * c2[idx].x;
+            r0.y -= w2 * c2[idx].y;
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "d2s",
+)
+
+
+d2sf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + fun_d2phi
+    + r"""
+void __global__ d2s(float* res, float* c, float* c1, float* c2, float* r, float* mag,
+                    float* Deltar1, float* Deltar2,
+                    int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0     = mag[0];
+    const float half     = (mag0 - 1.0f) / 2.0f;
+    const float x        = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y        = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix       = (int)floorf(x);
+    const int   iy       = (int)floorf(y);
+    const float dx       = x - ix;
+    const float dy       = y - iy;
+    const float Deltar1x = Deltar1[2 * tz + 1];
+    const float Deltar1y = Deltar1[2 * tz + 0];
+    const float Deltar2x = Deltar2[2 * tz + 1];
+    const float Deltar2y = Deltar2[2 * tz + 0];
+    const float cross    = Deltar1x * Deltar2y + Deltar1y * Deltar2x;
+    const int   tz_off   = tz * npsi * nzpsi;
+
+    // Precompute x-direction phi, dphi, d2phi values (12 evals instead of 48).
+    float px[4], dpx[4], d2px[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d   = dx - jx;
+        px[jx + 1]   = phi(d);
+        dpx[jx + 1]  = dphi(d);
+        d2px[jx + 1] = d2phi(d);
+    }
+
+    float r0 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym    = dy - jy;
+        float pdym   = phi(dym);
+        float dpdym  = dphi(dym);
+        float d2pdym = d2phi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w  = d2px[jx + 1] * pdym   * Deltar1x * Deltar2x
+                     + dpx[jx + 1]  * dpdym  * cross
+                     + px[jx + 1]   * d2pdym * Deltar1y * Deltar2y;
+            float w1 = dpx[jx + 1] * pdym       * Deltar1x
+                     + dpdym        * px[jx + 1] * Deltar1y;
+            float w2 = dpx[jx + 1] * pdym       * Deltar2x
+                     + dpdym        * px[jx + 1] * Deltar2y;
+
+            int idx = indx + row_off;
+            r0 += w  * c[idx];
+            r0 -= w1 * c1[idx];
+            r0 -= w2 * c2[idx];
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "d2s",
+)
+
+
+
+
+ds_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ ds(float2* res, float2* c, float2* c1, float* r, float* mag, float* Deltar,
+                   int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0    = mag[0];
+    const float half    = (mag0 - 1.0f) / 2.0f;
+    const float x       = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y       = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix      = (int)floorf(x);
+    const int   iy      = (int)floorf(y);
+    const float dx      = x - ix;
+    const float dy      = y - iy;
+    const float Deltarx = Deltar[2 * tz + 1];
+    const float Deltary = Deltar[2 * tz + 0];
+    const int   tz_off  = tz * npsi * nzpsi;
+
+    // Precompute x-direction phi and dphi values (8 evals instead of 32).
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float2 r0 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w   = dpx[jx + 1] * pdym  * Deltarx
+                      + dpdym        * px[jx + 1] * Deltary;
+            float w1  = px[jx + 1] * pdym;
+
+            int   idx = indx + row_off;
+            r0.x -= w * c[idx].x;
+            r0.y -= w * c[idx].y;
+            r0.x += w1 * c1[idx].x;
+            r0.y += w1 * c1[idx].y;
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "ds",
+)
+
+
+dsf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ ds(float* res, float* c, float* c1, float* r, float* mag, float* Deltar,
+                   int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0    = mag[0];
+    const float half    = (mag0 - 1.0f) / 2.0f;
+    const float x       = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y       = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix      = (int)floorf(x);
+    const int   iy      = (int)floorf(y);
+    const float dx      = x - ix;
+    const float dy      = y - iy;
+    const float Deltarx = Deltar[2 * tz + 1];
+    const float Deltary = Deltar[2 * tz + 0];
+    const int   tz_off  = tz * npsi * nzpsi;
+
+    // Precompute x-direction phi and dphi values (8 evals instead of 32).
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float r0 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w   = dpx[jx + 1] * pdym       * Deltarx
+                      + dpdym        * px[jx + 1] * Deltary;
+            float w1  = px[jx + 1] * pdym;
+            int   idx = indx + row_off;
+            r0 -= w  * c[idx];
+            r0 += w1 * c1[idx];
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "ds",
+)
+
+
+dsadj_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsadj(float2* f, float2* dt1, float2* dt2, float2* c, float2 *g, float* r, float* mag,
+                      int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0   = mag[0];
+    const float half   = (mag0 - 1.0f) / 2.0f;
+    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   tz_off = tz * npsi * nzpsi;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+
+    // Precompute x-direction phi and dphi values (8 evals instead of 32).
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float2 g0 = g[g_ind];
+    float2 dt10 = {};
+    float2 dt20 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w1  = -dpdym       * px[jx + 1];
+            float w2  = -dpx[jx + 1] * pdym;
+            int   idx = indx + row_off;
+
+            dt10.x += w1 * c[idx].x;
+            dt10.y += w1 * c[idx].y;
+            dt20.x += w2 * c[idx].x;
+            dt20.y += w2 * c[idx].y;
+
+            float w3 = px[jx + 1] * pdym;
+            atomicAdd(&(f[idx].x), w3 * g0.x);
+            atomicAdd(&(f[idx].y), w3 * g0.y);
+        }
+    }
+
+    int out_ind = tx + ty * n + tz * n * nz;
+    dt1[out_ind] = dt10;
+    dt2[out_ind] = dt20;
+}
+}
+""",
+    "dsadj",
+)
+
+
+dsadjf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsadj(float* f, float* dt1, float* dt2, float* c, float* g, float* r,  float* mag,
+                      int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float mag0   = mag[0];
+    const float half   = (mag0 - 1.0f) / 2.0f;
+    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
+    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   tz_off = tz * npsi * nzpsi;
+
+    const int g_ind  = tx + ty * n + tz * n * nz;
+    float g0 = g[g_ind];
+
+    // Precompute x-direction phi and dphi values (8 evals instead of 32).
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float dt10 = 0.0f;
+    float dt20 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        if (indy < 0 || indy >= nzpsi) continue;
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            if (indx < 0 || indx >= npsi) continue;
+
+            float w1  = -dpdym       * px[jx + 1];
+            float w2  = -dpx[jx + 1] * pdym;
+            int   idx = indx + row_off;
+            float cv  = c[idx];
+            dt10 += w1 * cv;
+            dt20 += w2 * cv;
+
+            float w3 = px[jx + 1] * pdym;
+            atomicAdd(&(f[idx]), w3 * g0);
+        }
+    }
+
+    int out_ind = tx + ty * n + tz * n * nz;
+    dt1[out_ind] = dt10;
+    dt2[out_ind] = dt20;
+}
+}
+""",
+    "dsadj",
 )

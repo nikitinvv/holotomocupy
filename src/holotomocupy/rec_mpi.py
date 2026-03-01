@@ -202,7 +202,6 @@ class Rec:
 
         return vars
 
-    @timer
     def hessian(self, vars, grads, etas):
         """Hessian for the full functional, is a sum of 3 terms:
         1. main data fit term calcuated with the cascade rule,
@@ -218,6 +217,7 @@ class Rec:
         nvtx.pop_range()
         return w
 
+    @timer
     def hessian_cascade(self, vars, grads, etas):
         """"Cascade computation of the hessian for the main term,
             following the composition rule (Carlsson, 2025):
@@ -272,7 +272,6 @@ class Rec:
         
         return out[0].get()
 
-    @timer
     def gradients(self, vars, grads):
         """Full gradient, consists of 3 terms: 
         1. main data fit term calcuated with the cascade rule,
@@ -280,12 +279,21 @@ class Rec:
         """        
         
         self.gradients_cascade(vars,grads)
+
+        nvtx.push_range(":::BH:redist back",color='red')             
+        self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
+        nvtx.pop_range() 
         
+        # part2, parallelization over object slices, formally gF4  
+        self.gF4(grads['obj'], self.proj_tmp)      
+
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
+
         ## copying to cpu before reduce for now
         grads['prb'][:] = self.allreduce(grads['prb'])        
         
+    @timer    
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term
             following the composition rule (Carlsson, 2025):
@@ -312,21 +320,17 @@ class Rec:
 
         _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],self.data,vars["proj"],vars["pos"],vars["prb"])
         
-        nvtx.push_range(":::BH:redist back",color='red')             
-        self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
-        nvtx.pop_range() 
-        
-        # part2, parallelization over object slices, formally gF4  
-        @timer
+    @timer
+    def gF4(self, gradu, gradproj):
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
-            gradu[:] = self.cl_tomo.RT(gradproj)
-        
+            gradu[:] = self.cl_tomo.RT(gradproj)        
         nvtx.push_range("gF4",color='green')            
-        _gF4(self, grads['obj'], self.proj_tmp)      
-        nvtx.pop_range() 
-    
+        _gF4(self, gradu, gradproj)      
+        nvtx.pop_range()     
+
     #### probe fit term
+    @timer
     def gradient_prbfit(self, grad_prb, prb):
         """Gradient with respect to the term 
         lam_prbfit|||Dprb|-ref||_2^2"""
@@ -338,6 +342,7 @@ class Rec:
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
             grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
         
+    @timer
     def hessian_prbfit(self, prb, dprb1, dprb2):
         """Hessian with respect to the term 
         lam_prbfit|||Dprb|-ref||_2^2"""

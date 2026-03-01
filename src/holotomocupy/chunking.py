@@ -205,6 +205,7 @@ class Chunking:
         return tuple(res)
 
     ####################### Simple batched functions #########################
+    @timer
     def redot_batch(self, x, y, nout=1):
         """res = Re<x, y>"""
         if isinstance(x, cp.ndarray):
@@ -218,6 +219,7 @@ class Chunking:
         _redot(self, res, x, y)
         return res[0].get()
 
+    @timer
     def linear_batch(self, x, y, a, b, out=None):
         """w = ax + by"""
         if out is None:
@@ -231,7 +233,8 @@ class Chunking:
             out[:] = a * x + b * y
 
         _linear(self, out, x, y, a, b)
-
+    
+    @timer
     def mulc_batch(self, out, x, a):
         """out = ax"""
         if isinstance(x, cp.ndarray):

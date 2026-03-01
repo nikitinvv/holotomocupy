@@ -25,7 +25,7 @@ def copy_to_pinned(data):
 def make_pinned(shape, dtype):
     n      = int(np.prod(shape))
     nbytes = n * np.dtype(dtype).itemsize
-    logger.warning(f'Allocate {shape} {dtype}: {nbytes / 1024**3:.3f} GB')
+    logger.debug(f'Allocate {shape} {dtype}: {nbytes / 1024**3:.3f} GB')
     buf = cp.cuda.alloc_pinned_memory(nbytes)
     return np.frombuffer(buf, dtype=dtype, count=n).reshape(shape, copy=False)
 
@@ -95,7 +95,7 @@ def mshow_approx(t, err_real, err_approx, show=False):
 
 
 def reprod(a, b):
-    return a.real * b.real + a.imag * b.imag
+    return cp.real(a) * cp.real(b) + cp.imag(a) * cp.imag(b)
 
 
 def redot(a, b, axis=None):

@@ -105,8 +105,72 @@ class Tomo:
             fde = fde.real
         return cp.ascontiguousarray(fde)
 
+    def _filter_sino(self, data, filter_name):
+        """Apply a 1-D frequency-domain filter along the detector axis (last axis).
+
+        Parameters
+        ----------
+        data : cupy ndarray, shape [ntheta, nz, n], float32 or complex64
+        filter_name : str  — 'ramp', 'shepp', or 'parzen'
+
+        Returns
+        -------
+        Filtered array with the same shape and dtype as `data`.
+        """
+        n  = self.n
+        f  = cp.fft.fftfreq(n).astype('float32')   # f in [-0.5, 0.5)
+        af = cp.abs(f)
+
+        if filter_name == 'ramp':
+            # Ram-Lak: |ω|
+            h = af
+        elif filter_name == 'shepp':
+            # Shepp-Logan: |ω| × sinc(ω)
+            # cp.sinc uses normalized sinc: sinc(x) = sin(πx)/(πx), sinc(0) = 1
+            h = af * cp.sinc(f)
+        elif filter_name == 'parzen':
+            # Parzen (B-spline order-4) window applied to the ramp.
+            # u = 2|f| maps [0, 0.5] → [0, 1]
+            u = 2 * af
+            w = cp.where(u <= 0.5,
+                         1 - 6*u**2 + 6*u**3,   # inner region
+                         2*(1 - u)**3)            # outer region (tapers to 0 at Nyquist)
+            h = af * w
+        else:
+            raise ValueError(
+                f"Unknown filter '{filter_name}'. Choose: ramp, shepp, parzen."
+            )
+
+        # Apply along last axis; preserve dtype throughout
+        d_fft  = cp.fft.fft(data, axis=-1)
+        d_fft *= h.astype(d_fft.dtype)         # broadcast [n] over [ntheta, nz, n]
+        result = cp.fft.ifft(d_fft, axis=-1)
+
+        if cp.iscomplexobj(data):
+            return result.astype(data.dtype)
+        return result.real.astype(data.dtype)
+
+    def fbp(self, data, filter_name='ramp'):
+        """Filtered back-projection: apply a 1-D filter then RT.
+
+        Parameters
+        ----------
+        data : array_like [ntheta, nz, n], float32 or complex64
+            Sinogram projections (numpy or cupy).
+        filter_name : str
+            'ramp'   — Ram-Lak ramp filter |ω|
+            'shepp'  — Shepp-Logan:        |ω| × sinc(ω)
+            'parzen' — Parzen B-spline-4:  |ω| × w_parzen(2ω)
+
+        Returns
+        -------
+        Reconstruction array [nz, n, n], same dtype as `data`.
+        """
+        data = cp.asarray(data)
+        return self.RT(self._filter_sino(data, filter_name))
+
     def rec_tomo(self, d, niter=1):
-        """Regular tomography reconstruction for initial guess"""
+        """Iterative CG tomography reconstruction for initial guess"""
 
         def minf(Ru, d):
             return np.linalg.norm(Ru - d) ** 2

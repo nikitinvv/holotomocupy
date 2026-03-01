@@ -126,7 +126,7 @@ class Rec:
         self.redist(proj_tmp, vars['proj'])
         
         # calc init error
-        self.error_debug(vars, -1)
+        self.error_debug(vars, -1)  
         
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):

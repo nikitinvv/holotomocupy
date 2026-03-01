@@ -16,6 +16,8 @@ COLORS = {
 class MPIRankFilter(logging.Filter):
     def filter(self, record):
         record.rank = rank
+        if record.levelno == logging.DEBUG and rank != 0:
+            return False
         return True
 
 class ColorMessageFormatter(logging.Formatter):

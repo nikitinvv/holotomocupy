@@ -108,10 +108,8 @@ class Rec:
         self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
     def BH(self, writer=None):
-
-        vars = self.vars
-        self.pos_init = vars['pos'].copy()
-        # refs to preallocated memory for gradients        
+        # refs to preallocated memory for gradients                
+        vars = self.vars        
         grads = self.grads
         etas = self.etas
         proj_tmp = self.proj_tmp
@@ -121,8 +119,9 @@ class Rec:
         if self.start_iter==0:
             vars["obj"]*=self.cl_tomo.mask
         
-        # precalculate proj     
+        self.pos_init = vars['pos'].copy()
         
+        # precalculate proj             
         self.fwd_tomo(vars["obj"],out = proj_tmp)                    
         self.redist(proj_tmp, vars['proj'])
         
@@ -270,6 +269,7 @@ class Rec:
             vars["proj"], grads["proj"], etas["proj"],
             vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
         )
+        
         return out[0].get()
 
     @timer
@@ -381,37 +381,38 @@ class Rec:
     @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
-        x0 = x
-        return cp.linalg.norm(cp.abs(x0) - d) ** 2 / self.data_size
+        
+        @cp.fuse()
+        def F0_fused(x, d):       
+            t = cp.abs(x) - d
+            return t*t         
+        return 1/ self.data_size * cp.sum(F0_fused(x, d)) 
 
     @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
         
-        x0 = x
-        y0 = y
-
-        tmp = 2 * (x - d * (x0 / cp.abs(x0)))
-        return redot(tmp, y0) / self.data_size
-        
+        @cp.fuse()
+        def dF0_fused(x, d):        
+            return (x - d * (x / cp.abs(x)))
+        return 2 / self.data_size * redot(dF0_fused(x, d), y) 
+            
     @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
+
+        @cp.fuse()
+        def d2F_dF0_fused(x, y, z, w, d):
+            absval = cp.abs(x)
+            l0 = x / absval
+            d0 = d / absval
+            v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
+            if w is not None:
+                v += reprod(x - d * l0, w)
+            return v
         
-        x0 = x
-        y0 = y
-        z0 = z
-        w0 = w
+        return 2 / self.data_size * cp.sum(d2F_dF0_fused(x, y, z, w, d))                    
         
-        l0 = x0 / (cp.abs(x0))
-        d0 = d / (cp.abs(x0))
-        v = cp.sum((1 - d0) * reprod(y0, z0))
-        v += cp.sum(d0 * reprod(l0, y0) * reprod(l0, z0))        
-        if w is not None:
-            v +=  redot(x - d * l0, w0)
-        
-        return v * 2 / self.data_size
-     
     @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
@@ -419,11 +420,14 @@ class Rec:
         # calc fwd starting from 1
         for id in range(1, 4)[::-1]: 
             x = self.F[id](x)
-               
-        td = y * (x / (cp.abs(x)))
-        y0 = (2 / self.data_size) * (x - td) 
+
+        @cp.fuse()
+        def gF0_fused(x,y):
+            td = y * (x / (cp.abs(x)))
+            y0 = (2 / self.data_size) * (x - td) 
+            return y0
         
-        return y0
+        return gF0_fused(x,y)
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
     @nvtx.annotate("F1", color="green")
@@ -444,14 +448,15 @@ class Rec:
 
         x11, x12 = x
         y11, y12 = y
-
-        y0 = cp.empty([x12.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
-        x0 = cp.empty_like(y0) if return_x else None
-
+       
+        y0 = y11[None] * x12 + x11[None] * y12
         for j in range(self.ndist):
-            y0[:, j] = self.cl_prop.D(y11[j] * x12[:, j] + x11[j] * y12[:, j], j)
-            if return_x:
-                x0[:, j] = self.cl_prop.D(x11[j] * x12[:, j], j)
+            y0[:, j] = self.cl_prop.D(y0[:, j], j)
+            
+        if return_x:
+            x0 = x11[None] * x12
+            for j in range(self.ndist):
+                x0[:, j] = self.cl_prop.D(x0[:, j], j)
 
         return (x0, y0) if return_x else y0
     
@@ -463,24 +468,22 @@ class Rec:
         y11, y12 = y
         z11, z12 = z
         w11, w12 = w
+        
+        if y12 is z12:
+            y0 = 2 * y11[None] * y12
+        else:
+            y0 = y11[None] * z12 + z11[None] * y12
 
-        y0 = cp.empty([len(y12), self.ndist, self.nz, self.n], dtype="complex64")
+        if w11 is not None:
+            y0 += w11[None] * x12
+        if w12 is not None:
+            y0 += x11[None] * w12
 
         for j in range(self.ndist):
-            if y12 is z12:
-                y0[:, j] = 2 * y11[j] * y12[:, j]
-            else:
-                y0[:, j] = y11[j] * z12[:, j] + z11[j] * y12[:, j]
-
-            if w11 is not None:
-                y0[:, j] += w11[j] * x12[:, j]
-            if w12 is not None:
-                y0[:, j] += x11[j] * w12[:, j]
-
             y0[:, j] = self.cl_prop.D(y0[:, j], j)
-
+    
         return y0
-
+   
     @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
@@ -492,13 +495,13 @@ class Rec:
             x = self.F[id](x)
 
         x11, x12 = x
-
         y11 = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
         y12 = cp.empty([y0.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
         for j in range(self.ndist):
-            tmp = self.cl_prop.DT(y0[:, j], j)
-            y11[j] += cp.sum(tmp * np.conj(x12[:, j]), axis=0)
-            y12[:, j] = tmp * np.conj(x11[j])
+            y12[:,j] = self.cl_prop.DT(y0[:, j], j)
+
+        y11 = cp.sum(y12 * np.conj(x12), axis=0)
+        y12 *= np.conj(x11[None])
         return y11, y12        
 
     ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
@@ -508,7 +511,10 @@ class Rec:
 
         x21, x22 = x
         x11 = x21
-        x12 = cp.exp(1j*x22)
+        @cp.fuse()
+        def F2_fused(x22):
+            return cp.exp(1j*x22)
+        x12 = F2_fused(x22)
         return x11, x12
 
     @nvtx.annotate("dF2", color="green")
@@ -518,9 +524,12 @@ class Rec:
         x21, x22 = x
         y21, y22 = y
 
-        x12 = cp.exp(1j*x22)             
-        y12 = x12 * 1j * y22
-
+        @cp.fuse()
+        def dF2_fused(x22,y22):
+            x12 = cp.exp(1j*x22)             
+            y12 = x12 * 1j * y22
+            return x12,y12
+        x12, y12 = dF2_fused(x22,y22)
         x11 = x21
         y11 = y21        
 
@@ -537,15 +546,18 @@ class Rec:
         z21, z22 = z
         w21, w22 = w
         
+        @cp.fuse()
+        def d2F_dF2(x22,y22,z22,w22):
+            if y22 is z22:
+                y12 = x22 * (-y22**2)
+            else:
+                y12 = x22 * (-y22 * z22)
+
+            if w22 is not None:
+                y12 = y12 + cp.exp(1j*x22) * 1j * w22
+            return y12
         
-        if y22 is z22:
-            y12 = x22 * (-(y22**2))
-        else:
-            y12 = x22 * (-y22 * z22)
-
-        if w22 is not None:
-            y12 = y12 + cp.exp(1j*x22) * 1j * w22
-
+        y12 = d2F_dF2(x22,y22,z22,w22)
         y11 = w21
         
         return [y11, y12]
@@ -561,7 +573,12 @@ class Rec:
             x = self.F[id](x)
         x21,x22 = x
 
-        y22 = (-1j) * y12 * cp.conj(cp.exp(1j*x22))
+        @cp.fuse()
+        def gF2_fused(x22,y12):
+            y22 = (-1j) * y12 * cp.conj(cp.exp(1j*x22))
+            return y22
+        
+        y22 = gF2_fused(x22,y12)
         y22 = y22.real if self.obj_dtype == 'float32' else y22
 
         y21 = y11

@@ -181,20 +181,30 @@ class Reader:
 
 
     def read_obj_unbin(self, out):
-        """Read initial guess for the object with optional upsampling."""
+        """Read initial object with upsampling, one slice at a time to minimize peak memory."""
         st, end = self.st_obj, self.end_obj
+        n0 = end - st
+        scale = 2 ** (-self.bin)  # upsampling factor (>= 1)
+        nz_src = n0 // scale
+        st_src = st // scale
+        idx0 = np.clip(
+            (np.arange(n0) * nz_src / n0).astype(np.intp),
+            0, nz_src - 1,
+        )
         with h5py.File(self.in_file, 'r') as fid:
-            obj = fid['/exchange/obj'][st // 2**(-self.bin) : end // 2**(-self.bin), :]
-            if self.obj_dtype == 'float32':
-                obj = obj.real
-            for axis in [2, 1]:
-                obj = np.repeat(obj, 2**(-self.bin), axis=axis)
-            n0 = end - st
-            idx0 = np.clip(
-                (np.arange(n0) / (n0 / obj.shape[0])).astype(np.intp),
-                0, obj.shape[0] - 1,
-            )
-            out[:] = obj[idx0].astype(self.obj_dtype)
+            ds = fid['/exchange/obj']
+            cached_src = -1
+            cached_slc = None
+            for i in range(n0):
+                src = idx0[i]
+                if src != cached_src:
+                    slc = ds[st_src + src]  # 2D: [n_src, n_src]
+                    if self.obj_dtype == 'float32':
+                        slc = slc.real
+                    slc = np.repeat(np.repeat(slc, scale, axis=1), scale, axis=0)
+                    cached_slc = slc.astype(self.obj_dtype)
+                    cached_src = src
+                out[i] = cached_slc
         return out
 
 

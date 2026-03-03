@@ -291,7 +291,7 @@ class Rec:
             self.gradient_prbfit(grads["prb"], vars["prb"])
 
         ## copying to cpu before reduce for now
-        grads['prb'][:] = self.allreduce(grads['prb'])        
+        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))        
         
     @timer    
     def gradients_cascade(self, vars, grads):

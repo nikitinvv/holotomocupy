@@ -132,9 +132,8 @@ class Reader:
     def read_ref(self, out=None):
         """Read reference (flat-field) on rank 0 and broadcast to all ranks."""
         nz = self.nz
-        n = self.n
         # FIX: read once on rank 0, broadcast — avoids N redundant identical reads
-        raw_np = np.empty((self.ndist, nz, n), dtype='float32')
+        raw_np = np.empty((self.ndist, nz), dtype='float32')
         if self.rank == 0:
             with h5py.File(self.in_file, 'r') as fid:
                 nz0 = fid[f'/exchange/pref_{self.bin}'].shape[1]
@@ -166,19 +165,18 @@ class Reader:
             for axis in [2, 1]:
                 prb_raw = np.repeat(prb_raw, scale, axis=axis)
             prb_np[:] = prb_raw
-
         else:
             scale = None
         scale = self.comm.bcast(scale, root=0)
-        self.comm.Bcast(prb_np, root=0)        
+        self.comm.Bcast(prb_np, root=0)
         if out_prb is None:
             out_prb = cp.array(prb_np)
         else:
             out_prb[:] = cp.array(prb_np)
         if scale > 1:
             from cupyx.scipy.ndimage import shift
-            shift_val = 0# -0.5 * (scale - 1)
-            out_prb[:] = shift(out_prb, shift=(0, 0, shift_val), order=3, mode='nearest')
+            shift_val = 0.5 * (scale - 1)
+            out_prb[:] = shift(out_prb, shift=(0, shift_val, shift_val), order=3, mode='nearest')
 
         # --- obj: parallel read of each rank's slice, upsample ---
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
@@ -207,8 +205,7 @@ class Reader:
             # --- pos: scale pixel coordinates up ---
             pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
-        pos_up = pos * scale 
-        pos_up[...,1] += 0.5 * (scale - 1)
+        pos_up = pos * scale + 0.5 * (scale - 1)
         if out_pos is None:
             out_pos = cp.array(pos_up)
         else:
@@ -263,7 +260,8 @@ class Reader:
         """Read initial probe and upsample by 2**bin in spatial dimensions."""
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             prb = fid['/exchange/prb'][:]
-        scale = 2 ** (-self.bin)
+        # FIX: scale = 2**bin (not 2**(-bin))
+        scale = 2 ** self.bin
         for axis in [2, 1]:
             prb = np.repeat(prb, scale, axis=axis)
         out[:] = cp.array(prb).astype('complex64')

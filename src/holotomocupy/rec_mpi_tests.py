@@ -67,7 +67,7 @@ class Rec:
         self.alloc_arrays()
 
         # save convergence results
-        self.table = pd.DataFrame(columns=["iter", "err", "time"])
+        self.table = pd.DataFrame(columns=["iter", "alpha", "beta", "err", "time"])
 
         # normalization constant to address work with normal operators
         self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))        
@@ -99,18 +99,38 @@ class Rec:
         self.data = make_pinned([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
         self.ref  = cp.empty(prb_shape,                                           dtype='float32')
         # gradient and conjugate-direction buffers
-        self.grads, self.etas = {}, {}
-        for ge in self.grads, self.etas:
+        self.grads, self.grads1, self.grads2, self.etas = {}, {}, {}, {}
+        for ge in self.grads, self.grads1, self.grads2, self.etas:
             ge["obj"]  = make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype)
             ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
         self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
+        # L-BFGS history buffers (methods 3,6,8,9,11,12), keyed by obj/prb/pos (proj excluded)
+        self.lbfgs_m = 10 if self.method in (8, 11, 12) else 5
+        lbfgs_m = self.lbfgs_m
+        self.lbfgs_s, self.lbfgs_y = [], []
+        for _ in range(lbfgs_m):
+            self.lbfgs_s.append({
+                'obj': make_pinned([self.local_nzobj, self.nobj, self.nobj], dtype=self.obj_dtype),
+                'pos': cp.zeros([self.local_ntheta, self.ndist, 2],          dtype='float32'),
+                'prb': cp.empty(prb_shape,                                   dtype='complex64'),
+            })
+            self.lbfgs_y.append({
+                'obj': make_pinned([self.local_nzobj, self.nobj, self.nobj], dtype=self.obj_dtype),
+                'pos': cp.zeros([self.local_ntheta, self.ndist, 2],          dtype='float32'),
+                'prb': cp.empty(prb_shape,                                   dtype='complex64'),
+            })
+        self.lbfgs_rho = [0.0] * lbfgs_m
+        self.lbfgs_k = 0   # number of valid pairs (capped at lbfgs_m)
+        self.lbfgs_t = 0   # circular-buffer write pointer
+
     def BH(self, writer=None):
         # refs to preallocated memory for gradients                
         vars = self.vars        
         grads = self.grads
+        grads1 = self.grads1
         etas = self.etas
         proj_tmp = self.proj_tmp
 
@@ -126,7 +146,7 @@ class Rec:
         self.redist(proj_tmp, vars['proj'])
         
         # calc init error
-        self.error_debug(vars, -1)  
+        self.error_debug(vars,0, 0, -1)  
         
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
@@ -135,6 +155,8 @@ class Rec:
                         
             # compute gradients
             nvtx.push_range("gradients")
+            for v in ["obj", "prb", "pos", 'proj']:                
+                grads1[v][:] = grads[v]#.copy()
             self.gradients(vars, grads)      
             nvtx.pop_range()       
                 
@@ -150,11 +172,37 @@ class Rec:
             self.cl_mpi.redist(proj_tmp, grads['proj'])
             nvtx.pop_range()
             
-            if i == self.start_iter:
+            beta = 0.0
+            if i == 0:
                 # initial search direction (negative gradient)
                 for v in ["obj", "prb", "pos", "proj"]:
                     self.mulc_batch(etas[v], grads[v], -1)
-
+            
+            elif self.method == 3 or self.method == 6 or self.method == 8 or self.method == 9 or self.method == 11 or self.method == 12:
+                    # L-BFGS direction
+                    if i > self.start_iter:
+                        self._lbfgs_push(grads, grads1, alpha)
+                    self._lbfgs_direction(grads, etas)
+                    # check descent; reset history and fall back to steepest descent if needed
+                    g0_test = 0.0
+                    for v in ["obj", "pos"]:
+                        g0_test += self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+                    if self.rank == 0:
+                        g0_test += self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
+                    g0_test, _ = self.allreduce2(g0_test, 0.0)
+                    if g0_test >= 0:
+                        if self.rank == 0:
+                            print(f"L-BFGS: non-descent direction, resetting history")
+                        self.lbfgs_k = 0
+                        self.lbfgs_t = 0
+                        for v in ["obj", "prb", "pos", "proj"]:
+                            self.mulc_batch(etas[v], grads[v], -1)
+                    nvtx.push_range(":::BH:fwd_tomo")
+                    self.fwd_tomo(etas["obj"], out=proj_tmp)
+                    nvtx.pop_range()
+                    nvtx.push_range(":::BH:redist", color='red')
+                    self.cl_mpi.redist(proj_tmp, etas['proj'])
+                    nvtx.pop_range()
             else:
                 # calc beta using Hessian-weighted inner products
                 nvtx.push_range(":::BH:calc beta")
@@ -162,36 +210,61 @@ class Rec:
                 top = self.hessian(vars, grads, etas)
                 bottom = self.hessian(vars, etas, etas)
                 top, bottom = self.allreduce2(top, bottom)
-                beta = top / bottom
+                if self.method==0 or self.method==4 or self.method==5 or self.method==10:
+                    beta = max(top / bottom,0)
+                if self.method==1 or self.method==2 or self.method==7:
+                    beta = self.beta_pr_plus(grads1,grads)
 
                 nvtx.pop_range()
 
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos","proj"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)                
+                    self.linear_batch(etas[v], grads[v], beta, -1)
             
             # calc alpha (step length)            
             nvtx.push_range(":::BH:calc_alpha")
 
-            top = 0
-            for v in ["obj", "pos"]:                
-                top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
-            if self.cl_mpi.rank ==0:
-                top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
 
-            bottom = self.hessian(vars, etas, etas)
+            if i==0 or self.method==0 or self.method==1 or self.method==4 or self.method==6 or self.method==12 or alpha==0: # to find approximation of alpha
+                top = 0
+                for v in ["obj", "pos"]:                
+                    top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+                if self.cl_mpi.rank ==0:
+                    top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
 
-            top, bottom = self.allreduce2(top, bottom)
-            alpha = top / bottom
-            nvtx.pop_range()      
+                bottom = self.hessian(vars, etas, etas)
+
+                top, bottom = self.allreduce2(top, bottom)
+                alpha = top / bottom
             
+            elif (self.method==3 or self.method==6 or self.method==8 or self.method==9 or self.method==11) and i==2:
+                alpha = 1/16
+            
+            elif self.method==2 or self.method==3 or self.method==5 or self.method==7 or self.method==8 or self.method==9 or self.method==10 or self.method==11:
+                g0_eta = 0.0
+                for v in ["obj", "pos"]:
+                    g0_eta += self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+                if self.rank == 0:
+                    g0_eta += self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
+                g0_eta, _ = self.allreduce2(g0_eta, 0.0)
+                if self.method == 7 or self.method == 9 or self.method == 10 or self.method == 11:
+                    alpha = self.line_search_armijo(vars, etas, alpha*16, g0_eta)
+                else:
+                    alpha = self.line_search(vars, etas, alpha*16, g0_eta)
+                nvtx.pop_range()
+            
+            if self.method==4:
+                alpha = self.line_search_scan(vars, etas, alpha)
+                nvtx.pop_range()
+
+
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos", "proj"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)            
             
             # error and visualization debug
             nvtx.push_range(":::BH:calc error",color='gray')  
-            self.error_debug(vars, i)
+            self.error_debug(vars, alpha, beta, i)
             nvtx.pop_range()  
             
             self.vis_debug(vars, i, writer)
@@ -702,7 +775,7 @@ class Rec:
         """Save reconstruction checkpoint to HDF5."""
         if not (i % self.vis_step == 0 and self.vis_step != -1):
             return
-        if writer is not None:
+        if writer is not None and self.start_iter<i:
             writer.write_checkpoint(vars, i, self.norm_const)
         else:
             mshow_complex(vars['obj'][self.nzobj//2],True)
@@ -710,7 +783,7 @@ class Rec:
             mshow_pos(vars['pos']-self.pos_init,True)
             
     
-    def error_debug(self, vars, i):
+    def error_debug(self, vars, alpha, beta, i):
         """Visualization and data saving"""
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
@@ -719,11 +792,11 @@ class Rec:
         if self.rank==0:
             if i==-1:
                 logger.warning(f"Initial {err=:1.5e} ")                        
-                self.table.loc[len(self.table)] = [i, err, 0]
+                self.table.loc[len(self.table)] = [i, beta, alpha,err, 0]
             else:                
                 ittime = time.time()-self.time_start           
                 logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")                        
-                self.table.loc[len(self.table)] = [i, err, ittime]
+                self.table.loc[len(self.table)] = [i, alpha, beta, err, ittime]
             self.time_start = time.time()
             if hasattr(self, 'path_out'):
                 name = f"{self.path_out}/conv.csv"
@@ -752,36 +825,257 @@ class Rec:
         for j in range(self.ndist):
             out[j] = cp.abs(self.cl_prop.D(prb[j : j + 1], j)[0])
             
-
-    def beta_pr(self,gk, gk1):
+    ############### polak ribiera
+    def beta_pr(self, gk, gk1):
         """
         Polak–Ribière beta for real or complex gradients.
         Uses Hermitian inner products; returns a real scalar.
         """
         top = 0
         bottom = 0
-        for v in ['pos','prb','obj']:
+        for v in ['pos', 'obj']:
             y = gk1[v] - gk[v]
-            top += np.vdot(gk1[v].view('float32'), y.view('float32'))          # g_{k+1}^H (g_{k+1}-g_k)
-            bottom += np.vdot(gk[v].view('float32'), gk[v].view('float32'))          # g_k^H g_k  (real >= 0)
-        beta = self.allreduce(top)/self.allreduce(bottom)      
-        return beta
+            top    += self.redot_batch(gk1[v], y)      # Re<g_{k+1}, g_{k+1}-g_k>
+            bottom += self.redot_batch(gk[v],  gk[v])  # Re<g_k, g_k>
+        if self.rank == 0:
+            y = gk1['prb'] - gk['prb']
+            top    += self.redot_batch(gk1['prb'], y)
+            bottom += self.redot_batch(gk['prb'],  gk['prb'])
+        top, bottom = self.allreduce2(top, bottom)
+        return top / bottom
 
     def beta_pr_plus(self,gk, gk1):
         """PR+ safeguard: max(beta_PR, 0)."""
         return max(0.0, self.beta_pr(gk, gk1))
 
-    def line_search(self,vars,etas,alpha):        
-        err0 = self.min(vars['prb'],vars['obj'],vars['pos'],vars['proj'])
-        # update variables: var = var+alpha*eta
-        for k in range(10):
+    ############### L-BFGS (method 3)
+
+    def _dot(self, a, b):
+        """MPI-aware inner product: obj+pos on all ranks, prb on rank 0 only."""
+        d = 0.0
+        for v in ['obj', 'pos']:
+            d += self.redot_batch(a[v], b[v])
+        if self.rank == 0:
+            d += self.redot_batch(a['prb'], b['prb'])
+        d, _ = self.allreduce2(d, 0.0)
+        return d
+
+    def _lbfgs_push(self, grads, grads1, alpha, curvature_eps=1e-10):
+        """Store s = alpha*etas, y = grads-grads1.
+
+        Skips the pair if the curvature condition ys > eps*||y||*||s|| is not met
+        (relative threshold from the reference implementation).
+        """
+        m = self.lbfgs_m
+        t = self.lbfgs_t
+        # write s and y to slot first, then check curvature
+        for v in ['obj', 'prb', 'pos']:
+            self.mulc_batch(self.lbfgs_s[t][v], self.etas[v], alpha)
+            self.linear_batch(self.lbfgs_y[t][v], grads[v],  0,  1)
+            self.linear_batch(self.lbfgs_y[t][v], grads1[v], 1, -1)
+        ys = self._dot(self.lbfgs_s[t], self.lbfgs_y[t])
+        yy = self._dot(self.lbfgs_y[t], self.lbfgs_y[t])
+        ss = self._dot(self.lbfgs_s[t], self.lbfgs_s[t])
+        thresh = curvature_eps * max(1.0, float(np.sqrt(max(yy, 0.0))) * float(np.sqrt(max(ss, 0.0))))
+        if ys <= thresh:
+            if self.rank == 0:
+                print(f"L-BFGS: skip pair (ys={ys:.3e} thresh={thresh:.3e})")
+            return
+        self.lbfgs_rho[t] = 1.0 / ys
+        self.lbfgs_t = (t + 1) % m
+        self.lbfgs_k += 1
+
+    def _lbfgs_direction(self, grads, etas):
+        """Standard L-BFGS two-loop (N&W Alg 7.4) using grads directly as q."""
+        m = self.lbfgs_m
+        k = min(self.lbfgs_k, m)
+        t = self.lbfgs_t
+
+        # q = grads
+        for v in ['obj', 'prb', 'pos']:
+            self.linear_batch(etas[v], grads[v], 0, 1.0)
+
+        # first loop (backward)
+        alpha_l = np.zeros(k)
+        for j in range(k - 1, -1, -1):
+            idx = (t - k + j) % m
+            a_j = self.lbfgs_rho[idx] * self._dot(self.lbfgs_s[idx], etas)
+            alpha_l[j] = a_j
+            for v in ['obj', 'prb', 'pos']:
+                self.linear_batch(etas[v], self.lbfgs_y[idx][v], 1, -a_j)
+
+        # H0 = gamma*I,  gamma = <s,y> / <y,y>  (with safety checks)
+        if k > 0:
+            idx_last = (t - 1) % m
+            sy = 1.0 / self.lbfgs_rho[idx_last]
+            yy = self._dot(self.lbfgs_y[idx_last], self.lbfgs_y[idx_last])
+            gamma = sy / yy if yy > 1e-20 else 1.0
+            if not np.isfinite(gamma) or gamma <= 0:
+                if self.rank == 0:
+                    print(f"L-BFGS: bad gamma={gamma:.3e}, resetting to 1.0")
+                gamma = 1.0
+            for v in ['obj', 'prb', 'pos']:
+                self.mulc_batch(etas[v], etas[v], gamma)
+
+        # second loop (forward)
+        for j in range(k):
+            idx = (t - k + j) % m
+            b_j = self.lbfgs_rho[idx] * self._dot(self.lbfgs_y[idx], etas)
+            for v in ['obj', 'prb', 'pos']:
+                self.linear_batch(etas[v], self.lbfgs_s[idx][v], 1, alpha_l[j] - b_j)
+
+        # descent direction = -H_k * g
+        for v in ['obj', 'prb', 'pos']:
+            self.mulc_batch(etas[v], etas[v], -1)
+
+    def line_search_scan(self, vars, etas, alpha, n_scan=21, lo=0.5, hi=1.5):
+        """Exact line search by scanning n_scan alpha values in [lo*alpha, hi*alpha].
+
+        Returns the alpha with the lowest objective value.
+        Uses self.grads1 as trial buffer (self.grads is preserved).
+        """
+        f_best = np.inf
+        alpha_best = alpha
+        for a in np.linspace(lo * alpha, hi * alpha, n_scan):
             for v in ["obj", "prb", "pos", "proj"]:
-                self.grads[v][:] = vars[v]+ alpha*etas[v]        
-                err1 = self.min(self.grads['prb'],self.grads['obj'],self.grads['pos'],self.grads['proj'])
-                if self.rank==0:
-                    print(alpha,err0,err1)
-                if err1<err0:
-                    err0 = err1
-                    return alpha
+                self.grads1[v][:] = vars[v] + a * etas[v]
+            f_a = self.min(self.grads1['prb'], self.grads1['obj'],
+                           self.grads1['pos'], self.grads1['proj'])
+            if self.rank == 0:
+                print(f"ScanLS alpha={a:.3e}  f={f_a:.6e}")
+            if f_a < f_best:
+                f_best = f_a
+                alpha_best = a
+        return alpha_best
+
+    def line_search_armijo(self, vars, etas, alpha, g0_eta, c1=1e-4, rho=0.5, max_iter=50):
+        """Backtracking Armijo line search: sufficient decrease only, no curvature check."""
+        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'])
+        for _ in range(max_iter):
+            for v in ["obj", "prb", "pos", "proj"]:
+                self.grads1[v][:] = vars[v] + alpha * etas[v]
+            f_a = self.min(self.grads1['prb'], self.grads1['obj'],
+                           self.grads1['pos'], self.grads1['proj'])
+            if f_a <= f0 + c1 * alpha * g0_eta:
+                return alpha
+            alpha *= rho
+        return alpha
+
+    def line_search(self, vars, etas, alpha, g0_eta, c1=1e-4, c2=0.9, max_iter=30):
+        """Strong Wolfe line search (N&W Algorithm 3.5/3.6).
+
+        phi  → trial point in self.grads1.
+        dphi → gradient in self.grads2 (self.grads = g_k preserved).
+        zoom and helpers are inner closures following lbfgs_minimal.ipynb.
+        """
+        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'])
+        alpha_max = alpha * 10.0
+
+        def phi(a):
+            for v in ["obj", "prb", "pos", "proj"]:
+                self.grads1[v][:] = vars[v] + a * etas[v]
+            return self.min(self.grads1['prb'], self.grads1['obj'],
+                            self.grads1['pos'], self.grads1['proj'])
+
+        def dphi():
+            # uses self.grads1 set by the preceding phi(a) call
+            self.gradients(self.grads1, self.grads2)
+            return self._dot(self.grads2, etas)
+
+        def phi_dphi(a):
+            f = phi(a)
+            if not np.isfinite(f):
+                return f, float('nan')
+            g = dphi()
+            return f, g
+
+        if g0_eta >= 0:
+            if self.rank == 0:
+                print(f"WolfeLS: non-descent g0_eta={g0_eta:.3e}, skipping step")
+            return 0.0
+
+        def cubic_minimizer(a0, f0_, g0_, a1, f1, g1):
+            if a0 == a1:
+                return None
+            d1 = g0_ + g1 - 3.0 * (f0_ - f1) / (a0 - a1)
+            disc = d1 * d1 - g0_ * g1
+            if disc < 0.0:
+                return None
+            d2 = float(np.sqrt(disc))
+            den = g1 - g0_ + 2.0 * d2
+            if den == 0.0:
+                return None
+            return a1 - (a1 - a0) * (g1 + d2 - d1) / den
+
+        def quad_minimizer(a0, f0_, g0_, a1, f1):
+            da = a1 - a0
+            if da == 0.0:
+                return None
+            den = 2.0 * (f1 - f0_ - g0_ * da)
+            if den == 0.0:
+                return None
+            return a0 - (g0_ * da * da) / den
+
+        def choose_trial(a_lo, f_lo, g_lo, a_hi, f_hi, g_hi):
+            lo, hi = (a_lo, a_hi) if a_lo < a_hi else (a_hi, a_lo)
+            w = hi - lo
+            if w <= 0.0:
+                return lo
+            lo_safe = lo + 0.1 * w
+            hi_safe = hi - 0.1 * w
+            a = cubic_minimizer(a_lo, f_lo, g_lo, a_hi, f_hi, g_hi)
+            if a is None or not np.isfinite(a) or a <= lo_safe or a >= hi_safe:
+                a = quad_minimizer(a_lo, f_lo, g_lo, a_hi, f_hi)
+            if a is None or not np.isfinite(a) or a <= lo_safe or a >= hi_safe:
+                a = 0.5 * (lo + hi)
+            return float(np.clip(a, lo_safe, hi_safe))
+
+        def zoom(a_lo, a_hi, phi_lo, dphi_lo, phi_hi, dphi_hi):
+            if a_lo > a_hi:
+                a_lo, a_hi = a_hi, a_lo
+                phi_lo, phi_hi = phi_hi, phi_lo
+                dphi_lo, dphi_hi = dphi_hi, dphi_lo
+            for iss in range(max_iter):
+                if self.rank == 0:
+                    logger.info(f"{iss=}")
+                a_j = choose_trial(a_lo, phi_lo, dphi_lo, a_hi, phi_hi, dphi_hi)
+                phi_j, dphi_j = phi_dphi(a_j)
+                if not np.isfinite(phi_j):
+                    a_hi, phi_hi, dphi_hi = a_j, phi_j, dphi_j
+                    continue
+                if (phi_j > f0 + c1 * a_j * g0_eta) or (phi_j >= phi_lo):
+                    a_hi, phi_hi, dphi_hi = a_j, phi_j, dphi_j
                 else:
-                    alpha/=1.5
+                    if np.isfinite(dphi_j) and abs(dphi_j) <= -c2 * g0_eta:
+                        return a_j
+                    if not np.isfinite(dphi_j) or dphi_j * (a_hi - a_lo) >= 0.0:
+                        a_hi, phi_hi, dphi_hi = a_lo, phi_lo, dphi_lo
+                    a_lo, phi_lo, dphi_lo = a_j, phi_j, dphi_j
+                if abs(a_hi - a_lo) <= 1e-16 * max(1.0, abs(a_lo), abs(a_hi)):
+                    return a_lo
+            return (a_lo + a_hi) / 2.0
+
+        a_prev = 0.0
+        phi_prev = f0
+        dphi_prev = g0_eta
+        a = float(alpha)
+        if not np.isfinite(a) or a <= 0.0:
+            a = 1.0
+        a = min(a, alpha_max)
+
+        for i in range(1, max_iter + 1):
+            phi_a, dphi_a = phi_dphi(a)
+            if self.rank == 0:
+                print(f"WolfeLS[{i}] alpha={a:.3e}  f={phi_a:.6e}")
+            if (not np.isfinite(phi_a) or
+                    phi_a > f0 + c1 * a * g0_eta or
+                    (i > 1 and phi_a >= phi_prev)):
+                return zoom(a_prev, a, phi_prev, dphi_prev, phi_a, dphi_a)
+            if np.isfinite(dphi_a) and abs(dphi_a) <= -c2 * g0_eta:
+                return a
+            if not np.isfinite(dphi_a) or dphi_a >= 0.0:
+                return zoom(a_prev, a, phi_prev, dphi_prev, phi_a, dphi_a)
+            a_prev, phi_prev, dphi_prev = a, phi_a, dphi_a
+            a = min(2.0 * a, alpha_max)
+
+        return a if phi(a) < f0 else 0.0

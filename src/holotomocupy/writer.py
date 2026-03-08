@@ -72,39 +72,32 @@ class Writer:
         pos = self._cpu(vars['pos'])
         prb = self._cpu(vars['prb']) 
 
-        # Single collective open — all ranks must call h5py.File with mpio
+        # mpio block: all ranks create datasets and write obj/pos collectively
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
-
-            # Attributes: safe to set on rank 0 only
             f.attrs['iter']      = i
             f.attrs['obj_dtype'] = self.obj_dtype
 
-            # Dataset creation must be collective — all ranks call these
             obj_shape = (self.nzobj, self.nobj, self.nobj)
             ds_re = f.create_dataset('obj_re', shape=obj_shape, dtype='float32')
             if self.obj_dtype == 'complex64':
                 ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
-            ds_pos = f.create_dataset('pos',
-                                      shape=(self.ntheta, self.ndist, 2),
-                                      dtype='float32')
+            ds_pos = f.create_dataset('pos', shape=(self.ntheta, self.ndist, 2), dtype='float32')
             prb_shape = (self.ndist, self.nz, self.n)
-            ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
+            ds_prb_abs = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
             ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
-   
-            # prb lives only on rank 0 — independent I/O
-            with ds_prb_abs.collective:
-                ds_prb_abs[:]   = np.abs(prb).astype('float32')
-                
-            with ds_prb_abs.collective:
-                ds_prb_phase[:] = np.angle(prb).astype('float32')
-            # obj and pos — all ranks write their slices collectively
-            with ds_re.collective:
-                ds_re[self.st_obj:self.end_obj] = obj.real
+
+            ds_re[self.st_obj:self.end_obj] = obj.real
             if self.obj_dtype == 'complex64':
-                with ds_im.collective:
-                    ds_im[self.st_obj:self.end_obj] = obj.imag
-            with ds_pos.collective:
-                ds_pos[self.st_theta:self.end_theta] = pos
-            
+                ds_im[self.st_obj:self.end_obj] = obj.imag
+            ds_pos[self.st_theta:self.end_theta] = pos
+
+        # prb written by rank 0 only via serial driver after mpio block closes
+        self.comm.Barrier()
         if self.rank == 0:
+            with h5py.File(path, 'a') as f:
+                f['prb_abs'][:]   = np.abs(prb).astype('float32')
+                f['prb_phase'][:] = np.angle(prb).astype('float32')
+        self.comm.Barrier()
+        if self.rank == 0:        
             logger.info(f"Writer: checkpoint saved → {path}")
+        

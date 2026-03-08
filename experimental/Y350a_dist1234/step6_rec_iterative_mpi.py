@@ -50,7 +50,7 @@ writer = Writer(
 )
 
 # Physics parameters are stored in the HDF5 file and forwarded to the solver
-args.energy                  = reader.energy
+args.energy                  = args.energy#reader.energy
 args.focustodetectordistance = reader.focustodetectordistance
 args.z1                      = reader.z1
 args.detector_pixelsize      = reader.detector_pixelsize

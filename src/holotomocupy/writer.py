@@ -8,7 +8,8 @@ from .logger_config import logger
 class Writer:
     """MPI-aware HDF5 writer for reconstruction checkpoints.
 
-    Writing is sequential per-rank (no parallel HDF5 required).
+    Uses parallel HDF5 (mpio driver). All ranks open the file collectively;
+    obj and pos are written with collective I/O; prb is written by rank 0 only.
 
     File layout — {path_out}/checkpoint_{iter:04}.h5:
       /obj_re  (nzobj, nobj, nobj)  float32 — real part of obj (assembled from all ranks)
@@ -69,33 +70,41 @@ class Writer:
 
         obj = self._cpu(vars['obj']) * norm_const  # denormalise
         pos = self._cpu(vars['pos'])
+        prb = self._cpu(vars['prb']) 
 
-        # Rank 0 creates the file and writes prb (replicated, same on all ranks)
-        if self.rank == 0:
-            prb = self._cpu(vars['prb'])
-            with h5py.File(path, 'w') as f:
-                f.attrs['iter']      = i
-                f.attrs['obj_dtype'] = self.obj_dtype
-                shape = (self.nzobj, self.nobj, self.nobj)
-                f.create_dataset('obj_re', shape=shape, dtype='float32')
-                if self.obj_dtype == 'complex64':
-                    f.create_dataset('obj_im', shape=shape, dtype='float32')
-                f.create_dataset('pos', shape=(self.ntheta, self.ndist, 2),
-                                 dtype='float32')
-                f.create_dataset('prb_abs',   data=np.abs(prb).astype('float32'))
-                f.create_dataset('prb_phase', data=np.angle(prb).astype('float32'))
-                logger.info(f"Writer: created {path}")
-        self.comm.Barrier()
+        # Single collective open — all ranks must call h5py.File with mpio
+        with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
 
-        # Each rank fills its own slice sequentially (no parallel HDF5 needed)
-        for r in range(self.size):
-            if self.rank == r:
-                with h5py.File(path, 'a') as f:
-                    f['obj_re'][self.st_obj:self.end_obj] = obj.real
-                    if self.obj_dtype == 'complex64':
-                        f['obj_im'][self.st_obj:self.end_obj] = obj.imag
-                    f['pos'][self.st_theta:self.end_theta] = pos
-            self.comm.Barrier()
+            # Attributes: safe to set on rank 0 only
+            f.attrs['iter']      = i
+            f.attrs['obj_dtype'] = self.obj_dtype
 
+            # Dataset creation must be collective — all ranks call these
+            obj_shape = (self.nzobj, self.nobj, self.nobj)
+            ds_re = f.create_dataset('obj_re', shape=obj_shape, dtype='float32')
+            if self.obj_dtype == 'complex64':
+                ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
+            ds_pos = f.create_dataset('pos',
+                                      shape=(self.ntheta, self.ndist, 2),
+                                      dtype='float32')
+            prb_shape = (self.ndist, self.nz, self.n)
+            ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
+            ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
+   
+            # prb lives only on rank 0 — independent I/O
+            with ds_prb_abs.collective:
+                ds_prb_abs[:]   = np.abs(prb).astype('float32')
+                
+            with ds_prb_abs.collective:
+                ds_prb_phase[:] = np.angle(prb).astype('float32')
+            # obj and pos — all ranks write their slices collectively
+            with ds_re.collective:
+                ds_re[self.st_obj:self.end_obj] = obj.real
+            if self.obj_dtype == 'complex64':
+                with ds_im.collective:
+                    ds_im[self.st_obj:self.end_obj] = obj.imag
+            with ds_pos.collective:
+                ds_pos[self.st_theta:self.end_theta] = pos
+            
         if self.rank == 0:
             logger.info(f"Writer: checkpoint saved → {path}")

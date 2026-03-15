@@ -702,10 +702,11 @@ class Rec:
         """Save reconstruction checkpoint to HDF5."""
         if not (i % self.vis_step == 0 and self.vis_step != -1):
             return
-        if writer is not None and i>self.start_iter:
-            writer.write_checkpoint(vars, i, self.norm_const)
+        if writer is not None:
+            if i > self.start_iter:
+                writer.write_checkpoint(vars, i, self.norm_const)
         else:
-            mshow_complex(vars['obj'][self.nzobj//2],True)
+            mshow_complex(vars['obj'][self.local_nzobj//2],True)
             mshow_polar(vars['prb'][0],True)
             mshow_pos(vars['pos']-self.pos_init,True)
             

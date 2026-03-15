@@ -95,6 +95,7 @@ class Reader:
                 out[:] = cp.array(fid[f'/exchange/cshifts_final'][
                     self.ids[self.st_theta:self.end_theta], :self.ndist
                 ], dtype='float32')
+
         out /= 2**self.bin
         s = self.rotation_center_shift
         for _ in range(self.bin):
@@ -116,16 +117,19 @@ class Reader:
         avoiding any intermediate allocation.
         """
         nz, n = self.nz, self.n
+        local_ntheta = self.end_theta - self.st_theta
         if out is None:
-            out = np.empty([self.end_theta - self.st_theta, self.ndist, nz, n],
-                           dtype='float32')
+            out = np.empty([local_ntheta, self.ndist, nz, n], dtype='float32')
+        # Batch reads to stay under 2^31 bytes (MPI-IO uses int for transfer sizes)
+        batch = max(1, (1 << 28) // (nz * n))
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             for k in range(self.ndist):
                 nz0 = fid[f'/exchange/pdata{k}_{self.bin}'].shape[1]
                 st, end = nz0 // 2 - nz // 2, nz0 // 2 + nz // 2
-                out[:, k] = fid[f'/exchange/pdata{k}_{self.bin}'][
-                    self.ids[self.st_theta:self.end_theta], st:end
-                ]
+                ds = fid[f'/exchange/pdata{k}_{self.bin}']
+                for i0 in range(0, local_ntheta, batch):
+                    i1 = min(i0 + batch, local_ntheta)
+                    out[i0:i1, k] = ds[self.ids[self.st_theta + i0:self.st_theta + i1], st:end]
                 np.sqrt(out[:, k], out=out[:, k])
         return out
 

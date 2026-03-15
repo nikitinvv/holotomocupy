@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import os
 import warnings
 import pandas as pd
-import nvtx
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -16,6 +15,16 @@ from .logger_config import logger
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
+
+
+# --- method groupings ---
+_LBFGS_METHODS      = frozenset({3, 6, 8, 9, 11, 12})
+_BH_BETA_METHODS    = frozenset({0, 4, 5, 10})
+_BH_ALPHA_METHODS   = frozenset({0, 1, 4, 6, 12})   # always use quadratic BH step
+_SCAN_METHODS       = frozenset({4})                  # scan LS on top of BH step
+_ARMIJO_METHODS     = frozenset({7, 9, 10, 11})
+_LBFGS_LS_INIT      = frozenset({3, 8, 9, 11})       # set alpha=1/16 at i==1
+_LBFGS_M10_METHODS  = frozenset({8, 9, 11, 12})
 
 
 class Rec:
@@ -85,6 +94,14 @@ class Rec:
         self.allreduce  = self.cl_mpi.allreduce
         self.allreduce2 = self.cl_mpi.allreduce2
 
+        # precomputed method flags (avoid per-iteration if-chains)
+        self._use_lbfgs      = self.method in _LBFGS_METHODS
+        self._use_bh_beta    = self.method in _BH_BETA_METHODS
+        self._use_bh_alpha   = self.method in _BH_ALPHA_METHODS
+        self._use_scan       = self.method in _SCAN_METHODS
+        self._use_armijo     = self.method in _ARMIJO_METHODS
+        self._lbfgs_ls_init  = self.method in _LBFGS_LS_INIT
+
     def alloc_arrays(self):
         """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
         prb_shape = [self.ndist, self.nz, self.n]
@@ -108,7 +125,7 @@ class Rec:
         self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
         # L-BFGS history buffers (methods 3,6,8,9,11,12), keyed by obj/prb/pos (proj excluded)
-        self.lbfgs_m = 10 if self.method in (8, 11, 12) else 5
+        self.lbfgs_m = 10 if self.method in _LBFGS_M10_METHODS else 5
         lbfgs_m = self.lbfgs_m
         self.lbfgs_s, self.lbfgs_y = [], []
         for _ in range(lbfgs_m):
@@ -127,152 +144,112 @@ class Rec:
         self.lbfgs_t = 0   # circular-buffer write pointer
 
     def BH(self, writer=None):
-        # refs to preallocated memory for gradients                
-        vars = self.vars        
+        vars = self.vars
         grads = self.grads
         grads1 = self.grads1
         etas = self.etas
         proj_tmp = self.proj_tmp
 
-        # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
-        if self.start_iter==0:
-            vars["obj"]*=self.cl_tomo.mask
-        
+        if self.start_iter == 0:
+            vars["obj"] *= self.cl_tomo.mask
+
         self.pos_init = vars['pos'].copy()
-        
-        # precalculate proj             
-        self.fwd_tomo(vars["obj"],out = proj_tmp)                    
+
+        self.fwd_tomo(vars["obj"], out=proj_tmp)
         self.redist(proj_tmp, vars['proj'])
-        
-        # calc init error
-        self.error_debug(vars,0, 0, -1)  
-        
+
+        self.error_debug(vars, 0, 0, -1)
+
+        st = 2
         self.time_start = time.time()
-        for i in range(self.start_iter,self.niter):
-            
-            nvtx.push_range("::BH:"+str(i))
-                        
-            # compute gradients
-            nvtx.push_range("gradients")
-            for v in ["obj", "prb", "pos", 'proj']:                
-                grads1[v][:] = grads[v]#.copy()
-            self.gradients(vars, grads)      
-            nvtx.pop_range()       
-                
-            # scale
-            for v in ["obj", "prb", "pos"]:                
+        for i in range(self.start_iter, self.niter):
+
+            # --- gradients ---
+            for v in ["obj", "prb", "pos", 'proj']:
+                grads1[v][:] = grads[v]
+            self.gradients(vars, grads)
+
+            for v in ["obj", "prb", "pos"]:
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
 
-            nvtx.push_range(":::BH:fwd_tomo")                                  
             self.fwd_tomo(grads["obj"], out=proj_tmp)
-            nvtx.pop_range()
-
-            nvtx.push_range(":::BH:redist",color='red')          
             self.cl_mpi.redist(proj_tmp, grads['proj'])
-            nvtx.pop_range()
-            
+
             beta = 0.0
-            if i == 0:
-                # initial search direction (negative gradient)
+            
+            # --- search direction ---
+            if i < self.start_method:
                 for v in ["obj", "prb", "pos", "proj"]:
                     self.mulc_batch(etas[v], grads[v], -1)
-            
-            elif self.method == 3 or self.method == 6 or self.method == 8 or self.method == 9 or self.method == 11 or self.method == 12:
-                    # L-BFGS direction
-                    if i > self.start_iter:
-                        self._lbfgs_push(grads, grads1, alpha)
-                    self._lbfgs_direction(grads, etas)
-                    # check descent; reset history and fall back to steepest descent if needed
-                    g0_test = 0.0
-                    for v in ["obj", "pos"]:
-                        g0_test += self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+
+            elif self._use_lbfgs:
+                if i > self.start_iter:
+                    self._lbfgs_push(grads, grads1, alpha)
+                self._lbfgs_direction(grads, etas)
+                # check descent; reset and fall back to steepest descent if needed
+                g0_test = 0.0
+                for v in ["obj", "pos"]:
+                    g0_test += self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+                if self.rank == 0:
+                    g0_test += self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
+                g0_test, _ = self.allreduce2(g0_test, 0.0)
+                if g0_test >= 0:
                     if self.rank == 0:
-                        g0_test += self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
-                    g0_test, _ = self.allreduce2(g0_test, 0.0)
-                    if g0_test >= 0:
-                        if self.rank == 0:
-                            print(f"L-BFGS: non-descent direction, resetting history")
-                        self.lbfgs_k = 0
-                        self.lbfgs_t = 0
-                        for v in ["obj", "prb", "pos", "proj"]:
-                            self.mulc_batch(etas[v], grads[v], -1)
-                    nvtx.push_range(":::BH:fwd_tomo")
-                    self.fwd_tomo(etas["obj"], out=proj_tmp)
-                    nvtx.pop_range()
-                    nvtx.push_range(":::BH:redist", color='red')
-                    self.cl_mpi.redist(proj_tmp, etas['proj'])
-                    nvtx.pop_range()
+                        print("L-BFGS: non-descent direction, resetting history")
+                    self.lbfgs_k = 0
+                    self.lbfgs_t = 0
+                    for v in ["obj", "prb", "pos", "proj"]:
+                        self.mulc_batch(etas[v], grads[v], -1)
+                self.fwd_tomo(etas["obj"], out=proj_tmp)
+                self.cl_mpi.redist(proj_tmp, etas['proj'])
+
             else:
-                # calc beta using Hessian-weighted inner products
-                nvtx.push_range(":::BH:calc beta")
-
-                top = self.hessian(vars, grads, etas)
-                bottom = self.hessian(vars, etas, etas)
-                top, bottom = self.allreduce2(top, bottom)
-                if self.method==0 or self.method==4 or self.method==5 or self.method==10:
-                    beta = max(top / bottom,0)
-                if self.method==1 or self.method==2 or self.method==7:
-                    beta = self.beta_pr_plus(grads1,grads)
-
-                nvtx.pop_range()
-
-                # update search direction: eta = beta * previous_eta - grad
-                for v in ["obj", "prb", "pos","proj"]:
+                if self._use_bh_beta:
+                    top = self.hessian(vars, grads, etas)
+                    bottom = self.hessian(vars, etas, etas)
+                    top, bottom = self.allreduce2(top, bottom)
+                    beta = max(top / bottom, 0)
+                else:  # PR+
+                    beta = self.beta_pr_plus(grads1, grads)
+                for v in ["obj", "prb", "pos", "proj"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)
-            
-            # calc alpha (step length)            
-            nvtx.push_range(":::BH:calc_alpha")
 
-
-            if i==0 or self.method==0 or self.method==1 or self.method==4 or self.method==6 or self.method==12 or alpha==0: # to find approximation of alpha
+            # --- step length ---
+            if i<start_method or self._use_bh_alpha:
                 top = 0
-                for v in ["obj", "pos"]:                
+                for v in ["obj", "pos"]:
                     top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
-                if self.cl_mpi.rank ==0:
+                if self.cl_mpi.rank == 0:
                     top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
-
                 bottom = self.hessian(vars, etas, etas)
-
                 top, bottom = self.allreduce2(top, bottom)
                 alpha = top / bottom
-            
-            elif (self.method==3 or self.method==6 or self.method==8 or self.method==9 or self.method==11) and i==2:
-                alpha = 1/16
-            
-            elif self.method==2 or self.method==3 or self.method==5 or self.method==7 or self.method==8 or self.method==9 or self.method==10 or self.method==11:
+            else:
+                if i == start_method and self._lbfgs_ls_init:
+                    alpha = 1 / 16
                 g0_eta = 0.0
                 for v in ["obj", "pos"]:
                     g0_eta += self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
                 if self.rank == 0:
                     g0_eta += self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
                 g0_eta, _ = self.allreduce2(g0_eta, 0.0)
-                if self.method == 7 or self.method == 9 or self.method == 10 or self.method == 11:
-                    alpha = self.line_search_armijo(vars, etas, alpha*16, g0_eta)
+                if self._use_armijo:
+                    alpha = self.line_search_armijo(vars, etas, alpha * 16, g0_eta)
                 else:
-                    alpha = self.line_search(vars, etas, alpha*16, g0_eta)
-                nvtx.pop_range()
-            
-            if self.method==4:
+                    alpha = self.line_search(vars, etas, alpha * 16, g0_eta)
+
+            if self._use_scan:
                 alpha = self.line_search_scan(vars, etas, alpha)
-                nvtx.pop_range()
 
-
-            # update variables: var = var+alpha*eta
+            # --- update ---
             for v in ["obj", "prb", "pos", "proj"]:
-                self.linear_batch(vars[v], etas[v], 1, alpha)            
-            
-            # error and visualization debug
-            nvtx.push_range(":::BH:calc error",color='gray')  
-            self.error_debug(vars, alpha, beta, i)
-            nvtx.pop_range()  
-            
-            self.vis_debug(vars, i, writer)
-            nvtx.pop_range()  
-                        
-        # normalize back
-        vars["obj"] *= self.norm_const        
+                self.linear_batch(vars[v], etas[v], 1, alpha)
 
+            self.error_debug(vars, alpha, beta, i)
+            self.vis_debug(vars, i, writer)
+
+        vars["obj"] *= self.norm_const
         return vars
 
     def hessian(self, vars, grads, etas):
@@ -281,13 +258,11 @@ class Rec:
         2. probe fit term,
         3. regularization term"""
 
-        nvtx.push_range("hessian")
 
         w = self.hessian_cascade(vars, grads, etas)
         if self.rank==0:
             w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
 
-        nvtx.pop_range()
         return w
 
     @timer
@@ -353,9 +328,7 @@ class Rec:
         
         self.gradients_cascade(vars,grads)
 
-        nvtx.push_range(":::BH:redist back",color='red')             
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
-        nvtx.pop_range() 
         
         # part2, parallelization over object slices, formally gF4  
         self.gF4(grads['obj'], self.proj_tmp)      
@@ -398,9 +371,7 @@ class Rec:
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
             gradu[:] = self.cl_tomo.RT(gradproj)        
-        nvtx.push_range("gF4",color='green')            
         _gF4(self, gradu, gradproj)      
-        nvtx.pop_range()     
 
     #### probe fit term
     @timer
@@ -456,7 +427,6 @@ class Rec:
 
 
     ####### F0(x0) = 1/n\||x0|-d\|_2^2
-    @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
         
@@ -466,7 +436,6 @@ class Rec:
             return t*t         
         return 1/ self.data_size * cp.sum(F0_fused(x, d)) 
 
-    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
         
@@ -475,7 +444,6 @@ class Rec:
             return (x - d * (x / cp.abs(x)))
         return 2 / self.data_size * redot(dF0_fused(x, d), y) 
             
-    @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
 
@@ -491,7 +459,6 @@ class Rec:
         
         return 2 / self.data_size * cp.sum(d2F_dF0_fused(x, y, z, w, d))                    
         
-    @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
         
@@ -508,7 +475,6 @@ class Rec:
         return gF0_fused(x,y)
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
-    @nvtx.annotate("F1", color="green")
     def F1(self, x):
         """In: (x11,x12), Out: x0"""
 
@@ -520,7 +486,6 @@ class Rec:
 
         return x0
 
-    @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
         """In: (x11,x12),(y11,y12) Out: y0"""
 
@@ -538,7 +503,6 @@ class Rec:
 
         return (x0, y0) if return_x else y0
     
-    @nvtx.annotate("d2F_dF1", color="purple")
     def d2F_dF1(self, x, y, z, w):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
 
@@ -562,7 +526,6 @@ class Rec:
     
         return y0
    
-    @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
@@ -583,7 +546,6 @@ class Rec:
         return y11, y12        
 
     ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
-    @nvtx.annotate("F2", color="green")
     def F2(self, x):
         """In: (x21,x22) Out: (x11,x12)"""
 
@@ -595,7 +557,6 @@ class Rec:
         x12 = F2_fused(x22)
         return x11, x12
 
-    @nvtx.annotate("dF2", color="green")
     def dF2(self, x, y, return_x=True):
         """In: (x21,x22),(y21,y22) Out: (x11,x12),(y11,y12)"""
 
@@ -615,7 +576,6 @@ class Rec:
 
    
     
-    @nvtx.annotate("d2F_dF2", color="purple")
     def d2F_dF2(self, x, y, z, w):
         """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
 
@@ -640,7 +600,6 @@ class Rec:
         
         return [y11, y12]
     
-    @nvtx.annotate("gF2", color="green")
     def gF2(self,x,y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
@@ -663,7 +622,6 @@ class Rec:
         return [y21, y22]
     
     ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
-    @nvtx.annotate("F3", color="green")
     def F3(self, x):
         """In: (x31, x32, x33)  Out: (x21,x22)"""
 
@@ -677,7 +635,6 @@ class Rec:
         x21 = x31
         return [x21, x22]
 
-    @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
         """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
 
@@ -701,7 +658,6 @@ class Rec:
 
     
 
-    @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
 
@@ -726,7 +682,6 @@ class Rec:
 
         return [y21, y22]
 
-    @nvtx.annotate("gF3", color="green")
     def gF3(self, x, y):
         """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""
 
@@ -775,10 +730,11 @@ class Rec:
         """Save reconstruction checkpoint to HDF5."""
         if not (i % self.vis_step == 0 and self.vis_step != -1):
             return
-        if writer is not None and self.start_iter<i:
-            writer.write_checkpoint(vars, i, self.norm_const)
+        if writer is not None:
+            if i > self.start_iter:
+                writer.write_checkpoint(vars, i, self.norm_const)
         else:
-            mshow_complex(vars['obj'][self.nzobj//2],True)
+            mshow_complex(vars['obj'][self.local_nzobj//2],True)
             mshow_polar(vars['prb'][0],True)
             mshow_pos(vars['pos']-self.pos_init,True)
             

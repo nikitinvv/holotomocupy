@@ -179,7 +179,10 @@ class Rec:
             beta = 0.0
             
             # --- search direction ---
-            if i < self.start_method:
+            if i < self.start_method or alpha==0:
+                #reset history for lbfgs
+                self.lbfgs_k = 0
+                self.lbfgs_t = 0
                 for v in ["obj", "prb", "pos", "proj"]:
                     self.mulc_batch(etas[v], grads[v], -1)
 
@@ -216,7 +219,7 @@ class Rec:
                     self.linear_batch(etas[v], grads[v], beta, -1)
 
             # --- step length ---
-            if i<start_method or self._use_bh_alpha:
+            if i<self.start_method or self._use_bh_alpha:
                 top = 0
                 for v in ["obj", "pos"]:
                     top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
@@ -226,7 +229,7 @@ class Rec:
                 top, bottom = self.allreduce2(top, bottom)
                 alpha = top / bottom
             else:
-                if i == start_method and self._lbfgs_ls_init:
+                if i == self.start_method and self._lbfgs_ls_init:
                     alpha = 1 / 16
                 g0_eta = 0.0
                 for v in ["obj", "pos"]:

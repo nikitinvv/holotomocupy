@@ -30,7 +30,7 @@ method_ls = {m: alpha_ls[next(k for k in alpha_ls if labels[m].endswith(k))] for
 plt.rcParams.update({"font.size": 13, "axes.titlesize": 14, "axes.labelsize": 13,
                      "legend.fontsize": 10, "xtick.labelsize": 11, "ytick.labelsize": 11})
 
-fig, axes = plt.subplots(1, 4, figsize=(22, 5))
+fig, axes = plt.subplots(1, 4, figsize=(22, 12))
 fig.suptitle("Brain data [1125, 4, 512, 512]", fontsize=15, fontweight="bold")
 ax_err, ax_alpha_cg, ax_alpha_lbfgs, ax_beta = axes
 

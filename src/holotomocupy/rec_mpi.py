@@ -32,7 +32,7 @@ class Rec:
         self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2,self.d2F_dF3]
 
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
-        multiplier = 8  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
+        multiplier = 16  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
         complex_item = np.dtype("complex64").itemsize
         max_dim = max(self.nzobj, self.ntheta)
         nbytes = int(multiplier * self.nchunk * self.nobj * max_dim * complex_item)

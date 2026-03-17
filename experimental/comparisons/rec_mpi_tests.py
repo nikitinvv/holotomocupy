@@ -5,13 +5,13 @@ import os
 import warnings
 import pandas as pd
 
-from .tomo import Tomo
-from .propagation import Propagation
-from .shift import Shift
-from .chunking import Chunking
-from .utils import *
-from .mpi_functions import *
-from .logger_config import logger
+from holotomocupy.tomo import Tomo
+from holotomocupy.propagation import Propagation
+from holotomocupy.shift import Shift
+from holotomocupy.chunking import Chunking
+from holotomocupy.utils import *
+from holotomocupy.mpi_functions import *
+from holotomocupy.logger_config import logger
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
@@ -79,8 +79,8 @@ class Rec:
         self.table = pd.DataFrame(columns=["iter", "alpha", "beta", "err", "time"])
 
         # normalization constant to address work with normal operators
-        self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))        
-        # sizes for normalization        
+        self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))
+        # sizes for normalization
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
         self.obj_size = self.nzobj * self.nobj**2
@@ -177,7 +177,7 @@ class Rec:
             self.cl_mpi.redist(proj_tmp, grads['proj'])
 
             beta = 0.0
-            
+
             # --- search direction ---
             if i < self.start_method or alpha==0:
                 #reset history for lbfgs
@@ -272,9 +272,9 @@ class Rec:
     def hessian_cascade(self, vars, grads, etas):
         """"Cascade computation of the hessian for the main term,
             following the composition rule (Carlsson, 2025):
-            For f = F1 ◦ F2 the hessian is 
+            For f = F1 ◦ F2 the hessian is
                 d2f = dF1 ◦ d2F2 + d2F1 ◦ dF2
-                where dF are differentials, 
+                where dF are differentials,
                 d2F are second order terms.
             The function implements it for f = F0 ◦ F1 ◦ F2 ◦ F3 ...
             parameters to functions are unified as (x,y,z,w)
@@ -285,23 +285,23 @@ class Rec:
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _hessian_cascade(
             self, out, d,
-            x2, y2, z2, 
-            x1, y1, z1, 
-            x0, y0, z0, 
-        ):            
+            x2, y2, z2,
+            x1, y1, z1,
+            x0, y0, z0,
+        ):
             # reorganize inputs into ordered lists for cascade traversal
             x = [x0, x1, x2]
             y = [y0, y1, y2]
             z = [z0, z1, z2]
             w = [None,None,None]
-            
+
             # check whether y and z share same object (avoid duplicate work)
             y_is_z = y[0] is z[0]
 
             for id in range(1,len(self.F))[::-1]:
-                # compute d2F(dFy,dFz)+dF(d2F(y,z))                                
-                w = self.d2F_dF[id](x, y, z, w)                        
-                
+                # compute d2F(dFy,dFz)+dF(d2F(y,z))
+                w = self.d2F_dF[id](x, y, z, w)
+
                 # propagate differentials to the next level: fx, dF(x)(y)
                 fx, y = self.dF[id](x, y)  # returns (fx, dfx(y))
                 if y_is_z:
@@ -313,40 +313,40 @@ class Rec:
             # outer functional
             out[:] += self.d2F_dF[0](x, y, z, w, d)
 
-            
+
         _hessian_cascade(
             self, out, self.data,
             vars["pos"], grads["pos"], etas["pos"],
             vars["proj"], grads["proj"], etas["proj"],
             vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
         )
-        
+
         return out[0].get()
 
     def gradients(self, vars, grads):
-        """Full gradient, consists of 3 terms: 
+        """Full gradient, consists of 3 terms:
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
-        """        
-        
+        """
+
         self.gradients_cascade(vars,grads)
 
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
-        
-        # part2, parallelization over object slices, formally gF4  
-        self.gF4(grads['obj'], self.proj_tmp)      
+
+        # part2, parallelization over object slices, formally gF4
+        self.gF4(grads['obj'], self.proj_tmp)
 
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
 
         ## copying to cpu before reduce for now
-        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))        
-        
-    @timer    
+        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
+
+    @timer
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term
             following the composition rule (Carlsson, 2025):
-            For f = F1 ◦ F2 the gradient is 
+            For f = F1 ◦ F2 the gradient is
                 gradf = dF_2^*(\nabla F_1)),
                 where dF_2^* is the adjoint to the differential
             The function implements it for f = F0 ◦ F1 ◦ F2 ◦ F3 ...
@@ -356,42 +356,42 @@ class Rec:
         # part1, parallelization over angles
         grads['prb'][:] = 0
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
-        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):            
+        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,proj,pos,prb):
 
             x = [prb, proj, pos]
-            y = d 
+            y = d
             # compute gradient by applying operators in forward order
             for id in range(len(self.gF)):  #last one computed separately because of different chunking
-                y = self.gF[id](x,y)                           
+                y = self.gF[id](x,y)
             gradprb[:] += y[0]
             gradproj[:] = y[1]
             gradpos[:] = y[2]
 
         _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],self.data,vars["proj"],vars["pos"],vars["prb"])
-        
+
     @timer
     def gF4(self, gradu, gradproj):
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
-            gradu[:] = self.cl_tomo.RT(gradproj)        
-        _gF4(self, gradu, gradproj)      
+            gradu[:] = self.cl_tomo.RT(gradproj)
+        _gF4(self, gradu, gradproj)
 
     #### probe fit term
     @timer
     def gradient_prbfit(self, grad_prb, prb):
-        """Gradient with respect to the term 
+        """Gradient with respect to the term
         lam_prbfit|||Dprb|-ref||_2^2"""
-        
+
         if self.lam_prbfit == 0:
             return
         for j in range(self.ndist):
             tmp = self.cl_prop.D(prb[j : j + 1], j)
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
             grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
-        
+
     @timer
     def hessian_prbfit(self, prb, dprb1, dprb2):
-        """Hessian with respect to the term 
+        """Hessian with respect to the term
         lam_prbfit|||Dprb|-ref||_2^2"""
 
         if self.lam_prbfit == 0:
@@ -413,40 +413,40 @@ class Rec:
     @timer
     def fwd_tomo(self, obj, out):
         """Forward tomography operator"""
-        
+
         @self.gpu_batch(axis_out=1, axis_inp=0,nout=1)
         def _fwd_tomo(self, out, obj):
             out[:] = self.cl_tomo.R(obj)
-            
-        _fwd_tomo(self, out, obj)
-        return out    
 
-    ####################### Functions for the cascade (following math notes for variables) 
+        _fwd_tomo(self, out, obj)
+        return out
+
+    ####################### Functions for the cascade (following math notes for variables)
     # F* - functional
     # dF* - differential
     # d2F* - second order term for hessian
-    # gF* - gradient    
+    # gF* - gradient
     #######################################################################################
 
 
     ####### F0(x0) = 1/n\||x0|-d\|_2^2
     def F0(self, x, d):
         """In: (x0), Out: const"""
-        
+
         @cp.fuse()
-        def F0_fused(x, d):       
+        def F0_fused(x, d):
             t = cp.abs(x) - d
-            return t*t         
-        return 1/ self.data_size * cp.sum(F0_fused(x, d)) 
+            return t*t
+        return 1/ self.data_size * cp.sum(F0_fused(x, d))
 
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
-        
+
         @cp.fuse()
-        def dF0_fused(x, d):        
+        def dF0_fused(x, d):
             return (x - d * (x / cp.abs(x)))
-        return 2 / self.data_size * redot(dF0_fused(x, d), y) 
-            
+        return 2 / self.data_size * redot(dF0_fused(x, d), y)
+
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
 
@@ -459,24 +459,24 @@ class Rec:
             if w is not None:
                 v += reprod(x - d * l0, w)
             return v
-        
-        return 2 / self.data_size * cp.sum(d2F_dF0_fused(x, y, z, w, d))                    
-        
+
+        return 2 / self.data_size * cp.sum(d2F_dF0_fused(x, y, z, w, d))
+
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
-        
+
         # calc fwd starting from 1
-        for id in range(1, 4)[::-1]: 
+        for id in range(1, 4)[::-1]:
             x = self.F[id](x)
 
         @cp.fuse()
         def gF0_fused(x,y):
             td = y * (x / (cp.abs(x)))
-            y0 = (2 / self.data_size) * (x - td) 
+            y0 = (2 / self.data_size) * (x - td)
             return y0
-        
+
         return gF0_fused(x,y)
-    
+
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
     def F1(self, x):
         """In: (x11,x12), Out: x0"""
@@ -494,18 +494,18 @@ class Rec:
 
         x11, x12 = x
         y11, y12 = y
-       
+
         y0 = y11[None] * x12 + x11[None] * y12
         for j in range(self.ndist):
             y0[:, j] = self.cl_prop.D(y0[:, j], j)
-            
+
         if return_x:
             x0 = x11[None] * x12
             for j in range(self.ndist):
                 x0[:, j] = self.cl_prop.D(x0[:, j], j)
 
         return (x0, y0) if return_x else y0
-    
+
     def d2F_dF1(self, x, y, z, w):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
 
@@ -513,7 +513,7 @@ class Rec:
         y11, y12 = y
         z11, z12 = z
         w11, w12 = w
-        
+
         if y12 is z12:
             y0 = 2 * y11[None] * y12
         else:
@@ -526,9 +526,9 @@ class Rec:
 
         for j in range(self.ndist):
             y0[:, j] = self.cl_prop.D(y0[:, j], j)
-    
+
         return y0
-   
+
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
@@ -546,7 +546,7 @@ class Rec:
 
         y11 = cp.sum(y12 * np.conj(x12), axis=0)
         y12 *= np.conj(x11[None])
-        return y11, y12        
+        return y11, y12
 
     ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
     def F2(self, x):
@@ -568,17 +568,17 @@ class Rec:
 
         @cp.fuse()
         def dF2_fused(x22,y22):
-            x12 = cp.exp(1j*x22)             
+            x12 = cp.exp(1j*x22)
             y12 = x12 * 1j * y22
             return x12,y12
         x12, y12 = dF2_fused(x22,y22)
         x11 = x21
-        y11 = y21        
+        y11 = y21
 
         return ([x11, x12], [y11, y12]) if return_x else [y11, y12]
 
-   
-    
+
+
     def d2F_dF2(self, x, y, z, w):
         """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
 
@@ -586,7 +586,7 @@ class Rec:
         y21, y22 = y
         z21, z22 = z
         w21, w22 = w
-        
+
         @cp.fuse()
         def d2F_dF2(x22,y22,z22,w22):
             if y22 is z22:
@@ -597,19 +597,19 @@ class Rec:
             if w22 is not None:
                 y12 = y12 + cp.exp(1j*x22) * 1j * w22
             return y12
-        
+
         y12 = d2F_dF2(x22,y22,z22,w22)
         y11 = w21
-        
+
         return [y11, y12]
-    
+
     def gF2(self,x,y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
         y11, y12 = y
 
-        # calc fwd starting from 3        
-        for id in range(3, 4)[::-1]: 
+        # calc fwd starting from 3
+        for id in range(3, 4)[::-1]:
             x = self.F[id](x)
         x21,x22 = x
 
@@ -617,13 +617,13 @@ class Rec:
         def gF2_fused(x22,y12):
             y22 = (-1j) * y12 * cp.conj(cp.exp(1j*x22))
             return y22
-        
+
         y22 = gF2_fused(x22,y12)
         y22 = y22.real if self.obj_dtype == 'float32' else y22
 
         y21 = y11
         return [y21, y22]
-    
+
     ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
     def F3(self, x):
         """In: (x31, x32, x33)  Out: (x21,x22)"""
@@ -659,7 +659,7 @@ class Rec:
         y21 = y31
         return ([x21, x22], [y21, y22]) if return_x else [y21, y22]
 
-    
+
 
     def d2F_dF3(self, x, y, z, w):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
@@ -705,7 +705,7 @@ class Rec:
         y32[:] = self.cl_shift.coeff(y32)
 
         y31 = y21
-        return [y31, y32, y33]         
+        return [y31, y32, y33]
 
     @timer
     def min(self, prb, obj, pos, proj):
@@ -740,21 +740,21 @@ class Rec:
             mshow_complex(vars['obj'][self.local_nzobj//2],True)
             mshow_polar(vars['prb'][0],True)
             mshow_pos(vars['pos']-self.pos_init,True)
-            
-    
+
+
     def error_debug(self, vars, alpha, beta, i):
         """Visualization and data saving"""
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
-            
-        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])        
+
+        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
         if self.rank==0:
             if i==-1:
-                logger.warning(f"Initial {err=:1.5e} ")                        
+                logger.warning(f"Initial {err=:1.5e} ")
                 self.table.loc[len(self.table)] = [i, beta, alpha,err, 0]
-            else:                
-                ittime = time.time()-self.time_start           
-                logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")                        
+            else:
+                ittime = time.time()-self.time_start
+                logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")
                 self.table.loc[len(self.table)] = [i, alpha, beta, err, ittime]
             self.time_start = time.time()
             if hasattr(self, 'path_out'):
@@ -765,25 +765,25 @@ class Rec:
     def gen_sqrt_data(self, vars, out):
         """Generate synthetic data"""
 
-        vars["obj"] /= self.norm_const        
-        self.fwd_tomo(vars["obj"],out = self.proj_tmp)                    
+        vars["obj"] /= self.norm_const
+        self.fwd_tomo(vars["obj"],out = self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _gen_data(self, out, proj, pos, prb):
             x = [prb, proj, pos]
             y = x  # forming output
             # compute functional by applying operators in reverse order
-            for id in range(1, len(self.F))[::-1]:  
-                y = self.F[id](y)                
+            for id in range(1, len(self.F))[::-1]:
+                y = self.F[id](y)
             out[:] = cp.abs(y)
-        _gen_data(self, out, vars['proj'], vars['pos'], vars['prb'])                  
-        vars["obj"] *= self.norm_const        
+        _gen_data(self, out, vars['proj'], vars['pos'], vars['prb'])
+        vars["obj"] *= self.norm_const
 
     def gen_sqrt_ref(self, prb, out):
         """Generate synthetic reference"""
         for j in range(self.ndist):
             out[j] = cp.abs(self.cl_prop.D(prb[j : j + 1], j)[0])
-            
+
     ############### polak ribiera
     def beta_pr(self, gk, gk1):
         """

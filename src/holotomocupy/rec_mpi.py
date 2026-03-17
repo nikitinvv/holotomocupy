@@ -1,6 +1,5 @@
 import numpy as np
 import cupy as cp
-import matplotlib.pyplot as plt
 import os
 import warnings
 import pandas as pd
@@ -42,10 +41,6 @@ class Rec:
         self.local_nzobj = self.cl_mpi.local_n_src
         self.local_ntheta = self.cl_mpi.local_n_dst
         self.rank      = self.cl_mpi.rank
-        self.st_obj    = self.cl_mpi.st_src
-        self.end_obj   = self.cl_mpi.end_src
-        self.st_theta  = self.cl_mpi.st_dst
-        self.end_theta = self.cl_mpi.end_dst
 
         # X-ray propagation and magnification parameters for classes
         wavelength = 1.24e-09 / self.energy
@@ -74,7 +69,6 @@ class Rec:
         # sizes for normalization        
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
-        self.obj_size = self.nzobj * self.nobj**2
 
         # fast refs
         self.gpu_batch = self.cl_chunking.gpu_batch
@@ -176,7 +170,7 @@ class Rec:
             top = 0
             for v in ["obj", "pos"]:                
                 top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
-            if self.cl_mpi.rank ==0:
+            if self.rank == 0:
                 top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
 
             bottom = self.hessian(vars, etas, etas)
@@ -194,8 +188,9 @@ class Rec:
             self.error_debug(vars, i)
             nvtx.pop_range()  
             
+            nvtx.push_range(":::BH:vis_debug", color='gray')
             self.vis_debug(vars, i, writer)
-            nvtx.pop_range()  
+            nvtx.pop_range()
                         
         # normalize back
         vars["obj"] *= self.norm_const        
@@ -273,10 +268,10 @@ class Rec:
         return out[0].get()
 
     def gradients(self, vars, grads):
-        """Full gradient, consists of 3 terms: 
+        """Full gradient, consists of 2 terms:
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
-        """        
+        """
         
         self.gradients_cascade(vars,grads)
 
@@ -383,56 +378,58 @@ class Rec:
 
 
     ####### F0(x0) = 1/n\||x0|-d\|_2^2
+    @staticmethod
+    @cp.fuse()
+    def _F0_fused(x, d):
+        t = cp.abs(x) - d
+        return t * t
+
     @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
-        
-        @cp.fuse()
-        def F0_fused(x, d):       
-            t = cp.abs(x) - d
-            return t*t         
-        return 1/ self.data_size * cp.sum(F0_fused(x, d)) 
+        return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
+
+    @staticmethod
+    @cp.fuse()
+    def _dF0_fused(x, d):
+        return x - d * (x / cp.abs(x))
 
     @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
-        
-        @cp.fuse()
-        def dF0_fused(x, d):        
-            return (x - d * (x / cp.abs(x)))
-        return 2 / self.data_size * redot(dF0_fused(x, d), y) 
+        return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
             
+    @staticmethod
+    @cp.fuse()
+    def _d2F_dF0_fused(x, y, z, w, d):
+        absval = cp.abs(x)
+        l0 = x / absval
+        d0 = d / absval
+        v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
+        if w is not None:
+            v += reprod(x - d * l0, w)
+        return v
+
     @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
+        return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
+        
+    @staticmethod
+    @cp.fuse()
+    def _gF0_fused(x, y, scale):
+        td = y * (x / cp.abs(x))
+        return scale * (x - td)
 
-        @cp.fuse()
-        def d2F_dF0_fused(x, y, z, w, d):
-            absval = cp.abs(x)
-            l0 = x / absval
-            d0 = d / absval
-            v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
-            if w is not None:
-                v += reprod(x - d * l0, w)
-            return v
-        
-        return 2 / self.data_size * cp.sum(d2F_dF0_fused(x, y, z, w, d))                    
-        
     @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
-        
+
         # calc fwd starting from 1
-        for id in range(1, 4)[::-1]: 
+        for id in range(1, 4)[::-1]:
             x = self.F[id](x)
 
-        @cp.fuse()
-        def gF0_fused(x,y):
-            td = y * (x / (cp.abs(x)))
-            y0 = (2 / self.data_size) * (x - td) 
-            return y0
-        
-        return gF0_fused(x,y)
+        return self._gF0_fused(x, y, np.float32(2 / self.data_size))
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
     @nvtx.annotate("F1", color="green")
@@ -500,7 +497,6 @@ class Rec:
             x = self.F[id](x)
 
         x11, x12 = x
-        y11 = cp.zeros([self.ndist, self.nz, self.n], dtype="complex64")
         y12 = cp.empty([y0.shape[0], self.ndist, self.nz, self.n], dtype="complex64")
         for j in range(self.ndist):
             y12[:,j] = self.cl_prop.DT(y0[:, j], j)
@@ -510,17 +506,26 @@ class Rec:
         return y11, y12        
 
     ######## (x11,x12) = F2(x21,x22) = (x21,e^{1j x22})
+    @staticmethod
+    @cp.fuse()
+    def _F2_fused(x22):
+        return cp.exp(1j * x22)
+
     @nvtx.annotate("F2", color="green")
     def F2(self, x):
         """In: (x21,x22) Out: (x11,x12)"""
 
         x21, x22 = x
         x11 = x21
-        @cp.fuse()
-        def F2_fused(x22):
-            return cp.exp(1j*x22)
-        x12 = F2_fused(x22)
+        x12 = self._F2_fused(x22)
         return x11, x12
+
+    @staticmethod
+    @cp.fuse()
+    def _dF2_fused(x22, y22):
+        x12 = cp.exp(1j * x22)
+        y12 = x12 * 1j * y22
+        return x12, y12
 
     @nvtx.annotate("dF2", color="green")
     def dF2(self, x, y, return_x=True):
@@ -529,19 +534,22 @@ class Rec:
         x21, x22 = x
         y21, y22 = y
 
-        @cp.fuse()
-        def dF2_fused(x22,y22):
-            x12 = cp.exp(1j*x22)             
-            y12 = x12 * 1j * y22
-            return x12,y12
-        x12, y12 = dF2_fused(x22,y22)
+        x12, y12 = self._dF2_fused(x22, y22)
         x11 = x21
-        y11 = y21        
+        y11 = y21
 
         return ([x11, x12], [y11, y12]) if return_x else [y11, y12]
 
    
     
+    @staticmethod
+    @cp.fuse()
+    def _d2F_dF2_fused(x22, y22, z22, w22):
+        y12 = x22 * (-y22 * z22)
+        if w22 is not None:
+            y12 = y12 + cp.exp(1j * x22) * 1j * w22
+        return y12
+
     @nvtx.annotate("d2F_dF2", color="purple")
     def d2F_dF2(self, x, y, z, w):
         """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
@@ -550,40 +558,29 @@ class Rec:
         y21, y22 = y
         z21, z22 = z
         w21, w22 = w
-        
-        @cp.fuse()
-        def d2F_dF2(x22,y22,z22,w22):
-            if y22 is z22:
-                y12 = x22 * (-y22**2)
-            else:
-                y12 = x22 * (-y22 * z22)
 
-            if w22 is not None:
-                y12 = y12 + cp.exp(1j*x22) * 1j * w22
-            return y12
-        
-        y12 = d2F_dF2(x22,y22,z22,w22)
+        y12 = self._d2F_dF2_fused(x22, y22, z22, w22)
         y11 = w21
-        
+
         return [y11, y12]
     
+    @staticmethod
+    @cp.fuse()
+    def _gF2_fused(x22, y12):
+        return (-1j) * y12 * cp.conj(cp.exp(1j * x22))
+
     @nvtx.annotate("gF2", color="green")
-    def gF2(self,x,y):
+    def gF2(self, x, y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
         y11, y12 = y
 
-        # calc fwd starting from 3        
-        for id in range(3, 4)[::-1]: 
+        # calc fwd starting from 3
+        for id in range(3, 4)[::-1]:
             x = self.F[id](x)
-        x21,x22 = x
+        x21, x22 = x
 
-        @cp.fuse()
-        def gF2_fused(x22,y12):
-            y22 = (-1j) * y12 * cp.conj(cp.exp(1j*x22))
-            return y22
-        
-        y22 = gF2_fused(x22,y12)
+        y22 = self._gF2_fused(x22, y12)
         y22 = y22.real if self.obj_dtype == 'float32' else y22
 
         y21 = y11
@@ -712,7 +709,7 @@ class Rec:
             
     
     def error_debug(self, vars, i):
-        """Visualization and data saving"""
+        """Error logging and CSV checkpoint export."""
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
             
@@ -751,38 +748,4 @@ class Rec:
     def gen_sqrt_ref(self, prb, out):
         """Generate synthetic reference"""
         for j in range(self.ndist):
-            out[j] = cp.abs(self.cl_prop.D(prb[j : j + 1], j)[0])
-            
-
-    def beta_pr(self,gk, gk1):
-        """
-        Polak–Ribière beta for real or complex gradients.
-        Uses Hermitian inner products; returns a real scalar.
-        """
-        top = 0
-        bottom = 0
-        for v in ['pos','prb','obj']:
-            y = gk1[v] - gk[v]
-            top += np.vdot(gk1[v].view('float32'), y.view('float32'))          # g_{k+1}^H (g_{k+1}-g_k)
-            bottom += np.vdot(gk[v].view('float32'), gk[v].view('float32'))          # g_k^H g_k  (real >= 0)
-        beta = self.allreduce(top)/self.allreduce(bottom)      
-        return beta
-
-    def beta_pr_plus(self,gk, gk1):
-        """PR+ safeguard: max(beta_PR, 0)."""
-        return max(0.0, self.beta_pr(gk, gk1))
-
-    def line_search(self,vars,etas,alpha):        
-        err0 = self.min(vars['prb'],vars['obj'],vars['pos'],vars['proj'])
-        # update variables: var = var+alpha*eta
-        for k in range(10):
-            for v in ["obj", "prb", "pos", "proj"]:
-                self.grads[v][:] = vars[v]+ alpha*etas[v]        
-                err1 = self.min(self.grads['prb'],self.grads['obj'],self.grads['pos'],self.grads['proj'])
-                if self.rank==0:
-                    print(alpha,err0,err1)
-                if err1<err0:
-                    err0 = err1
-                    return alpha
-                else:
-                    alpha/=1.5
+            out[j] = cp.abs(self.cl_prop.D(prb[j : j + 1], j)[0])            

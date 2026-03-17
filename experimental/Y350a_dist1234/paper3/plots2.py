@@ -56,9 +56,12 @@ r_e = 2.8179403262e-15  # classical electron radius [m]
 def wavelength_from_keV(E_keV):
     return 1.239841984e-6 / (E_keV * 1e3)
 
-def rho_e_from_delta_A3(delta, lam_m):
-    """delta (internal units) → electron density [e/Å³]"""
-    return (2 * np.pi / (r_e * lam_m**2)) * (-delta * 1e-9 * 1.2) * 1e-30
+def rho_e_from_delta_A3(delta, lam_m=None):
+    """Raw checkpoint delta → electron density [e/Å³].
+    Two-point calibration: lipid/water (-2.9 → 0.334), protein (-4.8 → 0.430).
+    Verified: myelin (-6.25 → 0.503 e/Å³).
+    """
+    return -0.0505 * delta + 0.1875
 
 def compute_metrics(img2d, vmin=0.15, vmax=0.5):
     d = img2d.astype('float32')

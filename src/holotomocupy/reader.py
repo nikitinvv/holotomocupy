@@ -224,8 +224,7 @@ class Reader:
         """Read initial object in one bulk I/O call and upsample by 2**bin."""
         st, end = self.st_obj, self.end_obj
         n0 = end - st
-        # FIX: scale = 2**bin (not 2**(-bin)) for upsampling
-        scale = 2 ** self.bin
+        scale = 2 ** (-self.bin)
         nz_src = max(1, n0 // scale)
         st_src = st // scale
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:

@@ -41,6 +41,10 @@ class Rec:
         self.local_nzobj = self.cl_mpi.local_n_src
         self.local_ntheta = self.cl_mpi.local_n_dst
         self.rank      = self.cl_mpi.rank
+        self.st_obj    = self.cl_mpi.st_src
+        self.end_obj   = self.cl_mpi.end_src
+        self.st_theta  = self.cl_mpi.st_dst
+        self.end_theta = self.cl_mpi.end_dst
 
         # X-ray propagation and magnification parameters for classes
         wavelength = 1.24e-09 / self.energy
@@ -69,6 +73,7 @@ class Rec:
         # sizes for normalization        
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
+        self.obj_size = self.nzobj * self.nobj**2
 
         # fast refs
         self.gpu_batch = self.cl_chunking.gpu_batch

@@ -63,7 +63,7 @@ class Reader:
             # FIX: clip to exactly ntheta to avoid float-step off-by-one
             ids = np.arange(start_theta, ntheta0, ntheta0 / ntheta)
             self.ids   = ids[:ntheta].astype('int')
-            self.theta = -fid['/exchange/theta'][self.ids, 0] / 180 * np.pi
+            self.theta = -fid['/exchange/theta'][:, 0][self.ids] / 180 * np.pi
             self.detector_pixelsize *= 2**self.bin
 
     def read_obj(self, out=None):
@@ -74,14 +74,18 @@ class Reader:
             stz  = nzobj0 // 2 - self.nzobj // 2
             stx  = nobj0  // 2 - self.nobj  // 2
             endx = nobj0  // 2 + self.nobj  // 2
+            local_nz = self.end_obj - self.st_obj
             if out is None:
-                out = obj_ds[stz + self.st_obj : stz + self.end_obj,
-                             stx:endx, stx:endx].astype(self.obj_dtype)
-            elif self.obj_dtype == 'complex64':
-                out.real[:] = obj_ds[stz + self.st_obj : stz + self.end_obj, stx:endx, stx:endx]
-                out.imag[:] = 0
-            else:
-                out[:] = obj_ds[stz + self.st_obj : stz + self.end_obj, stx:endx, stx:endx]
+                out = np.empty([local_nz, self.nobj, self.nobj], dtype=self.obj_dtype)
+            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds.dtype.itemsize))
+            for i0 in range(0, local_nz, batch):
+                i1 = min(i0 + batch, local_nz)
+                raw = obj_ds[stz + self.st_obj + i0 : stz + self.st_obj + i1, stx:endx, stx:endx]
+                if self.obj_dtype == 'complex64':
+                    out[i0:i1].real[:] = raw
+                    out[i0:i1].imag[:] = 0
+                else:
+                    out[i0:i1] = raw
         return out
 
     def read_pos(self, out=None):
@@ -189,17 +193,27 @@ class Reader:
             obj_dtype = f.attrs['obj_dtype']
             st_src  = self.st_obj  // scale
             end_src = self.end_obj // scale
-            obj_re  = f['obj_re'][st_src:end_src]
+            n0      = self.end_obj - self.st_obj
+            nz_src  = max(1, end_src - st_src)
+            ds_re   = f['obj_re']
+            batch   = max(1, (1 << 28) // (ds_re.shape[1] * ds_re.shape[2] * ds_re.dtype.itemsize))
+            obj_re  = np.empty((nz_src,) + ds_re.shape[1:], dtype=ds_re.dtype)
+            for i0 in range(0, nz_src, batch):
+                i1 = min(i0 + batch, nz_src)
+                obj_re[i0:i1] = ds_re[st_src + i0 : st_src + i1]
             if obj_dtype == 'complex64':
-                block = (obj_re + 1j * f['obj_im'][st_src:end_src]).astype('complex64')
+                obj_im = np.empty_like(obj_re)
+                ds_im  = f['obj_im']
+                for i0 in range(0, nz_src, batch):
+                    i1 = min(i0 + batch, nz_src)
+                    obj_im[i0:i1] = ds_im[st_src + i0 : st_src + i1]
+                block = (obj_re + 1j * obj_im).astype('complex64')
             else:
                 block = obj_re.astype('float32')
             # upsample x and y
             for axis in [2, 1]:
                 block = np.repeat(block, scale, axis=axis)
             # map source z-slices → output z-slices (nearest-neighbour)
-            n0     = self.end_obj - self.st_obj
-            nz_src = max(1, end_src - st_src)
             idx0   = np.clip(
                 (np.arange(n0) * nz_src / n0).astype(np.intp), 0, nz_src - 1
             )
@@ -228,10 +242,14 @@ class Reader:
         nz_src = max(1, n0 // scale)
         st_src = st // scale
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            # FIX: single bulk read instead of per-slice loop
-            block = fid['/exchange/obj'][st_src : st_src + nz_src]
-            if self.obj_dtype == 'float32':
-                block = block.real.copy()
+            ds = fid['/exchange/obj']
+            batch = max(1, (1 << 28) // (ds.shape[1] * ds.shape[2] * ds.dtype.itemsize))
+            block = np.empty((nz_src,) + ds.shape[1:], dtype=ds.dtype)
+            for i0 in range(0, nz_src, batch):
+                i1 = min(i0 + batch, nz_src)
+                block[i0:i1] = ds[st_src + i0 : st_src + i1]
+        if self.obj_dtype == 'float32':
+            block = block.real.copy()
         # upsample spatial dimensions in memory
         block = np.repeat(np.repeat(block, scale, axis=1), scale, axis=2)
         # map source z-slices to output z-slices

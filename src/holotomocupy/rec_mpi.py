@@ -550,7 +550,7 @@ class Rec:
     @staticmethod
     @cp.fuse()
     def _d2F_dF2_fused(x22, y22, z22, w22):
-        y12 = x22 * (-y22 * z22)
+        y12 = cp.exp(1j * x22) * (-y22 * z22)
         if w22 is not None:
             y12 = y12 + cp.exp(1j * x22) * 1j * w22
         return y12

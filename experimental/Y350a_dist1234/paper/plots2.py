@@ -1,5 +1,4 @@
 import os
-import json
 import h5py
 import numpy as np
 import scipy.ndimage as ndimage
@@ -8,7 +7,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib_scalebar.scalebar import ScaleBar
 import matplotlib as mpl
 
 os.makedirs('figs', exist_ok=True)
@@ -30,23 +28,47 @@ mpl.rcParams.update({
 
 wb = LinearSegmentedColormap.from_list("white_black", ["white", "black"])
 
-def mshow(a, **kwargs):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    im   = ax.imshow(a, cmap=wb, **kwargs)
-    cbar = fig.colorbar(im, fraction=0.046, pad=0.1,
-                        orientation="horizontal", location="bottom")
-    ticks = np.array(cbar.get_ticks())
-    if ticks.size >= 2:
-        cbar.set_ticks([ticks[0], ticks[-1]])
-        cbar.set_ticklabels([f"{ticks[0]:g}", f"{ticks[-1]:g}"])
-    cbar.set_label(r"Electron density (e/Å$^3$)", labelpad=-22, fontsize=17)
-    cbar.ax.tick_params(labelsize=18)
-    ax.add_artist(ScaleBar(20e-3, "um", length_fraction=0.25,
-                           font_properties={"family": "serif", "size": 20},
-                           location="lower right"))
+def mshow2(a, **kwargs):
+    """No colorbar, no scalebar — returns ax for overlay functions."""
+    _, ax = plt.subplots(1, 1, figsize=(6, 6))
+    ax.imshow(a, cmap=wb, **kwargs)
+    ax.axis('off')
+    return ax
+
+def _add_metrics(ax, data, fontsize=27):
+    h, w = data.shape[:2]
+    roi = np.clip(data[h//2-512:h//2+512, w//2-512:w//2+512].astype('float32'), 0.305, 0.535)
+    sharpness = float(np.std(ndimage.laplace(roi)))
+    flat = ndimage.median_filter(roi, size=3).ravel()
+    thresh = np.median(flat)
+    low, high = flat[flat < thresh], flat[flat >= thresh]
+    pooled_std = np.sqrt((np.std(low)**2 + np.std(high)**2) / 2)
+    hs = float(abs(np.mean(high) - np.mean(low)) / pooled_std) if pooled_std > 0 else float('nan')
+    ax.text(0.96, 0.04, f"S={sharpness:.3f}\nHS={hs:.3f}", transform=ax.transAxes,
+            va='bottom', ha='right', fontsize=fontsize, color='white',
+            bbox=dict(boxstyle='round,pad=0.15', fc='black', alpha=0.5))
+
+def _add_histogram(ax, data):
+    h, w = data.shape[:2]
+    flat = np.clip(data[h//2-512:h//2+512, w//2-512:w//2+512].astype('float32'), 0.305, 0.535).ravel()
+    counts, edges = np.histogram(flat, bins=80, range=(0.305, 0.535), density=True)
+    counts, edges = counts[1:-1], edges[1:-1]
+    centers = (edges[:-1] + edges[1:]) / 2
+    axh = ax.inset_axes([0.62, 0.77, 0.36, 0.21])
+    axh.bar(centers, counts, width=edges[1]-edges[0], color='steelblue', linewidth=0)
+    axh.grid(axis='both', linewidth=0.5, color='gray', alpha=0.6)
+    axh.set_axisbelow(True)
+    axh.set_xlim(0.305, 0.535)
+    axh.set_ylim(0, counts.max() * 1.05)
+    axh.set_xticks([]); axh.set_yticks([])
+    for spine in axh.spines.values():
+        spine.set_visible(False)
+    axh.patch.set_facecolor('white')
+    axh.patch.set_alpha(0.85)
+    axh.patch.set_visible(True)
 
 def mshow1(a, **kwargs):
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    _, ax = plt.subplots(1, 1, figsize=(6, 6))
     ax.imshow(a, cmap=wb, **kwargs)
     ax.axis('off')
 
@@ -56,26 +78,26 @@ r_e = 2.8179403262e-15  # classical electron radius [m]
 def wavelength_from_keV(E_keV):
     return 1.239841984e-6 / (E_keV * 1e3)
 
-def rho_e_from_delta_A3(delta, lam_m=None):
-    """Raw checkpoint delta → electron density [e/Å³].
-    Two-point calibration: lipid/water (-2.9 → 0.334), protein (-4.8 → 0.430).
-    Verified: myelin (-6.25 → 0.503 e/Å³).
-    """
-    return -0.0505 * delta + 0.1875
+def prec_to_rho(arr):
+    """prec .vol → rho_e [e/Å³]. 3-pt fit: lipid(-442→0.334), protein(-722→0.430), myelin(-942→0.503)."""
+    return arr * (-3.382e-4) + 0.18485
 
-def compute_metrics(img2d, vmin=0.15, vmax=0.5):
-    d = img2d.astype('float32')
-    sharpness = float(np.std(ndimage.laplace(d)))
-    noise = np.std(d - ndimage.gaussian_filter(d, sigma=2))
-    snr = float(20 * np.log10(np.mean(d) / noise)) if noise > 0 else float('inf')
-    flat = d.ravel()
-    thresh = np.median(flat)
-    low, high = flat[flat < thresh], flat[flat > thresh]
-    pooled_std = np.sqrt((np.std(low)**2 + np.std(high)**2) / 2)
-    hs = float(abs(np.mean(high) - np.mean(low)) / pooled_std) if pooled_std > 0 else float('nan')
-    return {'sharpness': sharpness, 'snr': snr, 'hs': hs}
+def mrec_to_rho(arr):
+    """mrec checkpoint → rho_e [e/Å³]. 3-pt fit: lipid(-2.667→0.334), protein(-4.7→0.430), myelin(-5.6→0.503)."""
+    return arr * (-5.620e-2) + 0.17942
 
-metrics_dict = {}
+# ── Brain electron densities [e/Å³] ──────────────────────────────────────────
+_brain_rho = {
+    'water':        0.334,
+    'lipid':        0.334,
+    'gray matter':  0.370,
+    'white matter': 0.390,
+    'protein':      0.430,
+    'myelin':       0.503,
+}
+print("Brain electron densities [e/Å³]:")
+for tissue, rho in _brain_rho.items():
+    print(f"  {tissue:<14} {rho:.3f}")
 
 def find_min_max(data):
     h, e = np.histogram(data[:], 1000)
@@ -106,6 +128,7 @@ with h5py.File(ckpt_path, 'r') as fid:
 z_edges = np.linspace(z0, z1_, N_THREADS + 1, dtype=int)
 mrec    = np.empty((nz, y1 - y0, x1 - x0), dtype='float32')
 
+
 if byte_offset is not None:
     mm = np.memmap(ckpt_path, dtype=dt, mode='r', offset=byte_offset, shape=shape)
     def _load(i):
@@ -122,125 +145,109 @@ else:
     with ThreadPoolExecutor(max_workers=N_THREADS) as ex:
         list(ex.map(_load, range(N_THREADS)))
 
-# ── Compute scale factor to align mrec → prec ─────────────────────────────────
-aa_cal = rho_e_from_delta_A3(prec[nz//2, ny//2-512:ny//2+512, ny//2-512:ny//2+512], lam)
-bb_cal = rho_e_from_delta_A3(mrec[nz//2, ny//2-512:ny//2+512, ny//2-512:ny//2+512], lam)
-mmin1, mmax1 = find_min_max(aa_cal)
-mmin2, mmax2 = find_min_max(bb_cal)
-print(f"prec range: {mmin1:.4f} – {mmax1:.4f}")
-# mmin2*=0.9
-mmin1 *= 1.3;  mmax1 *= 1.07
-scale = mmax1 / mmax2
-print(f"scale = {scale:.4f}")
+# tifffile.imwrite('/data2/tmp/prec',prec[nz//2])
+
+# ss
 
 # ── Histograms ────────────────────────────────────────────────────────────────
+aa_cal = prec_to_rho(prec[nz//2, ny//2-512:ny//2+512, ny//2-512:ny//2+512])
+bb_cal = mrec_to_rho(mrec[nz//2, ny//2-512:ny//2+512, ny//2-512:ny//2+512])
 plt.figure(figsize=(3, 1.5))
-plt.hist(aa_cal.ravel(), bins=np.linspace(0.15, 0.5, 200))
+plt.hist(aa_cal.ravel(), bins=np.linspace(0.305, 0.535, 200))
 plt.grid(); plt.tick_params(axis="y", labelleft=False)
 plt.savefig("figs/histp.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 plt.figure(figsize=(3, 1.5))
-plt.hist(bb_cal.ravel() * scale, bins=np.linspace(0.15, 0.5, 200))
+plt.hist(bb_cal.ravel(), bins=np.linspace(0.305, 0.535, 200))
 plt.grid(); plt.tick_params(axis="y", labelleft=False)
 plt.savefig("figs/histm.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
-# ── Full z-slice ──────────────────────────────────────────────────────────────
-aa = rho_e_from_delta_A3(prec[nz//2], lam)
-bb = rho_e_from_delta_A3(mrec[nz//2], lam) * scale
-mshow(aa, vmax=0.5, vmin=0.15); plt.savefig("figs/precz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow(bb, vmax=0.5, vmin=0.15); plt.savefig("figs/mrecz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aa, vmax=0.5, vmin=0.15); plt.savefig("figs/precz_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb, vmax=0.5, vmin=0.15); plt.savefig("figs/mrecz_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-def save_metrics_with_hist(key, data2d, vmin=0.15, vmax=0.5, bins=80):
-    d = np.clip(data2d[1024:2048, 1024:2048], vmin, vmax).ravel()
-    counts, edges = np.histogram(d, bins=bins, range=(vmin, vmax), density=True)
-    m = compute_metrics(data2d[1024:2048, 1024:2048])
-    m['hist_counts'] = counts.tolist()
-    m['hist_edges']  = edges.tolist()
-    metrics_dict[key] = m
+plt.figure(figsize=(8, 3))
+plt.hist(bb_cal.ravel(), bins=np.linspace(0.305, 0.535, 200))
+plt.xticks(np.linspace(0.305, 0.535, 21), rotation=45)
+plt.grid(); plt.tight_layout()
+plt.savefig("figs/histm_peaks.png", dpi=200, bbox_inches="tight", pad_inches=0.05); plt.close()
 
-save_metrics_with_hist('precz', aa)
-save_metrics_with_hist('mrecz', bb)
+# ── Full z-slice ──────────────────────────────────────────────────────────────
+aa = prec_to_rho(prec[nz//2])
+
+bb = mrec_to_rho(mrec[nz//2]) 
+# import tifffile
+# tifffile.imwrite('/data2/tmp/mrec',bb)
+# exit()
+
+ax = mshow2(aa, vmax=0.535, vmin=0.305); ax.axis('on'); _add_metrics(ax, aa, fontsize=20); _add_histogram(ax, aa); plt.savefig("figs/precz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+ax = mshow2(bb, vmax=0.535, vmin=0.305); ax.axis('on');_add_metrics(ax, bb, fontsize=20); _add_histogram(ax, bb); plt.savefig("figs/mrecz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa, vmax=0.535, vmin=0.305); plt.savefig("figs/precz_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb, vmax=0.535, vmin=0.305); plt.savefig("figs/mrecz_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 # ── Full y-slice ──────────────────────────────────────────────────────────────
-aa = rho_e_from_delta_A3(prec[:, ny//2], lam)
-bb = rho_e_from_delta_A3(mrec[:, ny//2], lam) * scale
-mshow(aa, vmax=0.5, vmin=0.15); plt.savefig("figs/precy.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow(bb, vmax=0.5, vmin=0.15); plt.savefig("figs/mrecy.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aa, vmax=0.5, vmin=0.15); plt.savefig("figs/precy_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb, vmax=0.5, vmin=0.15); plt.savefig("figs/mrecy_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-save_metrics_with_hist('precy', aa)
-save_metrics_with_hist('mrecy', bb)
+aa = prec_to_rho(prec[:, ny//2])
+bb = mrec_to_rho(mrec[:, ny//2])
+ax = mshow2(aa, vmax=0.535, vmin=0.305); ax.axis('on'); _add_metrics(ax, aa, fontsize=20); plt.savefig("figs/precy.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+ax = mshow2(bb, vmax=0.535, vmin=0.305); ax.axis('on');_add_metrics(ax, bb, fontsize=20); plt.savefig("figs/mrecy.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa, vmax=0.535, vmin=0.305); plt.savefig("figs/precy_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb, vmax=0.535, vmin=0.305); plt.savefig("figs/mrecy_raw.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 # ── Cropped z-slices ──────────────────────────────────────────────────────────
-aa = rho_e_from_delta_A3(prec[nz//2], lam)
-bb = rho_e_from_delta_A3(mrec[nz//2], lam) * scale
+aa = prec_to_rho(prec[nz//2])
+bb = mrec_to_rho(mrec[nz//2]) 
 s, st = 320, 1200
-mshow1(aa[ny//2-s:ny//2+3*s, nx//2-s+st:nx//2+s+st], vmax=0.5, vmin=0.15); plt.savefig("figs/preczz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[ny//2-s:ny//2+3*s, nx//2-s+st:nx//2+s+st], vmax=0.5, vmin=0.15); plt.savefig("figs/mreczz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[ny//2-s:ny//2+3*s, nx//2-s+st:nx//2+s+st], vmax=0.535, vmin=0.305); plt.savefig("figs/preczz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[ny//2-s:ny//2+3*s, nx//2-s+st:nx//2+s+st], vmax=0.535, vmin=0.305); plt.savefig("figs/mreczz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 s = 160
-mshow1(aa[ny//2-s:ny//2+s, nx//2-s:nx//2+s],         vmax=0.5, vmin=0.15); plt.savefig("figs/precz0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[ny//2-s:ny//2+s, nx//2-s:nx//2+s],         vmax=0.5, vmin=0.15); plt.savefig("figs/mrecz0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[ny//2-s:ny//2+s, nx//2-s:nx//2+s],         vmax=0.535, vmin=0.305); plt.savefig("figs/precz0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[ny//2-s:ny//2+s, nx//2-s:nx//2+s],         vmax=0.535, vmin=0.305); plt.savefig("figs/mrecz0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 stx, sty = 1000, 300
-mshow1(aa[ny//2-s+sty:ny//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.5, vmin=0.15); plt.savefig("figs/precz1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[ny//2-s+sty:ny//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.5, vmin=0.15); plt.savefig("figs/mrecz1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[ny//2-s+sty:ny//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.535, vmin=0.305); plt.savefig("figs/precz1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[ny//2-s+sty:ny//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.535, vmin=0.305); plt.savefig("figs/mrecz1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 # ── Cropped y-slices ──────────────────────────────────────────────────────────
-aa = rho_e_from_delta_A3(prec[:, ny//2], lam)
-bb = rho_e_from_delta_A3(mrec[:, ny//2], lam) * scale
+aa = prec_to_rho(prec[:, ny//2])
+bb = mrec_to_rho(mrec[:, ny//2]) 
 s, st = 320, 1200
-mshow1(aa[nz//2-2*s:nz//2+2*s, nx//2-s+st:nx//2+s+st], vmax=0.5, vmin=0.15); plt.savefig("figs/precyy.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[nz//2-2*s:nz//2+2*s, nx//2-s+st:nx//2+s+st], vmax=0.5, vmin=0.15); plt.savefig("figs/mrecyy.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[nz//2-2*s:nz//2+2*s, nx//2-s+st:nx//2+s+st], vmax=0.535, vmin=0.305); plt.savefig("figs/precyy.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[nz//2-2*s:nz//2+2*s, nx//2-s+st:nx//2+s+st], vmax=0.535, vmin=0.305); plt.savefig("figs/mrecyy.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 s = 160
-mshow1(aa[nz//2-s:nz//2+s, nx//2-s:nx//2+s], vmax=0.5, vmin=0.15); plt.savefig("figs/precy0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[nz//2-s:nz//2+s, nx//2-s:nx//2+s], vmax=0.5, vmin=0.15); plt.savefig("figs/mrecy0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[nz//2-s:nz//2+s, nx//2-s:nx//2+s], vmax=0.535, vmin=0.305); plt.savefig("figs/precy0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[nz//2-s:nz//2+s, nx//2-s:nx//2+s], vmax=0.535, vmin=0.305); plt.savefig("figs/mrecy0.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 stx, sty = 1000, 300
-mshow1(aa[nz//2-s+sty:nz//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.5, vmin=0.15); plt.savefig("figs/precy1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[nz//2-s+sty:nz//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.5, vmin=0.15); plt.savefig("figs/mrecy1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[nz//2-s+sty:nz//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.535, vmin=0.305); plt.savefig("figs/precy1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[nz//2-s+sty:nz//2+s+sty, nx//2-s+stx:nx//2+s+stx], vmax=0.535, vmin=0.305); plt.savefig("figs/mrecy1.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 # ── Zoomed patches ────────────────────────────────────────────────────────────
 for tag, middle, xoff in [("0", [nz//2, ny//2+64,   nx//2-60],  4),
                            ("1", [nz//2, 2500+60,    2100+90],   0)]:
     ss = 128
-    aa = rho_e_from_delta_A3(prec[middle[0]-ss:middle[0]+ss, middle[1]-ss:middle[1]+ss, middle[2]-ss:middle[2]+ss], lam)
-    bb = rho_e_from_delta_A3(mrec[middle[0]-ss:middle[0]+ss, middle[1]-ss:middle[1]+ss, middle[2]-ss:middle[2]+ss], lam) * scale
-    mshow1(aa[ss],        vmax=0.5, vmin=0.15); plt.savefig(f"figs/preczp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    mshow1(bb[ss],        vmax=0.5, vmin=0.15); plt.savefig(f"figs/mreczp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    mshow1(aa[:, ss],     vmax=0.5, vmin=0.15); plt.savefig(f"figs/precyp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    mshow1(bb[:, ss],     vmax=0.5, vmin=0.15); plt.savefig(f"figs/mrecyp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    mshow1(aa[:, :, ss],       vmax=0.5, vmin=0.15); plt.savefig(f"figs/precxp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    mshow1(bb[:, :, ss+xoff],  vmax=0.5, vmin=0.15); plt.savefig(f"figs/mrecxp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-    metrics_dict[f'preczp{tag}'] = compute_metrics(aa[ss])
-    metrics_dict[f'mreczp{tag}'] = compute_metrics(bb[ss])
-    metrics_dict[f'precyp{tag}'] = compute_metrics(aa[:, ss])
-    metrics_dict[f'mrecyp{tag}'] = compute_metrics(bb[:, ss])
-    metrics_dict[f'precxp{tag}'] = compute_metrics(aa[:, :, ss])
-    metrics_dict[f'mrecxp{tag}'] = compute_metrics(bb[:, :, ss+xoff])
-
+    aa = prec_to_rho(prec[middle[0]-ss:middle[0]+ss, middle[1]-ss:middle[1]+ss, middle[2]-ss:middle[2]+ss])
+    bb = mrec_to_rho(mrec[middle[0]-ss:middle[0]+ss, middle[1]-ss:middle[1]+ss, middle[2]-ss:middle[2]+ss])
+    mshow1(aa[ss],        vmax=0.535, vmin=0.305); plt.savefig(f"figs/preczp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+    mshow1(bb[ss],        vmax=0.535, vmin=0.305); plt.savefig(f"figs/mreczp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+    mshow1(aa[:, ss],     vmax=0.535, vmin=0.305); plt.savefig(f"figs/precyp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+    mshow1(bb[:, ss],     vmax=0.535, vmin=0.305); plt.savefig(f"figs/mrecyp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+    mshow1(aa[:, :, ss],       vmax=0.535, vmin=0.305); plt.savefig(f"figs/precxp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+    mshow1(bb[:, :, ss+xoff],  vmax=0.535, vmin=0.305); plt.savefig(f"figs/mrecxp{tag}.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 # ── Synchrotron region (same crop as plots_syn2.py) ──────────────────────────
 s1 = [1507-(3264-2048)//2, 1351-(3264-3216)//2, 1738-(3264-3216)//2]
 ss = 128
-aa = rho_e_from_delta_A3(prec[s1[0]-ss:s1[0]+ss, s1[1]-ss:s1[1]+ss, s1[2]-ss:s1[2]+ss], lam)
-bb = rho_e_from_delta_A3(mrec[s1[0]-ss:s1[0]+ss, s1[1]-ss:s1[1]+ss, s1[2]-ss:s1[2]+ss], lam) * scale
+aa = prec_to_rho(prec[s1[0]-ss:s1[0]+ss, s1[1]-ss:s1[1]+ss, s1[2]-ss:s1[2]+ss])
+bb = mrec_to_rho(mrec[s1[0]-ss:s1[0]+ss, s1[1]-ss:s1[1]+ss, s1[2]-ss:s1[2]+ss])
 
 aaa = ndimage.median_filter(aa, 2)
 bbb = ndimage.median_filter(bb, 2)
 
-mshow1(aa[ss],      vmax=0.5, vmin=0.15); plt.savefig("figs/precsynz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[ss],      vmax=0.5, vmin=0.15); plt.savefig("figs/mrecsynz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aa[:, ss],   vmax=0.5, vmin=0.15); plt.savefig("figs/precsyny.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[:, ss],   vmax=0.5, vmin=0.15); plt.savefig("figs/mrecsyny.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aa[:,:,ss],  vmax=0.5, vmin=0.15); plt.savefig("figs/precsynx.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bb[:,:,ss],  vmax=0.5, vmin=0.15); plt.savefig("figs/mrecsynx.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[ss],      vmax=0.535, vmin=0.305); plt.savefig("figs/precsynz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[ss],      vmax=0.535, vmin=0.305); plt.savefig("figs/mrecsynz.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[:, ss],   vmax=0.535, vmin=0.305); plt.savefig("figs/precsyny.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[:, ss],   vmax=0.535, vmin=0.305); plt.savefig("figs/mrecsyny.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aa[:,:,ss],  vmax=0.535, vmin=0.305); plt.savefig("figs/precsynx.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bb[:,:,ss],  vmax=0.535, vmin=0.305); plt.savefig("figs/mrecsynx.png",  dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
-mshow1(aaa[ss],     vmax=0.5, vmin=0.15); plt.savefig("figs/fprecsynz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bbb[ss],     vmax=0.5, vmin=0.15); plt.savefig("figs/fmrecsynz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aaa[:, ss],  vmax=0.5, vmin=0.15); plt.savefig("figs/fprecsyny.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bbb[:, ss],  vmax=0.5, vmin=0.15); plt.savefig("figs/fmrecsyny.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(aaa[:,:,ss], vmax=0.5, vmin=0.15); plt.savefig("figs/fprecsynx.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-mshow1(bbb[:,:,ss], vmax=0.5, vmin=0.15); plt.savefig("figs/fmrecsynx.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
-
-with open('figs/metrics.json', 'w') as f:
-    json.dump(metrics_dict, f, indent=2)
+mshow1(aaa[ss],     vmax=0.535, vmin=0.305); plt.savefig("figs/fprecsynz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bbb[ss],     vmax=0.535, vmin=0.305); plt.savefig("figs/fmrecsynz.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aaa[:, ss],  vmax=0.535, vmin=0.305); plt.savefig("figs/fprecsyny.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bbb[:, ss],  vmax=0.535, vmin=0.305); plt.savefig("figs/fmrecsyny.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(aaa[:,:,ss], vmax=0.535, vmin=0.305); plt.savefig("figs/fprecsynx.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
+mshow1(bbb[:,:,ss], vmax=0.535, vmin=0.305); plt.savefig("figs/fmrecsynx.png", dpi=300, bbox_inches="tight", pad_inches=0.02); plt.close()
 
 print("Done — figures saved to figs/")

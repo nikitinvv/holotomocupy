@@ -1,7 +1,7 @@
 import json
 import os
 import numpy as np
-from scipy.ndimage import laplace, gaussian_filter
+from scipy.ndimage import laplace
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -36,22 +36,22 @@ metrics = json.load(open(metric_path)) if os.path.exists(metric_path) else {}
 
 directions = ['z', 'y', 'x']
 
-# (rec, tag) for each of the 4 rows
-rows = [('mrec', '0'), ('prec', '0'), ('mrec', '1'), ('prec', '1')]
+# (rec, tag) for each of the 4 cols
+cols = [('mrec', '0'), ('prec', '0'), ('mrec', '1'), ('prec', '1')]
 
-col_labels = ['z-slice', 'y-slice', 'x-slice']
-row_labels = ['Proposed\n(patch 0)', 'Conventional\n(patch 0)',
+row_labels = ['z-slice', 'y-slice', 'x-slice']
+col_labels = ['Proposed\n(patch 0)', 'Conventional\n(patch 0)',
               'Proposed\n(patch 1)', 'Conventional\n(patch 1)']
 
-# 5-row GridSpec: rows 0,1 = patch 0; row 2 = spacer; rows 3,4 = patch 1
-fig = plt.figure(figsize=(10.5, 14.5))
-gs  = gridspec.GridSpec(5, 3, height_ratios=[1, 1, 0.06, 1, 1],
+# 5-col GridSpec: cols 0,1 = patch 0; col 2 = spacer; cols 3,4 = patch 1
+fig = plt.figure(figsize=(14.5, 10.5))
+gs  = gridspec.GridSpec(3, 5, width_ratios=[1, 1, 0.06, 1, 1],
                         hspace=0.04, wspace=0.04)
-gs_rows = [0, 1, 3, 4]  # skip spacer row 2
-axes = [[fig.add_subplot(gs[gs_rows[ri], ci]) for ci in range(3)] for ri in range(4)]
+gs_cols = [0, 1, 3, 4]  # skip spacer col 2
+axes = [[fig.add_subplot(gs[ri, gs_cols[ci]]) for ci in range(4)] for ri in range(3)]
 
-for ri, (rec, tag) in enumerate(rows):
-    for ci, direction in enumerate(directions):
+for ri, direction in enumerate(directions):
+    for ci, (rec, tag) in enumerate(cols):
         fname = f"figs/{rec}{direction}p{tag}.png"
         img   = mpimg.imread(fname)
         ax    = axes[ri][ci]

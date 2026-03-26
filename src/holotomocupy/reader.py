@@ -223,7 +223,7 @@ class Reader:
                 out_obj[:] = block[idx0].astype(self.obj_dtype)
 
             # --- pos: scale pixel coordinates up ---
-            pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
+            pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
 
         pos_up = pos * scale 
         pos_up[...,1] += 0.5 * (scale - 1)
@@ -233,6 +233,29 @@ class Reader:
             out_pos[:] = cp.array(pos_up, dtype='float32')
 
         return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos}
+
+    def read_pos_checkpoint(self, path, out=None):
+        """Read positions from a checkpoint file and upsample to current resolution.
+
+        Scale is inferred from the checkpoint probe size vs self.n.
+        """
+        if self.rank == 0:
+            with h5py.File(path, 'r') as f:
+                scale = self.n // f['prb_abs'].shape[-1]
+        else:
+            scale = None
+        scale = self.comm.bcast(scale, root=0)
+
+        with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
+            pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
+
+        pos_up = pos * scale
+        pos_up[..., 1] += 0.5 * (scale - 1)
+        if out is None:
+            out = cp.array(pos_up)
+        else:
+            out[:] = cp.array(pos_up, dtype='float32')
+        return out
 
     def read_obj_unbin(self, out):
         """Read initial object in one bulk I/O call and upsample by 2**bin."""

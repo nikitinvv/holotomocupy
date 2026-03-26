@@ -81,6 +81,9 @@ else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])
     reader.read_prb(out=cl.vars['prb'])
+if args.pos_checkpoint:
+    logger.info(f"Overriding positions from: {args.pos_checkpoint}")
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

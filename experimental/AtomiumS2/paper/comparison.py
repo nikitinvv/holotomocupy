@@ -1,3 +1,4 @@
+import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -35,6 +36,11 @@ for c, col_imgs in enumerate(imgs):
         if c == 0 and row_titles[r]:
             ax.set_ylabel(row_titles[r], fontsize=16, labelpad=6)
 
-plt.savefig('figs/comparison.png', dpi=dpi, bbox_inches='tight', pad_inches=0.02)
+base = 'figs/comparison'
+i = 0
+while os.path.exists(f'{base}_{i:03d}.png'):
+    i += 1
+out = f'{base}_{i:03d}.png'
+plt.savefig(out, dpi=dpi, bbox_inches='tight', pad_inches=0.02)
 plt.close()
-print("Done — figs/comparison.png saved")
+print(f"Done — {out} saved")

@@ -39,6 +39,7 @@ def parse_args(config_file):
         args.energy = cfg.getfloat("energy", fallback="WARNING")
         args.method = cfg.getint("method", fallback=0)
         args.start_method = cfg.getint("start_method", fallback=1)
+        args.pos_checkpoint = cfg.get("pos_checkpoint", fallback=None)
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
     

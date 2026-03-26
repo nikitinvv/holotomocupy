@@ -22,13 +22,14 @@ h_y = imgs['mrecy'].shape[0]
 fig = plt.figure(figsize=(14, 14 * (h_z + h_y) / (imgs['mrecz'].shape[1] * 2)))
 gs  = gridspec.GridSpec(2, 2, height_ratios=[h_z, h_y], hspace=0.02, wspace=0.02)
 
-layout = [('mrecz', 'precz'), ('mrecy', 'precy')]
+layout = [('precz', 'mrecz'), ('precy', 'mrecy')]
 
 for ri, (left_key, right_key) in enumerate(layout):
     for ci, key in enumerate([left_key, right_key]):
         ax = fig.add_subplot(gs[ri, ci])
         ax.imshow(imgs[key])
         ax.axis('off')
+
 
 fig.savefig('figs/compare_full.png', dpi=200, bbox_inches='tight', pad_inches=0.05)
 print('Saved figs/compare_full.png')

@@ -27,14 +27,6 @@ NDEPTH=8
 export NTOTRANKS=$(( NNODES * NRANKS ))
 
 echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRANKS}"
-# #export NCCL_IB_DISABLE=1
-# export NCCL_COLLNET_ENABLE=1
-# export NCCL_NET_GDR_LEVEL=PHB
-# #export NCCL_P2P_DISABLE=1
-# export NCCL_SOCKET_IFNAME=hsn1
-# #OMPI_MCA_opal_cuda_support=true
-# #export NCCL_DEBUG=INFO
-# #export CUDA_DEVICE_ORDER="PCI_BUS_ID"
 
 module use /soft/modulefiles;  module load conda; conda activate base
 CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')

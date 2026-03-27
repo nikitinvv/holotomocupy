@@ -75,41 +75,55 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     "gather",
 )
 
-pad_kernel = cp.RawKernel(
+pad_fwd_kernel = cp.RawKernel(
     r"""
-extern "C" void __global__ pad(float2* g, float2* f, int n, int nz, int ntheta, bool dir)
+extern "C" void __global__ pad_fwd(float2* __restrict__ g,
+                                    const float2* __restrict__ f,
+                                    int n, int nz, int ntheta)
 {
     int tx = blockDim.x * blockIdx.x + threadIdx.x;
     int ty = blockDim.y * blockIdx.y + threadIdx.y;
     int tz = blockDim.z * blockIdx.z + threadIdx.z;
+    if (tx >= 2*n || ty >= 2*nz || tz >= ntheta) return;
 
-    int txx, tyy;
+    int txx = (tx < n/2)       ? (n/2  - tx - 1)         :
+              (tx >= n + n/2)   ? (2*n  - tx + n/2  - 1)  : (tx - n/2);
+    int tyy = (ty < nz/2)      ? (nz/2 - ty - 1)         :
+              (ty >= nz + nz/2) ? (2*nz - ty + nz/2 - 1)  : (ty - nz/2);
 
-    if (tx >= 2 * n || ty >= 2 * nz || tz >= ntheta) return;
-
-    if (ty < nz / 2) tyy = nz / 2 - ty - 1;
-    else if (ty >= nz + nz / 2) tyy = 2 * nz - ty + nz / 2 - 1;
-    else tyy = ty - nz / 2;
-
-    if (tx < n / 2) txx = n / 2 - tx - 1;
-    else if (tx >= n + n / 2) txx = 2 * n - tx + n / 2 - 1;
-    else txx = tx - n / 2;
-
-    int id1 = tz * 2 * n * 2 * nz + ty * 2 * n + tx;
-    int id2 = tz * n * nz + tyy * n + txx;
-
-    if (dir == 0)
-    {
-        g[id1] = f[id2];
-    }
-    else
-    {
-        atomicAdd(&f[id2].x, g[id1].x);
-        atomicAdd(&f[id2].y, g[id1].y);
-    }
+    g[tz*2*n*2*nz + ty*2*n + tx] = f[tz*n*nz + tyy*n + txx];
 }
 """,
-    "pad",
+    "pad_fwd",
+)
+
+pad_adj_kernel = cp.RawKernel(
+    r"""
+/* Adjoint of pad_fwd: launch over f (n x nz).
+   Each f[tx,ty] gathers from exactly 4 symmetric locations in g — no atomics. */
+extern "C" void __global__ pad_adj(const float2* __restrict__ g,
+                                    float2* __restrict__ f,
+                                    int n, int nz, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    int gx_c = tx + n/2;
+    int gx_m = (tx < n/2) ? (n/2 - 1 - tx) : (2*n + n/2 - 1 - tx);
+    int gy_c = ty + nz/2;
+    int gy_m = (ty < nz/2) ? (nz/2 - 1 - ty) : (2*nz + nz/2 - 1 - ty);
+
+    const float2* base = g + tz * 2*n * 2*nz;
+    float2 v0 = base[gy_c*2*n + gx_c];
+    float2 v1 = base[gy_c*2*n + gx_m];
+    float2 v2 = base[gy_m*2*n + gx_c];
+    float2 v3 = base[gy_m*2*n + gx_m];
+    f[tz*n*nz + ty*n + tx] = {v0.x+v1.x+v2.x+v3.x, v0.y+v1.y+v2.y+v3.y};
+}
+""",
+    "pad_adj",
 )
 
 # B-spline basis functions and derivatives.

@@ -12,6 +12,7 @@ from .chunking import Chunking
 from .utils import *
 from .mpi_functions import *
 from .logger_config import logger
+from .conv2d_cufftdx import precompile as cufftdx_precompile
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
@@ -57,10 +58,15 @@ class Rec:
         # scaling variables
         self.rho_sq = {'obj': args.rho[0]**2, 'prb': args.rho[1]**2, 'pos': args.rho[2]**2}
 
+        # cuFFTDx JIT compile: rank 0 builds the .so, then all ranks proceed
+        if self.rank == 0:
+            cufftdx_precompile(2 * self.nz, 2 * self.n)
+        self.cl_mpi.comm.Barrier()
+
         # create classes (one GPU per MPI rank via CUDA_VISIBLE_DEVICES)
         self.cl_chunking = Chunking(nbytes, self.nchunk)
-        self.cl_tomo  = Tomo(self.nobj, self.theta, self.mask)
-        self.cl_prop  = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
+        self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
+        self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
         self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
 
         self.alloc_arrays()

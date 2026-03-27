@@ -8,7 +8,7 @@ from .utils import redot, logger
 class Tomo:
     """Functionality for Radon transforms and exp"""
 
-    def __init__(self, n, theta, mask_r):
+    def __init__(self, n, nz, theta, mask_r):
         """Usfft parameters"""
         eps = 1e-3  # accuracy of usfft
         mu = -math.log(eps) / (2 * n * n)
@@ -45,6 +45,7 @@ class Tomo:
         self.mask = mask
         phi *= cp.array(mask / (n * np.sqrt(n * self.ntheta)))
         self.pars = m, mua, phi, c1dfftshift, c2dfftshift
+        self._buf_fde = cp.empty([nz, 2 * n, 2 * n], dtype="complex64")
 
     def R(self, obj):
         """Radon transform"""
@@ -54,11 +55,12 @@ class Tomo:
         sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
 
         # STEP0: multiplication by phi, padding
-        fde = obj * phi
-        fde = cp.pad(fde, ((0, 0), (n // 2, n // 2), (n // 2, n // 2)))
+        fde = self._buf_fde[:nz]
+        fde.fill(0)
+        cp.multiply(obj, phi, out=fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2])
         # STEP1: 2D FFT
         fde *= c2dfftshift
-        fde  = cp.fft.fft2(fde)
+        fde[:] = cp.fft.fft2(fde)
         fde *= c2dfftshift
         # STEP2: NUFFT gather (Cartesian -> polar)
         gather_kernel(
@@ -68,7 +70,7 @@ class Tomo:
         )
         # STEP3: 1D IFFT along detector axis
         sino *= c1dfftshift
-        sino  = cp.fft.ifft(sino)
+        sino[:] = cp.fft.ifft(sino)
         sino *= c1dfftshift
         # STEP4: normalization
         sino /= 4
@@ -85,10 +87,11 @@ class Tomo:
 
         # STEP1: 1D FFT along detector axis
         sino  = data * c1dfftshift
-        sino  = cp.fft.fft(sino)
+        sino[:] = cp.fft.fft(sino)
         sino *= c1dfftshift
         # STEP2: NUFFT scatter (polar -> Cartesian)
-        fde = cp.zeros([nz, 2 * n, 2 * n], dtype="complex64")
+        fde = self._buf_fde[:nz]
+        fde.fill(0)
         gather_kernel(
             (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
             (32, 32, 1),

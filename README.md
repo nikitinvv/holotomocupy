@@ -28,6 +28,51 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 | h5py | HDF5 I/O |
 | dxchange | Tomography I/O utilities |
 | matplotlib | Visualization in notebooks |
+| NVIDIA mathDX *(optional)* | Enables the cuFFTDx-based fast Fresnel propagator |
+
+### Optional: cuFFTDx fast propagator (NVIDIA mathDX)
+
+The Fresnel propagator (`propagation.py`) has two backends:
+
+| Backend | Speed | Requirement |
+|---|---|---|
+| cuPy (default) | baseline | none — works out of the box |
+| cuFFTDx | faster | NVIDIA mathDX + nvcc |
+
+The cuFFTDx backend is selected automatically at startup when mathDX is found. If it is unavailable, the package silently falls back to cuPy with no loss of correctness.
+
+**1. Download and install mathDX**
+
+Follow the installation guide at https://docs.nvidia.com/cuda/mathdx/installation.html to download and unpack the mathDX package:
+
+```bash
+tar -xzf nvidia-mathdx-*.tar.gz -C /opt/nvidia
+```
+
+**2. Set environment variables**
+
+```bash
+export MATHDX_ROOT=/opt/nvidia/nvidia-mathdx-25.12.1-cuda13/nvidia/mathdx/25.12
+export NVCC=/usr/local/cuda/bin/nvcc   # or wherever nvcc lives
+# Optional overrides:
+# export CUFFTDX_SM=80          # target SM version (default: 80)
+# export CUFFTDX_SO_DIR=/tmp    # where JIT-compiled .so files are cached
+```
+
+Add these lines to your `~/.bashrc` or the job script so they persist.
+
+**3. Verify detection**
+
+```python
+from holotomocupy.propagation import Propagation
+# Should print: "cuFFTDx (mathDX) available — using fast cuFFTDx propagator."
+```
+
+If mathDX is not found you will see a `UserWarning` explaining which path is missing.
+
+**JIT compilation and MPI**
+
+The first time a new grid size is used, the package JIT-compiles a small CUDA shared library with `nvcc` and caches it in `CUFFTDX_SO_DIR`. In an MPI run, **only rank 0 compiles**; all other ranks wait at a barrier and then load the pre-built library. Subsequent runs reuse the cached `.so` and skip compilation entirely.
 
 ### Conda environment
 
@@ -302,7 +347,9 @@ src/holotomocupy/
     rec_mpi.py          # BH iterative solver (MPI-aware)
     tomo.py             # tomographic projection (RT / FBP)
     shift.py            # B-spline sub-pixel shift operators
-    propagation.py      # Fresnel propagator
+    propagation.py      # Fresnel propagator (cuFFTDx or cuPy backend)
+    conv2d_cufftdx.py   # cuFFTDx JIT wrapper + availability flag
+    cuda/conv2d.cu      # cuFFTDx 2-D convolution kernel source
     chunking.py         # @gpu_batch decorator
     cuda_kernels.py     # raw CUDA kernels (spline interpolation, NUFFT gather)
     reader.py           # MPI-aware HDF5 reader

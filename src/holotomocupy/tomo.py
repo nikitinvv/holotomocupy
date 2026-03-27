@@ -86,7 +86,7 @@ class Tomo:
         m, mua, phi, c1dfftshift, c2dfftshift = self.pars
 
         # STEP1: 1D FFT along detector axis
-        sino  = data * c1dfftshift
+        sino  = (data * c1dfftshift).astype('complex64')
         sino[:] = cp.fft.fft(sino)
         sino *= c1dfftshift
         # STEP2: NUFFT scatter (polar -> Cartesian)

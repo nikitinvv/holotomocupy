@@ -112,6 +112,16 @@ Each file contains:
 
 The full pipeline is in `experimental/Y350a_dist1234/`. Steps 1–5 are Jupyter notebooks; step 6 is a Python script launched with `mpirun`.
 
+> **Prerequisites — ID16A Octave pipeline:** This pipeline is designed for data collected at the ID16A nano-imaging beamline (ESRF). Before running step 3, a preliminary reconstruction must be performed with the ID16A Octave code. It produces three position-correction files that step 3 reads as the initial guess for sample positions:
+>
+> | File | Description |
+> |---|---|
+> | `rhapp_python.mat` | Per-projection, per-distance 2-D shift corrections (shape: `[ntheta, ndist, 2]`, pixels). Must be exported from Octave in MATLAB v6 format so that `scipy.io.loadmat` can read it: `save -v6 rhapp_python.mat rhapp` |
+> | `correct_motion.txt` | Stage encoder position as a function of angle for a single reference distance — used to build the motion-correction shift field across all distances |
+> | `correct_correct3D.txt` | Residual per-projection shifts derived from a preliminary 3-D tomographic reconstruction — corrects slow drift not captured by the encoder |
+>
+> Step 3 combines these three sources into the initial position array written into the HDF5 file as `/exchange/cshifts_error`, which step 6 then loads as the starting point for iterative position refinement.
+
 ### Step 1 — Convert raw data
 
 Open `step1_convert.ipynb` and run all cells.
@@ -128,7 +138,7 @@ Rings removal, background subtraction, binning.
 
 Open `step3_find_shifts.ipynb` and run all cells.
 
-Estimates sample position shifts between projection angles using cross-correlation.
+Combines position corrections from the ID16A Octave pipeline (`rhapp_python.mat`, `correct_motion.txt`, `correct_correct3D.txt`) into a single initial shift array and writes it to the HDF5 file. This initial guess is used as the starting point for position refinement in step 6.
 
 ### Step 4 — Make binned data
 

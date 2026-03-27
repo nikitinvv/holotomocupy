@@ -25,7 +25,7 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 | CUDA ≥ 11 | One GPU per MPI rank |
 | CuPy | GPU NumPy |
 | mpi4py | MPI bindings |
-| h5py | HDF5 I/O |
+| h5py **with MPI support** | HDF5 I/O — must be built with parallel HDF5 (the default `pip install h5py` is serial-only and will fail at checkpoint writing) |
 | dxchange | Tomography I/O utilities |
 | matplotlib | Visualization in notebooks |
 
@@ -33,10 +33,12 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 
 ```bash
 conda create -n holotomocupy -c conda-forge \
-    cupy mpi4py h5py dxchange \
+    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange \
     setuptools matplotlib psutil jupyter matplotlib-scalebar
 conda activate holotomocupy
 ```
+
+> **Important:** h5py must be built with parallel HDF5 (MPI) support — the `mpi_openmpi` build variant from conda-forge provides this. The default `pip install h5py` or the `nompi` conda variant will raise `ValueError: h5py was built without MPI support, can't use mpio driver` at runtime when saving checkpoints.
 
 ### Install the package
 
@@ -48,47 +50,95 @@ pip install -e .
 
 ---
 
-## Reconstruction pipeline
+## Running tests
+
+Tests live in `tests/`:
+
+| File | What it tests |
+|---|---|
+| `tests/test.ipynb` | End-to-end holotomography reconstruction (interactive, single process) |
+| `tests/test.py` | Same test as a plain Python script, runnable with MPI |
+
+### What the test does
+
+1. Builds a synthetic 3-D phantom object and loads a realistic probe from pre-saved TIFF files.
+2. Forward-simulates diffraction patterns and a flat-field reference from the ground-truth variables.
+3. Resets variables to an imperfect initial guess and runs the BH iterative solver.
+4. Saves reconstruction checkpoints to `tests/test_results/checkpoint_NNNN.h5` every `vis_step` iterations.
+
+### Running `test.py` with MPI
+
+`bind.sh` maps each MPI rank to a unique GPU via `CUDA_VISIBLE_DEVICES`:
+
+```bash
+cd tests
+mpirun -np 2 ./bind.sh python test.py
+```
+
+Replace `2` with the number of available GPUs. Each rank processes a contiguous slice of the object volume (z-axis) and a contiguous block of projections (theta-axis).
+
+To suppress UCX warnings add `--mca opal_common_ucx_opal_mem_hooks 1`:
+
+```bash
+mpirun --mca opal_common_ucx_opal_mem_hooks 1 -np 2 ./bind.sh python test.py
+```
+
+### Output
+
+Checkpoints are written to `tests/test_results/` as HDF5 files:
+
+```
+tests/test_results/
+    checkpoint_0016.h5   # iteration 16
+    checkpoint_0032.h5   # iteration 32
+    ...
+```
+
+Each file contains:
+
+| Dataset | Shape | Description |
+|---|---|---|
+| `obj_re` | `(nzobj, nobj, nobj)` | Real part of reconstructed object (refractive index decrement δ) |
+| `obj_im` | `(nzobj, nobj, nobj)` | Imaginary part (absorption β) — present when `obj_dtype=complex64` |
+| `prb_abs` | `(ndist, nz, n)` | Probe amplitude |
+| `prb_phase` | `(ndist, nz, n)` | Probe phase |
+| `pos` | `(ntheta, ndist, 2)` | Refined sample positions (pixels) |
+
+> **Note:** `h5py` with MPI support is required — see the Installation section.
+
+---
+
+## Reconstruction pipeline for experimental data
 
 The full pipeline is in `experimental/Y350a_dist1234/`. Steps 1–5 are Jupyter notebooks; step 6 is a Python script launched with `mpirun`.
 
 ### Step 1 — Convert raw data
 
-```bash
-jupyter nbconvert --to notebook --execute step1_convert.ipynb
-```
+Open `step1_convert.ipynb` and run all cells.
 
 Reads raw detector frames, applies flat-field correction, and writes a single HDF5 file consumed by all subsequent steps.
 
 ### Step 2 — Preprocessing
 
-```bash
-jupyter nbconvert --to notebook --execute step2_preprocessing.ipynb
-```
+Open `step2_preprocessing.ipynb` and run all cells.
 
 Rings removal, background subtraction, binning.
 
 ### Step 3 — Find shifts
 
-```bash
-jupyter nbconvert --to notebook --execute step3_find_shifts.ipynb
-```
+Open `step3_find_shifts.ipynb` and run all cells.
 
 Estimates sample position shifts between projection angles using cross-correlation.
 
 ### Step 4 — Make binned data
 
-```bash
-jupyter nbconvert --to notebook --execute step4_make_binned.ipynb
-```
+Open `step4_make_binned.ipynb` and run all cells.
 
 Produces downsampled datasets at multiple bin levels for fast prototyping.
 
 ### Step 5 — Paganin reconstruction
 
-```bash
-jupyter nbconvert --to notebook --execute step5_rec_paganin.ipynb
-```
+Open `step5_rec_paganin.ipynb` and run all cells.
 
 Fast single-distance phase retrieval (Paganin filter) used as the initial guess for step 6.
 
@@ -97,14 +147,14 @@ Fast single-distance phase retrieval (Paganin filter) used as the initial guess 
 GPU-binding wrapper maps each MPI rank to a unique GPU:
 
 ```bash
-mpirun -np <ngpus> ./bind.sh python step6_rec_iterative_mpi.py configs/config1.conf
+mpirun -np <ngpus> ./bind.sh python step6_rec_iterative_mpi.py configs/config.conf
 ```
 
 Example with 4 GPUs:
 
 ```bash
 cd experimental/Y350a_dist1234
-mpirun -np 4 ./bind.sh python step6_rec_iterative_mpi.py configs/config1.conf
+mpirun -np 4 ./bind.sh python step6_rec_iterative_mpi.py configs/config.conf
 ```
 
 ---
@@ -133,7 +183,7 @@ See [ALCF Python docs](https://docs.alcf.anl.gov/polaris/data-science/python/) f
 
 ### GPU affinity
 
-`polaris/set_affinity_gpu_polaris.sh` assigns GPUs in reverse order to match the Polaris PCIe topology (see [ALCF machine overview](https://www.alcf.anl.gov/support/user-guides/polaris/hardware-overview/machine-overview/index.html)):
+`experimental/Y350a_dist1234/set_affinity_gpu_polaris.sh` assigns GPUs in reverse order to match the Polaris PCIe topology (see [ALCF machine overview](https://www.alcf.anl.gov/support/user-guides/polaris/hardware-overview/machine-overview/index.html)):
 
 ```bash
 #!/bin/bash -l
@@ -145,7 +195,7 @@ exec "$@"
 
 ### PBS job script
 
-`polaris/prun.sh` — submit with `qsub polaris/prun.sh` from the experiment directory:
+`experimental/Y350a_dist1234/prun.sh` — submit with `qsub prun.sh` from the experiment directory:
 
 ```bash
 #!/bin/bash
@@ -166,11 +216,6 @@ export NTOTRANKS=$(( NNODES * NRANKS ))
 
 echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRANKS}"
 
-# NCCL networking settings for Polaris HPE Slingshot interconnect
-export NCCL_COLLNET_ENABLE=1
-export NCCL_NET_GDR_LEVEL=PHB
-export NCCL_SOCKET_IFNAME=hsn1
-
 # Activate conda + venv
 module use /soft/modulefiles; module load conda; conda activate base
 CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
@@ -179,7 +224,7 @@ source "$HOME/venvs/${CONDA_NAME}/bin/activate"
 mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} \
     --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} \
     ./set_affinity_gpu_polaris.sh \
-    python step6_rec_iterative_mpi.py configs/config1.conf
+    python step6_rec_iterative_mpi.py configs/config.conf
 ```
 
 ### Typical workflow on Polaris
@@ -206,18 +251,15 @@ cp /path/to/data.h5 /eagle/<project>/data.h5
 
 # 5. Edit the config to point to eagle paths
 cd experimental/Y350a_dist1234
-vi configs/config1.conf   # set in_file and path_out
+vi configs/config.conf   # set in_file and path_out
 
-# 6. Copy the Polaris scripts next to your step6 script
-cp ../../polaris/set_affinity_gpu_polaris.sh .
+# 6. Edit prun.sh: set project ID, node count, config path
+vi prun.sh
 
-# 7. Edit prun.sh: set project ID, node count, config path
-vi ../../polaris/prun.sh
+# 7. Submit
+qsub prun.sh
 
-# 8. Submit
-qsub ../../polaris/prun.sh
-
-# 9. Monitor
+# 8. Monitor
 qstat -u $USER
 tail -f <jobid>.o
 ```
@@ -236,7 +278,7 @@ tail -f <jobid>.o
 
 ## Configuration file
 
-`configs/config1.conf` — all parameters as `key=value`, comments with `#`:
+`configs/config.conf` — all parameters as `key=value`, comments with `#`:
 
 ```ini
 in_file=/data/dataset.h5       # input HDF5 file
@@ -275,26 +317,6 @@ log_level=DEBUG                # DEBUG / INFO / WARNING / ERROR
 
 ---
 
-## Running tests
-
-Tests live in `tests/` as Jupyter notebooks:
-
-| Notebook | What it tests |
-|---|---|
-| `tests/shift/test_shift.ipynb` | B-spline shift operators |
-| `tests/chunking/test_chunking.ipynb` | `@gpu_batch` decorator |
-| `tests/holotomo3d/test.ipynb` | End-to-end holotomography reconstruction |
-
-Open a notebook and run all cells, or execute from the command line:
-
-```bash
-jupyter nbconvert --to notebook --execute tests/shift/test_shift.ipynb
-jupyter nbconvert --to notebook --execute tests/chunking/test_chunking.ipynb
-jupyter nbconvert --to notebook --execute tests/holotomo3d/test.ipynb
-```
-
----
-
 ## Package layout
 
 ```
@@ -310,19 +332,19 @@ src/holotomocupy/
     mpi_functions.py    # MPI collective helpers
     config.py           # configuration file parser
     logger_config.py    # colored MPI-aware logger
+    utils.py            # visualization helpers (mshow, mshow_complex, read_tiff, …)
 
 experimental/
     Y350a_dist1234/     # full brain dataset pipeline (steps 1–6)
+        bind.sh                      # GPU-to-rank binding (mpirun / SLURM)
+        set_affinity_gpu_polaris.sh  # GPU-to-rank binding for Polaris A100 topology
+        prun.sh                      # PBS job script for Polaris (ALCF)
     performance_tests/  # timing benchmarks
 
-polaris/
-    prun.sh                      # PBS job script for Polaris (ALCF)
-    set_affinity_gpu_polaris.sh  # GPU-to-rank binding for A100 topology
-
 tests/
-    shift/              # shift kernel tests
-    chunking/           # gpu_batch decorator tests
-    holotomo3d/         # end-to-end holotomography tests
+    test.ipynb          # end-to-end holotomography reconstruction test (interactive)
+    test.py             # same test as MPI-runnable script (mpirun -np N ./bind.sh python test.py)
+    bind.sh             # GPU-to-rank binding wrapper
 ```
 
 ---

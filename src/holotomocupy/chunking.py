@@ -2,7 +2,6 @@ import cupy as cp
 import numpy as np
 import os
 from .utils import *
-import nvtx
 
 class Chunking:
     def __init__(self, nbytes, chunk):
@@ -161,7 +160,6 @@ class Chunking:
                 *inp[proper_inp + nonproper_inp :],
             )
 
-        nvtx.push_range("pipeline processing with streams", color="yellow")
         for k in range(nchunk + 2):
             if k < nchunk:
                 with stream[k % 3]:
@@ -174,7 +172,6 @@ class Chunking:
                     g2p((k - 2) % 2, k - 2)
             for s in stream:
                 s.synchronize()
-        nvtx.pop_range()
 
     def alloc_double_buffers(self, arrs, axis, gpu_mem, offset, chunk):
         """Allocate double-buffered GPU arrays from the pre-allocated pool."""

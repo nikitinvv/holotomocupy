@@ -5,7 +5,6 @@ import tifffile
 import os
 import time
 import psutil
-import scipy as sp
 from functools import wraps
 from .logger_config import logger
 

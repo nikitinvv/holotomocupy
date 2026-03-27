@@ -3,7 +3,6 @@ import cupy as cp
 import os
 import warnings
 import pandas as pd
-import nvtx
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -130,24 +129,17 @@ class Rec:
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
             
-            nvtx.push_range("::BH:"+str(i))
                         
             # compute gradients
-            nvtx.push_range("gradients")
             self.gradients(vars, grads)      
-            nvtx.pop_range()       
                 
             # scale
             for v in ["obj", "prb", "pos"]:                
                 self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
 
-            nvtx.push_range(":::BH:fwd_tomo")                                  
             self.fwd_tomo(grads["obj"], out=proj_tmp)
-            nvtx.pop_range()
 
-            nvtx.push_range(":::BH:redist",color='red')          
             self.cl_mpi.redist(proj_tmp, grads['proj'])
-            nvtx.pop_range()
             
             if i == self.start_iter:
                 # initial search direction (negative gradient)
@@ -156,21 +148,18 @@ class Rec:
 
             else:
                 # calc beta using Hessian-weighted inner products
-                nvtx.push_range(":::BH:calc beta")
 
                 top = self.hessian(vars, grads, etas)
                 bottom = self.hessian(vars, etas, etas)
                 top, bottom = self.allreduce2(top, bottom)
                 beta = top / bottom
 
-                nvtx.pop_range()
 
                 # update search direction: eta = beta * previous_eta - grad
                 for v in ["obj", "prb", "pos","proj"]:
                     self.linear_batch(etas[v], grads[v], beta, -1)                
             
             # calc alpha (step length)            
-            nvtx.push_range(":::BH:calc_alpha")
 
             top = 0
             for v in ["obj", "pos"]:                
@@ -182,20 +171,15 @@ class Rec:
 
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
-            nvtx.pop_range()      
             
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos", "proj"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)            
             
             # error and visualization debug
-            nvtx.push_range(":::BH:calc error",color='gray')  
             self.error_debug(vars, i)
-            nvtx.pop_range()  
             
-            nvtx.push_range(":::BH:vis_debug", color='gray')
             self.vis_debug(vars, i, writer)
-            nvtx.pop_range()
                         
         # normalize back
         vars["obj"] *= self.norm_const        
@@ -208,13 +192,11 @@ class Rec:
         2. probe fit term,
         3. regularization term"""
 
-        nvtx.push_range("hessian")
 
         w = self.hessian_cascade(vars, grads, etas)
         if self.rank==0:
             w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
 
-        nvtx.pop_range()
         return w
 
     @timer
@@ -280,9 +262,7 @@ class Rec:
         
         self.gradients_cascade(vars,grads)
 
-        nvtx.push_range(":::BH:redist back",color='red')             
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
-        nvtx.pop_range() 
         
         # part2, parallelization over object slices, formally gF4  
         self.gF4(grads['obj'], self.proj_tmp)      
@@ -325,9 +305,7 @@ class Rec:
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
             gradu[:] = self.cl_tomo.RT(gradproj)        
-        nvtx.push_range("gF4",color='green')            
         _gF4(self, gradu, gradproj)      
-        nvtx.pop_range()     
 
     #### probe fit term
     @timer
@@ -389,7 +367,6 @@ class Rec:
         t = cp.abs(x) - d
         return t * t
 
-    @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
         return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
@@ -399,7 +376,6 @@ class Rec:
     def _dF0_fused(x, d):
         return x - d * (x / cp.abs(x))
 
-    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
         return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
@@ -415,7 +391,6 @@ class Rec:
             v += reprod(x - d * l0, w)
         return v
 
-    @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
         return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
@@ -426,7 +401,6 @@ class Rec:
         td = y * (x / cp.abs(x))
         return scale * (x - td)
 
-    @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
 
@@ -437,7 +411,6 @@ class Rec:
         return self._gF0_fused(x, y, np.float32(2 / self.data_size))
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
-    @nvtx.annotate("F1", color="green")
     def F1(self, x):
         """In: (x11,x12), Out: x0"""
 
@@ -449,7 +422,6 @@ class Rec:
 
         return x0
 
-    @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
         """In: (x11,x12),(y11,y12) Out: y0"""
 
@@ -467,7 +439,6 @@ class Rec:
 
         return (x0, y0) if return_x else y0
     
-    @nvtx.annotate("d2F_dF1", color="purple")
     def d2F_dF1(self, x, y, z, w):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
 
@@ -491,7 +462,6 @@ class Rec:
     
         return y0
    
-    @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
@@ -516,7 +486,6 @@ class Rec:
     def _F2_fused(x22):
         return cp.exp(1j * x22)
 
-    @nvtx.annotate("F2", color="green")
     def F2(self, x):
         """In: (x21,x22) Out: (x11,x12)"""
 
@@ -532,7 +501,6 @@ class Rec:
         y12 = x12 * 1j * y22
         return x12, y12
 
-    @nvtx.annotate("dF2", color="green")
     def dF2(self, x, y, return_x=True):
         """In: (x21,x22),(y21,y22) Out: (x11,x12),(y11,y12)"""
 
@@ -555,7 +523,6 @@ class Rec:
             y12 = y12 + cp.exp(1j * x22) * 1j * w22
         return y12
 
-    @nvtx.annotate("d2F_dF2", color="purple")
     def d2F_dF2(self, x, y, z, w):
         """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
 
@@ -574,7 +541,6 @@ class Rec:
     def _gF2_fused(x22, y12):
         return (-1j) * y12 * cp.conj(cp.exp(1j * x22))
 
-    @nvtx.annotate("gF2", color="green")
     def gF2(self, x, y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
@@ -592,7 +558,6 @@ class Rec:
         return [y21, y22]
     
     ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
-    @nvtx.annotate("F3", color="green")
     def F3(self, x):
         """In: (x31, x32, x33)  Out: (x21,x22)"""
 
@@ -606,7 +571,6 @@ class Rec:
         x21 = x31
         return [x21, x22]
 
-    @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
         """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
 
@@ -630,7 +594,6 @@ class Rec:
 
     
 
-    @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
 
@@ -655,7 +618,6 @@ class Rec:
 
         return [y21, y22]
 
-    @nvtx.annotate("gF3", color="green")
     def gF3(self, x, y):
         """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""
 

@@ -9,7 +9,7 @@ setup(
     url='https://github.com/nikitinvv/holotomocupy',
     package_dir={"": "src"},
     packages=find_packages('src'),
-    include_package_data=True,
+    package_data={'holotomocupy': ['cuda/*.cu', 'cuda/*.hpp']},
     description='Framework for constructing advanced reconstruction method in holotomography',
     zip_safe=False,
 )

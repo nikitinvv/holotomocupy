@@ -223,7 +223,7 @@ class Reader:
                 out_obj[:] = block[idx0].astype(self.obj_dtype)
 
             # --- pos: scale pixel coordinates up ---
-            pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
+            pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
         pos_up = pos * scale 
         pos_up[...,1] += 0.5 * (scale - 1)
@@ -245,7 +245,7 @@ class Reader:
         else:
             scale = None
         scale = self.comm.bcast(scale, root=0)
-
+       
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
             pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
 

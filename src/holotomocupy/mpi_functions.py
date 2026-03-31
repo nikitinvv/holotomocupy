@@ -21,15 +21,15 @@ class MPIClass:
     Cache MPI derived datatypes for repeated redistributions between:
 
       forward:
-        src: (n_dst, local_n_src, nz)  -> dst: (local_n_dst, n_src, nz)
+        src: (ntheta, local_nzobj, nobj)  -> dst: (local_ntheta, nzobj, nobj)
 
       backward:
-        src: (local_n_dst, n_src, nz) -> dst: (n_dst, local_n_src, nz)
+        src: (local_ntheta, nzobj, nobj) -> dst: (ntheta, local_nzobj, nobj)
 
     where:
-      - n_src is block-distributed (local_n_src) across ranks in the "src-slab" layout
-      - n_dst is block-distributed (local_n_dst) across ranks in the "dst-slab" layout
-      - nz is replicated everywhere
+      - nzobj is block-distributed (local_nzobj) across ranks in the "zobj-slab" layout
+      - ntheta is block-distributed (local_ntheta) across ranks in the "theta-slab" layout
+      - nobj is replicated everywhere
       - partitioning is defined by get_local_chunk()
 
     Only two lists of MPI datatypes are built (not four): forward-send and
@@ -37,21 +37,21 @@ class MPIClass:
     since the subarray layouts are identical by symmetry.
     """
 
-    def __init__(self, comm: MPI.Comm, n_src: int, n_dst: int, nz: int, dtype):
+    def __init__(self, comm: MPI.Comm, nzobj: int, ntheta: int, nobj: int, dtype):
         self.comm = comm
         self.rank = comm.Get_rank()
         self.size = comm.Get_size()
 
-        self.n_src = int(n_src)
-        self.n_dst = int(n_dst)
-        self.nz = int(nz)
+        self.nzobj = int(nzobj)
+        self.ntheta = int(ntheta)
+        self.nobj = int(nobj)
         self.dtype = np.dtype(dtype)
 
         # local slabs
-        self.st_src, self.end_src = get_local_chunk(self.n_src, self.rank, self.size)
-        self.st_dst, self.end_dst = get_local_chunk(self.n_dst, self.rank, self.size)
-        self.local_n_src = self.end_src - self.st_src
-        self.local_n_dst = self.end_dst - self.st_dst
+        self.st_obj, self.end_obj = get_local_chunk(self.nzobj, self.rank, self.size)
+        self.st_theta, self.end_theta = get_local_chunk(self.ntheta, self.rank, self.size)
+        self.local_nzobj = self.end_obj - self.st_obj
+        self.local_ntheta = self.end_theta - self.st_theta
 
         # base MPI datatype
         try:
@@ -66,54 +66,54 @@ class MPIClass:
         self.rdispls = np.zeros(self.size, dtype=np.int32)
 
         # Two type lists (forward send == backward recv, forward recv == backward send)
-        self._types_dst = None  # subarray over the n_dst axis — fwd send / bwd recv
-        self._types_src = None  # subarray over the n_src axis — fwd recv / bwd send
+        self._types_theta = None  # subarray over the ntheta axis — fwd send / bwd recv
+        self._types_zobj = None   # subarray over the nzobj axis — fwd recv / bwd send
 
         self._build_types()
 
     def _build_types(self):
-        src_shape_fwd = (self.n_dst, self.local_n_src, self.nz)
-        dst_shape_fwd = (self.local_n_dst, self.n_src, self.nz)
+        src_shape_fwd = (self.ntheta, self.local_nzobj, self.nobj)
+        dst_shape_fwd = (self.local_ntheta, self.nzobj, self.nobj)
 
-        types_dst = []
-        types_src = []
+        types_theta = []
+        types_zobj = []
 
         for p in range(self.size):
-            ds, de = get_local_chunk(self.n_dst, p, self.size)
-            ss, se = get_local_chunk(self.n_src, p, self.size)
+            ts, te = get_local_chunk(self.ntheta, p, self.size)
+            zs, ze = get_local_chunk(self.nzobj, p, self.size)
 
-            # Subarray over the n_dst axis: used as fwd-send-to-p / bwd-recv-from-p
-            t_dst = self.base.Create_subarray(
+            # Subarray over the ntheta axis: used as fwd-send-to-p / bwd-recv-from-p
+            t_theta = self.base.Create_subarray(
                 sizes=src_shape_fwd,
-                subsizes=(de - ds, self.local_n_src, self.nz),
-                starts=(ds, 0, 0),
+                subsizes=(te - ts, self.local_nzobj, self.nobj),
+                starts=(ts, 0, 0),
                 order=MPI.ORDER_C,
             )
-            t_dst.Commit()
-            types_dst.append(t_dst)
+            t_theta.Commit()
+            types_theta.append(t_theta)
 
-            # Subarray over the n_src axis: used as fwd-recv-from-p / bwd-send-to-p
-            t_src = self.base.Create_subarray(
+            # Subarray over the nzobj axis: used as fwd-recv-from-p / bwd-send-to-p
+            t_zobj = self.base.Create_subarray(
                 sizes=dst_shape_fwd,
-                subsizes=(self.local_n_dst, se - ss, self.nz),
-                starts=(0, ss, 0),
+                subsizes=(self.local_ntheta, ze - zs, self.nobj),
+                starts=(0, zs, 0),
                 order=MPI.ORDER_C,
             )
-            t_src.Commit()
-            types_src.append(t_src)
+            t_zobj.Commit()
+            types_zobj.append(t_zobj)
 
-        self._types_dst = types_dst
-        self._types_src = types_src
+        self._types_theta = types_theta
+        self._types_zobj = types_zobj
 
     def close(self):
         """Free committed MPI datatypes."""
-        for lst in (self._types_dst, self._types_src):
+        for lst in (self._types_theta, self._types_zobj):
             if lst is None:
                 continue
             for t in lst:
                 t.Free()
-        self._types_dst = None
-        self._types_src = None
+        self._types_theta = None
+        self._types_zobj = None
 
     def __del__(self):
         # best-effort cleanup; explicit close() is preferred.
@@ -126,34 +126,34 @@ class MPIClass:
 
     def forward(self, src: np.ndarray, dst: np.ndarray):
         """
-        src: (n_dst, local_n_src, nz) -> dst: (local_n_dst, n_src, nz)
+        src: (ntheta, local_nzobj, nobj) -> dst: (local_ntheta, nzobj, nobj)
         """
         if src.dtype != self.dtype or dst.dtype != self.dtype:
             raise ValueError("dtype mismatch")
-        if src.shape != (self.n_dst, self.local_n_src, self.nz):
-            raise ValueError(f"src.shape={src.shape} expected {(self.n_dst, self.local_n_src, self.nz)}")
-        if dst.shape != (self.local_n_dst, self.n_src, self.nz):
-            raise ValueError(f"dst.shape={dst.shape} expected {(self.local_n_dst, self.n_src, self.nz)}")
+        if src.shape != (self.ntheta, self.local_nzobj, self.nobj):
+            raise ValueError(f"src.shape={src.shape} expected {(self.ntheta, self.local_nzobj, self.nobj)}")
+        if dst.shape != (self.local_ntheta, self.nzobj, self.nobj):
+            raise ValueError(f"dst.shape={dst.shape} expected {(self.local_ntheta, self.nzobj, self.nobj)}")
 
         self.comm.Alltoallw(
-            [src, self.sendcounts, self.sdispls, self._types_dst],
-            [dst, self.recvcounts, self.rdispls, self._types_src],
+            [src, self.sendcounts, self.sdispls, self._types_theta],
+            [dst, self.recvcounts, self.rdispls, self._types_zobj],
         )
 
     def backward(self, src: np.ndarray, dst: np.ndarray):
         """
-        src: (local_n_dst, n_src, nz) -> dst: (n_dst, local_n_src, nz)
+        src: (local_ntheta, nzobj, nobj) -> dst: (ntheta, local_nzobj, nobj)
         """
         if src.dtype != self.dtype or dst.dtype != self.dtype:
             raise ValueError("dtype mismatch")
-        if src.shape != (self.local_n_dst, self.n_src, self.nz):
-            raise ValueError(f"src.shape={src.shape} expected {(self.local_n_dst, self.n_src, self.nz)}")
-        if dst.shape != (self.n_dst, self.local_n_src, self.nz):
-            raise ValueError(f"dst.shape={dst.shape} expected {(self.n_dst, self.local_n_src, self.nz)}")
+        if src.shape != (self.local_ntheta, self.nzobj, self.nobj):
+            raise ValueError(f"src.shape={src.shape} expected {(self.local_ntheta, self.nzobj, self.nobj)}")
+        if dst.shape != (self.ntheta, self.local_nzobj, self.nobj):
+            raise ValueError(f"dst.shape={dst.shape} expected {(self.ntheta, self.local_nzobj, self.nobj)}")
 
         self.comm.Alltoallw(
-            [src, self.sendcounts, self.sdispls, self._types_src],
-            [dst, self.recvcounts, self.rdispls, self._types_dst],
+            [src, self.sendcounts, self.sdispls, self._types_zobj],
+            [dst, self.recvcounts, self.rdispls, self._types_theta],
         )
 
     @timer
@@ -167,7 +167,7 @@ class MPIClass:
     @timer
     def allreduce(self, arr):
         return self.comm.allreduce(arr, op=MPI.SUM)
-    
+
     @timer
     def allreduce2(self, a, b):
         """Sum-reduce two scalars across ranks in a single MPI call."""

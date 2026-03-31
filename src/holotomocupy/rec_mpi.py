@@ -39,13 +39,13 @@ class Rec:
 
         ### multinode processing
         self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
-        self.local_nzobj = self.cl_mpi.local_n_src
-        self.local_ntheta = self.cl_mpi.local_n_dst
+        self.local_nzobj = self.cl_mpi.local_nzobj
+        self.local_ntheta = self.cl_mpi.local_ntheta
         self.rank      = self.cl_mpi.rank
-        self.st_obj    = self.cl_mpi.st_src
-        self.end_obj   = self.cl_mpi.end_src
-        self.st_theta  = self.cl_mpi.st_dst
-        self.end_theta = self.cl_mpi.end_dst
+        self.st_obj    = self.cl_mpi.st_obj
+        self.end_obj   = self.cl_mpi.end_obj
+        self.st_theta  = self.cl_mpi.st_theta
+        self.end_theta = self.cl_mpi.end_theta
 
         # X-ray propagation and magnification parameters for classes
         wavelength = 1.24e-09 / self.energy

@@ -37,15 +37,15 @@ cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
 # --- Build I/O helpers --------------------------------------------------
 reader = Reader(
     args.in_file, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
 )
 writer = Writer(
     args.path_out, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
 )
 

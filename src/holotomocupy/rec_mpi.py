@@ -85,6 +85,7 @@ class Rec:
         self.gpu_batch = self.cl_chunking.gpu_batch
         self.redot_batch = self.cl_chunking.redot_batch
         self.linear_batch = self.cl_chunking.linear_batch
+        self.linear_redot_batch = self.cl_chunking.linear_redot_batch
         self.mulc_batch = self.cl_chunking.mulc_batch
         self.redist = self.cl_mpi.redist
         self.allreduce  = self.cl_mpi.allreduce
@@ -142,11 +143,7 @@ class Rec:
             nvtx.push_range("gradients")
             self.gradients(vars, grads)      
             nvtx.pop_range()       
-                
-            # scale
-            for v in ["obj", "prb", "pos"]:                
-                self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
-
+                                        
             nvtx.push_range(":::BH:fwd_tomo")                                  
             self.fwd_tomo(grads["obj"], out=proj_tmp)
             nvtx.pop_range()
@@ -157,8 +154,7 @@ class Rec:
             
             if i == self.start_iter:
                 # initial search direction (negative gradient)
-                for v in ["obj", "prb", "pos", "proj"]:
-                    self.mulc_batch(etas[v], grads[v], -1)
+                beta = 0
 
             else:
                 # calc beta using Hessian-weighted inner products
@@ -171,18 +167,20 @@ class Rec:
 
                 nvtx.pop_range()
 
-                # update search direction: eta = beta * previous_eta - grad
-                for v in ["obj", "prb", "pos","proj"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)                
-            
-            # calc alpha (step length)            
+            # update search direction and accumulate top for alpha in one pass
             nvtx.push_range(":::BH:calc_alpha")
 
             top = 0
-            for v in ["obj", "pos"]:                
-                top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+            for v in ["obj", "pos"]:
+                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
+            
+            # probe is shared
+            dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
             if self.rank == 0:
-                top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
+                top -= dot_prb / self.rho_sq['prb']
+            
+            # also update proj
+            self.linear_batch(etas['proj'], grads['proj'], beta, -1)
 
             bottom = self.hessian(vars, etas, etas)
 
@@ -320,9 +318,10 @@ class Rec:
             # compute gradient by applying operators in forward order
             for id in range(len(self.gF)):  #last one computed separately because of different chunking
                 y = self.gF[id](x,y)                           
-            gradprb[:] += y[0]
-            gradproj[:] = y[1]
-            gradpos[:] = y[2]
+            # move variable scaling here to avoid additional data transfers
+            gradprb[:] += y[0]*self.rho_sq['prb']
+            gradproj[:] = y[1]*self.rho_sq['obj']
+            gradpos[:] = y[2]*self.rho_sq['pos']
 
         _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],self.data,vars["proj"],vars["pos"],vars["prb"])
         
@@ -346,7 +345,9 @@ class Rec:
         for j in range(self.ndist):
             tmp = self.cl_prop.D(prb[j : j + 1], j)
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
-            grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
+            td = self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
+            # scaling moved here here
+            grad_prb[j : j + 1] += td*self.rho_sq['prb']                
         
     @timer
     def hessian_prbfit(self, prb, dprb1, dprb2):
@@ -682,6 +683,8 @@ class Rec:
         y32[:] = self.cl_shift.coeff(y32)
 
         y31 = y21
+
+        
         return [y31, y32, y33]         
 
     @timer

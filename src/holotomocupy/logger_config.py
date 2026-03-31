@@ -1,4 +1,5 @@
 # logger_config.py
+import sys
 import logging
 from mpi4py import MPI
 
@@ -26,7 +27,7 @@ class ColorMessageFormatter(logging.Formatter):
         record.msg_colored = f"{color}{record.getMessage()}{RESET}"
         return super().format(record)
 
-handler = logging.StreamHandler()
+handler = logging.StreamHandler(sys.stdout)
 handler.addFilter(MPIRankFilter())
 handler.setFormatter(ColorMessageFormatter(
     fmt="%(asctime)s [rank=%(rank)d] %(msg_colored)s",

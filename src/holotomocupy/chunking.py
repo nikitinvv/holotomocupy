@@ -235,6 +235,22 @@ class Chunking:
         _linear(self, out, x, y, a, b)
     
     @timer
+    def linear_redot_batch(self, x, y, a, b):
+        """x = ax + by, returns Re<y, x_new> in one pass"""
+        if isinstance(x, cp.ndarray):
+            x[:] = a * x + b * y
+            return redot(y, x).get()
+        res = cp.zeros(1, dtype="float32")
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=2)
+        def _linear_redot(self, out, res, x, y, a, b):
+            out[:] = a * x + b * y
+            res[:] += redot(y, out)
+
+        _linear_redot(self, x, res, x, y, a, b)
+        return res[0].get()
+
+    @timer
     def mulc_batch(self, out, x, a):
         """out = ax"""
         if isinstance(x, cp.ndarray):

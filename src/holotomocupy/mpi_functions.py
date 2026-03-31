@@ -166,7 +166,8 @@ class MPIClass:
             raise ValueError("direction must be 'forward' or 'backward'")
     @timer
     def allreduce(self, arr):
-        return self.comm.allreduce(arr, op=MPI.SUM)
+        self.comm.Allreduce(MPI.IN_PLACE, arr, op=MPI.SUM)
+        return arr
 
     @timer
     def allreduce2(self, a, b):

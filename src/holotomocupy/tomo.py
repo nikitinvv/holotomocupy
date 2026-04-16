@@ -122,7 +122,7 @@ class Tomo:
         """
         n  = self.n
         f  = cp.fft.fftfreq(n).astype('float32')   # f in [-0.5, 0.5)
-        af = cp.abs(f)
+        af = cp.abs(f)*4*n
 
         if filter_name == 'ramp':
             # Ram-Lak: |ω|

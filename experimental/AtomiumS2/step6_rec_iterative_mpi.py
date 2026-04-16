@@ -84,7 +84,6 @@ else:
 if args.pos_checkpoint:
     logger.info(f"Overriding positions from: {args.pos_checkpoint}")
     reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
-
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")
 vars = cl.BH(writer)

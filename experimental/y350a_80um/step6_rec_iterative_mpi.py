@@ -15,7 +15,7 @@ run resumes automatically from the latest saved iteration.
 
 import sys
 from mpi4py import MPI
-from holotomocupy.rec_mpi_tests import Rec
+from holotomocupy.rec_mpi import Rec
 from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.reader import Reader, find_latest_checkpoint
@@ -50,7 +50,7 @@ writer = Writer(
 )
 
 # Physics parameters are stored in the HDF5 file and forwarded to the solver
-args.energy                  = reader.energy
+args.energy                  = args.energy#reader.energy
 args.focustodetectordistance = reader.focustodetectordistance
 args.z1                      = reader.z1
 args.detector_pixelsize      = reader.detector_pixelsize
@@ -70,16 +70,20 @@ reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
 
 # --- Load initial variables (object, probe, positions) ------------------
+# Resume from the latest checkpoint if one exists; otherwise use the
+# Paganin reconstruction from Step 5 as the starting object.
 logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
-    logger.info(f"Loading checkpoint: {ckpt}")
-    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_prb=cl.vars['prb'], out_pos=cl.vars['pos'])
+    logger.info(f"Resuming from checkpoint: {ckpt}")
+    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
 else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])
     reader.read_prb(out=cl.vars['prb'])
-
+if args.pos_checkpoint:
+    logger.info(f"Overriding positions from: {args.pos_checkpoint}")
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")
 vars = cl.BH(writer)

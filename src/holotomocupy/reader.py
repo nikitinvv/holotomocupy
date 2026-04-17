@@ -68,7 +68,12 @@ class Reader:
 
     def read_obj(self, out=None):
         """Read initial object guess for this rank's z-slice into out."""
-        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
+        # obj_init may be in a separate _obj.h5 file (written there by step 5
+        # to avoid the ~16 TiB Lustre per-file size limit).
+        obj_file = self.in_file.replace('.h5', '_obj.h5')
+        if not os.path.exists(obj_file):
+            obj_file = self.in_file
+        with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
             obj_ds = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
             nzobj0, nobj0 = obj_ds.shape[:2]
             stz  = nzobj0 // 2 - self.nzobj // 2

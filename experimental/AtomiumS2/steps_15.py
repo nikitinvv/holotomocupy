@@ -717,18 +717,27 @@ else:
         global_bg = float(np.median(all_bgs))
         local_recPag -= global_bg
 
-        # --- Save Paganin projections (theta-distributed parallel write) ---
+        # --- Save Paganin projections to separate file (avoids 16 TiB Lustre limit) ---
         _proj_key = f'/exchange/proj_bin{bin}'
+        fpath_proj = fpath.replace('.h5', '_proj.h5')
         if rank == 0:
-            with h5py.File(fpath, 'a') as fid:
-                if _proj_key in fid:
-                    del fid[_proj_key]
+            if not os.path.exists(fpath_proj):
+                with h5py.File(fpath_proj, 'w') as _f:
+                    pass
+            else:
+                with h5py.File(fpath_proj, 'a') as fid:
+                    if _proj_key in fid:
+                        del fid[_proj_key]
         comm.Barrier()
-        with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
+        with h5py.File(fpath_proj, 'a', driver='mpio', comm=comm) as fid:
             proj_ds = fid.create_dataset(_proj_key,
                                          shape=(ntheta, nobj_bin, nobj_bin), dtype='float32')
-            proj_ds[local_start:local_end] = local_recPag
-        logger.debug(f'step5 bin={bin}: saved {_proj_key}')
+            # Batch to stay under the 2^31-byte MPI-IO transfer limit
+            _wbatch = max(1, (1 << 28) // (nobj_bin * nobj_bin * 4))
+            for _i0 in range(0, local_end - local_start, _wbatch):
+                _i1 = min(_i0 + _wbatch, local_end - local_start)
+                proj_ds[local_start + _i0 : local_start + _i1] = local_recPag[_i0:_i1]
+        logger.debug(f'step5 bin={bin}: saved {_proj_key} → {fpath_proj}')
 
         # --- Redistribute: theta-distributed → z-distributed via MPIClass.redist ---
         # backward: (local_ntheta, nzobj, nobj) → (ntheta, local_nzobj, nobj)
@@ -776,22 +785,34 @@ else:
         del psi_z_c, _psi_z_c_buf  # noqa: F821
 
         # --- Delete stale datasets (rank 0), then parallel write ---
+        # obj_init is written to a separate file to avoid the ~16 TiB Lustre
+        # per-file limit: the main h5 already exceeds 14 TB by this point.
         paganin_tag = int(paganin) if paganin == int(paganin) else paganin
+        fpath_obj = fpath.replace('.h5', '_obj.h5')
         if rank == 0:
-            with h5py.File(fpath, 'a') as fid:
-                for key in [f'/exchange/obj_init_re{paganin_tag}_{bin}',
-                            f'/exchange/obj_init_imag{paganin_tag}_{bin}']:
-                    if key in fid:
-                        del fid[key]
+            if not os.path.exists(fpath_obj):
+                # create empty file so all ranks can open it with driver='mpio'
+                with h5py.File(fpath_obj, 'w') as _f:
+                    pass
+            else:
+                with h5py.File(fpath_obj, 'a') as fid:
+                    for key in [f'/exchange/obj_init_re{paganin_tag}_{bin}',
+                                f'/exchange/obj_init_imag{paganin_tag}_{bin}']:
+                        if key in fid:
+                            del fid[key]
         comm.Barrier()
 
-        with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
+        # Batch writes to stay under the 2^31-byte MPI-IO transfer limit
+        _wbatch = max(1, (1 << 28) // (nobj_bin * nobj_bin * 4))
+        with h5py.File(fpath_obj, 'a', driver='mpio', comm=comm) as fid:
             re_ds = fid.create_dataset(f'/exchange/obj_init_re{paganin_tag}_{bin}',
                                        shape=(nobj_bin, nobj_bin, nobj_bin), dtype='float32')
             im_ds = fid.create_dataset(f'/exchange/obj_init_imag{paganin_tag}_{bin}',
                                        shape=(nobj_bin, nobj_bin, nobj_bin), dtype='float32')
-            re_ds[z_start:z_end] = rec_loc.real
-            im_ds[z_start:z_end] = rec_loc.imag
+            for _i0 in range(0, local_nz, _wbatch):
+                _i1 = min(_i0 + _wbatch, local_nz)
+                re_ds[z_start + _i0 : z_start + _i1] = rec_loc[_i0:_i1].real
+                im_ds[z_start + _i0 : z_start + _i1] = rec_loc[_i0:_i1].imag
         del rec_loc, _rec_loc_buf  # noqa: F821
 
         if rank == 0:

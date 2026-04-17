@@ -47,6 +47,8 @@ parser.add_argument('--paganin', type=float, default=120.0,
                     help='delta/beta ratio for multi-distance Paganin phase retrieval (step 5)')
 parser.add_argument('--nchunk', type=int, default=16,
                     help='Number of z-slices per GPU chunk in the FBP (step 5)')
+parser.add_argument('--ref-dist', type=int, default=0,
+                    help='Reference distance index used for motion-shift baseline (step 3)')
 parser.add_argument('--log-level', type=str, default='INFO',
                     choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                     help='Logging verbosity level')
@@ -56,6 +58,7 @@ rotation_center_shift = args.rotation_center_shift
 nlevels = args.nlevels
 paganin = args.paganin
 nchunk  = args.nchunk
+ref_dist = args.ref_dist
 set_log_level(args.log_level)
 
 # Derive path and pfile from the positional scan-prefix argument
@@ -423,17 +426,22 @@ if rank == 0:
         rhapp_shifts = (-rhapp_raw.swapaxes(0, 2)[:ntheta]).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
-        _motion_path = f'{dname0}/correct_motion.txt'
+        _motion_dname = f'{path}/{pfile}_{ref_dist+1}_'
+        _motion_path = f'{_motion_dname}/correct_motion.txt'
         logger.info(f'Step 3: reading motion      from {_motion_path}')
         raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-        motion_base   = raw_motion / norm_magnifications[0] - random_shifts[:, 0]
+        motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
         motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
         _c3d_path = f'{path}/{pfile}_/correct_correct3D.txt'
-        logger.info(f'Step 3: reading correct3D   from {_c3d_path}')
-        raw_3d = np.loadtxt(_c3d_path)[:ntheta, ::-1].astype('float32')
-        correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
+        if os.path.exists(_c3d_path):
+            logger.info(f'Step 3: reading correct3D   from {_c3d_path}')
+            raw_3d = np.loadtxt(_c3d_path)[:ntheta, ::-1].astype('float32')
+            correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
+        else:
+            logger.info(f'Step 3: correct3D file not found, using zeros: {_c3d_path}')
+            correct3d_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
 
         # --- Sum all sources and save ---
         shifts_final = random_shifts + rhapp_shifts + motion_shifts + correct3d_shifts

@@ -37,7 +37,8 @@ def extract_tiff_stack(path_out, out_file=None):
 
     slices = []
     iters  = []
-    for ckpt in checkpoints[:40]:
+    for ckpt in checkpoints[:100]:
+        print(ckpt)
         with h5py.File(ckpt, 'r') as f:
             slices.append(f['obj_re'][mid].astype('float32'))
             iters.append(int(f.attrs.get('iter', -1)))

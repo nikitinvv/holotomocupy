@@ -94,9 +94,16 @@ class Rec:
     def alloc_arrays(self):
         """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
         prb_shape = [self.ndist, self.nz, self.n]
+        # pre-allocated padded buffers for 3-D biharmonic regularization.
+        # u_pad[2:-2] IS vars['obj'];  e_pad[2:-2] IS etas['obj'].
+        # 2 ghost rows on each side let us compute (∇²)² in a single 5-slice pass.
+        self.u_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype=self.obj_dtype)
+        self.e_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype=self.obj_dtype)
+        self.u_pad[:] = 0
+        self.e_pad[:] = 0
         # reconstruction variables
         self.vars = {
-            'obj':  make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype),
+            'obj':  self.u_pad[2:-2],                                        # view — lives in u_pad
             'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
             'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
@@ -111,6 +118,7 @@ class Rec:
             ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
+        self.etas["obj"] = self.e_pad[2:-2]                                  # view — lives in e_pad
         self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
     def BH(self, writer=None):
@@ -217,6 +225,7 @@ class Rec:
         w = self.hessian_cascade(vars, grads, etas)
         if self.rank==0:
             w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
+        w += self.hessian_laplacian(grads["obj"])
 
         nvtx.pop_range()
         return w
@@ -288,8 +297,9 @@ class Rec:
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
         nvtx.pop_range() 
         
-        # part2, parallelization over object slices, formally gF4  
-        self.gF4(grads['obj'], self.proj_tmp)      
+        # part2, parallelization over object slices, formally gF4
+        self.gF4(grads['obj'], self.proj_tmp)
+        self.gradient_laplacian(grads['obj'])
 
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
@@ -369,6 +379,104 @@ class Rec:
             out += 2 * (v1 + v2)
         out = self.lam_prbfit * out / self.prb_size
         return out.get()### copy to cpu
+
+    #### 3-D Laplacian regularization
+
+    def _exchange_ghosts(self, pad):
+        """Fill pad[0:2] and pad[-2:] from neighbouring ranks (pad[2:-2] is the data).
+        2 ghost rows on each side are needed for the single-pass biharmonic (∇²)².
+        Zeroes ghost cells at the global domain boundary (no neighbour = zero padding).
+        """
+        left  = self.rank - 1 if self.rank > 0                      else MPI.PROC_NULL
+        right = self.rank + 1 if self.rank < self.cl_mpi.size - 1   else MPI.PROC_NULL
+        self.cl_mpi.comm.Sendrecv(
+            sendbuf=np.ascontiguousarray(pad[-4:-2]), dest=right,
+            recvbuf=pad[0:2], source=left)
+        self.cl_mpi.comm.Sendrecv(
+            sendbuf=np.ascontiguousarray(pad[2:4]),   dest=left,
+            recvbuf=pad[-2:], source=right)
+        if left  == MPI.PROC_NULL: pad[0:2]  = 0
+        if right == MPI.PROC_NULL: pad[-2:]  = 0
+
+    @timer
+    def gradient_laplacian(self, grad_obj):
+        """Add 2*lam/obj_size * (∇²)²u to grad_obj in-place (energy = lam/N * ||∇²u||²).
+        u_pad (size local_nzobj+4) is transferred as a single padded proper input:
+        each chunk gets chunk+4 rows so the kernel can compute (∇²)² without extra views.
+        """
+        if self.lam_laplacian == 0:
+            return
+        scale = np.float32(2.0 * self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.u_pad)
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_grad(self, g, u_pad_chunk, g_in):
+            # u_pad_chunk: [n+4, nobj, nobj]; g, g_in: [n, nobj, nobj]
+            def _lap(a, b, c):
+                return (a + c
+                        + cp.roll(b, -1, axis=1) + cp.roll(b,  1, axis=1)
+                        + cp.roll(b, -1, axis=2) + cp.roll(b,  1, axis=2)
+                        - 6 * b)
+            lap_zm1 = _lap(u_pad_chunk[:-4], u_pad_chunk[1:-3], u_pad_chunk[2:-2])
+            lap_z   = _lap(u_pad_chunk[1:-3], u_pad_chunk[2:-2], u_pad_chunk[3:-1])
+            lap_zp1 = _lap(u_pad_chunk[2:-2], u_pad_chunk[3:-1], u_pad_chunk[4:])
+            g[:] = g_in + scale * _lap(lap_zm1, lap_z, lap_zp1)
+
+        _biharm_grad(self, grad_obj, self.u_pad, grad_obj)
+
+    @timer
+    def hessian_laplacian(self, dobj1):
+        """2*lam/obj_size * Re<dobj1, (∇²)²e>, e = self.e_pad[2:-2] = etas['obj'].
+        e_pad (size local_nzobj+4) transferred as single padded proper input (inp_pad=4).
+        Allreduced over MPI ranks.
+        """
+        if self.lam_laplacian == 0:
+            return 0
+        scale = np.float32(2.0 * self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.e_pad)
+        acc = cp.zeros(1, dtype='float32')
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_dot(self, acc, e_pad_chunk, d1):
+            # e_pad_chunk: [n+4, nobj, nobj]; d1: [n, nobj, nobj]
+            def _lap(a, b, c):
+                return (a + c
+                        + cp.roll(b, -1, axis=1) + cp.roll(b,  1, axis=1)
+                        + cp.roll(b, -1, axis=2) + cp.roll(b,  1, axis=2)
+                        - 6 * b)
+            lap_zm1 = _lap(e_pad_chunk[:-4], e_pad_chunk[1:-3], e_pad_chunk[2:-2])
+            lap_z   = _lap(e_pad_chunk[1:-3], e_pad_chunk[2:-2], e_pad_chunk[3:-1])
+            lap_zp1 = _lap(e_pad_chunk[2:-2], e_pad_chunk[3:-1], e_pad_chunk[4:])
+            acc[:] += redot(d1, _lap(lap_zm1, lap_z, lap_zp1))
+
+        _biharm_dot(self, acc, self.e_pad, dobj1)
+        return float(self.allreduce(np.array(scale * float(acc[0]), dtype='float32')))
+
+    def _lap_energy_local(self):
+        """Local biharmonic energy (lam/obj_size)*||∇²u||² = (lam/obj_size)*Re<∇²u,∇²u>.
+        Only first Laplacian needed; 3 proper z-slice views of u_pad (each size local_nzobj).
+        u = self.u_pad[2:-2] = vars['obj']. No allreduce.
+        """
+        if self.lam_laplacian == 0:
+            return np.float32(0)
+        scale = np.float32(self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.u_pad)
+        acc = cp.zeros(1, dtype='float32')
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_e(self, acc, u_pad_chunk):
+            # u_pad_chunk: [n+4, nobj, nobj]; only first Laplacian needed for energy
+            u_zm1 = u_pad_chunk[1:-3]
+            u_z   = u_pad_chunk[2:-2]
+            u_zp1 = u_pad_chunk[3:-1]
+            lap = (u_zm1 + u_zp1
+                   + cp.roll(u_z, -1, axis=1) + cp.roll(u_z,  1, axis=1)
+                   + cp.roll(u_z, -1, axis=2) + cp.roll(u_z,  1, axis=2)
+                   - 6 * u_z)
+            acc[:] += redot(lap, lap)
+
+        _biharm_e(self, acc, self.u_pad)
+        return scale * float(acc[0])
 
     @timer
     def fwd_tomo(self, obj, out):
@@ -707,7 +815,7 @@ class Rec:
             for j in range(self.ndist):
                 Dprb = self.cl_prop.D(prb[j : j + 1], j)[0]
                 out += self.lam_prbfit / self.prb_size * cp.linalg.norm(cp.abs(Dprb) - self.ref[j]) ** 2
-        return self.allreduce(out.get())
+        return self.allreduce(np.array(out.get() + self._lap_energy_local(), dtype='float32'))
 
     def vis_debug(self, vars, i,writer=None):
         """Save reconstruction checkpoint to HDF5."""

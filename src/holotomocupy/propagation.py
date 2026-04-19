@@ -1,5 +1,6 @@
 import math
 import cupy as cp
+import cupyx.scipy.fft as cufft
 from .cuda_kernels import pad_fwd_kernel, pad_adj_kernel
 try:
     from .conv2d_cufftdx import Conv2DCUFFTDX, CUFFTDX_AVAILABLE
@@ -22,11 +23,9 @@ class Propagation:
         f2 = fx ** 2 + fy ** 2  # hoisted outside the distance loop
 
         norm = float(4 * n * nz)
-        self.fker      = cp.empty([ndist, 2 * nz, 2 * n], dtype="complex64")
-        self.fker_conj = cp.empty([ndist, 2 * nz, 2 * n], dtype="complex64")
+        self.fker = cp.empty([ndist, 2 * nz, 2 * n], dtype="complex64")
         for j in range(ndist):
-            self.fker[j]      = cp.exp(-1j * cp.pi * wavelength * distance[j] * f2) / norm
-            self.fker_conj[j] = self.fker[j].conj()
+            self.fker[j] = cp.exp(-1j * cp.pi * wavelength * distance[j] * f2) / norm
 
         # Pre-allocated work buffers (avoid per-call allocation)
         self._buf_big   = cp.empty([ntheta, 2 * nz, 2 * n], dtype="complex64")
@@ -78,7 +77,9 @@ class Propagation:
         if self._use_cufftdx:
             self._conv2d.run(ff, self.fker[j], ff)
         else:
-            ff[:] = cp.fft.ifft2(cp.fft.fft2(ff) * self.fker[j], norm="forward")
+            cufft.fft2(ff, overwrite_x=True)
+            ff *= self.fker[j]
+            cufft.ifft2(ff, overwrite_x=True, norm="forward")
         big_psi = ff[:, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2].copy()
 
         return big_psi[0] if added_dim else big_psi
@@ -93,9 +94,11 @@ class Propagation:
         ff.fill(0)
         ff[:, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2] = big_psi
         if self._use_cufftdx:
-            self._conv2d.run(ff, self.fker_conj[j], ff)
+            self._conv2d.run(ff, self.fker[j].conj(), ff)
         else:
-            ff[:] = cp.fft.ifft2(cp.fft.fft2(ff) * self.fker_conj[j], norm="forward")
+            cufft.fft2(ff, overwrite_x=True)
+            ff *= self.fker[j].conj()
+            cufft.ifft2(ff, overwrite_x=True, norm="forward")
 
         psi = cp.zeros_like(big_psi)
         self._adj_pad(ff, psi)

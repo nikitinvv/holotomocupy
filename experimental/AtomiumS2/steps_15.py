@@ -13,8 +13,10 @@ Launch with:
 """
 
 import argparse
+import logging
 import h5py
 import fabio
+logging.getLogger('fabio').setLevel(logging.ERROR)
 import glob
 import json
 import os
@@ -253,11 +255,28 @@ else:
                 for id in range(ndark):
                     dark_ds[k][id]   = fabio.open(f'{dname}/darkend{id:04}.edf').data[sty:endy, stx:endx]
 
-            for id in local_ids:
+            norms = np.empty(len(local_ids), dtype='float64')
+            for ii, id in enumerate(local_ids):
                 fname = f'{dname}/{pfile}_{k + 1}_{id:04}.edf'
-                data_ds[k][id] = fabio.open(fname).data[sty:endy, stx:endx]
-                if id % 100 == 0:
-                    logger.debug(f'step1: proj {int(id):4d}/{ntheta}, dist {k+1}/{ndist}')
+                frame = fabio.open(fname).data[sty:endy, stx:endx]
+                data_ds[k][id] = frame
+                norms[ii] = np.linalg.norm(frame)
+                logger.info(f'step1: proj {int(id):4d}/{ntheta}, dist {k+1}/{ndist}, norm={norms[ii]:.3e}')
+
+            ref_norm = np.median(norms)
+            for ii, id in enumerate(local_ids):
+                if norms[ii] < ref_norm / 10:
+                    logger.warning(f'step1: broken frame proj={int(id)} dist={k+1}  norm={norms[ii]:.3e}  median={ref_norm:.3e}')
+                    prev_id = local_ids[ii - 1] if ii > 0 else None
+                    next_id = local_ids[ii + 1] if ii < len(local_ids) - 1 else None
+                    if prev_id is not None and next_id is not None:
+                        rep = 0.5 * (data_ds[k][prev_id].astype('float32') +
+                                     data_ds[k][next_id].astype('float32'))
+                    elif prev_id is not None:
+                        rep = data_ds[k][prev_id].astype('float32')
+                    else:
+                        rep = data_ds[k][next_id].astype('float32')
+                    data_ds[k][id] = np.round(rep).astype(data_ds[k].dtype)
 
     comm.Barrier()
     logger.info('Step 1: done.')
@@ -273,7 +292,7 @@ if start_step > 2:
 else:
     logger.info('Step 2: preprocessing...')
 
-    radius     = 3
+    radius     = 9
     threshold  = 0.9
     chunk_size = 16
 
@@ -295,7 +314,8 @@ else:
         ref  = np.mean(ref0,     axis=0).astype('float32')   # [ndist, n, n]
 
         ref_gpu  = cp.array(ref) - cp.array(dark)
-        ref_gpu[ref_gpu < 0] = 0
+        ref_gpu[ref_gpu < 0] = 1e-3
+        ref_gpu[:, 1402:1430, 844:872] = ref_gpu.mean(axis=(1, 2), keepdims=True)
         ref_gpu[:] = remove_outliers(ref_gpu, radius, threshold)
         ref = ref_gpu.get()
     else:
@@ -353,13 +373,29 @@ else:
                 data = cp.array(fid[f'/exchange/data{k}'][j:end].astype('float32'))
                 data -= dark_gpu[k]
                 data[data < 0] = 0
+                data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True)
                 data[:] = remove_outliers(data, radius, threshold)
-                data *= mean_data_ref[k] / data.mean(axis=(1, 2), keepdims=True)
+                _mean = data.mean(axis=(1, 2), keepdims=True)
+                _mean[_mean == 0] = 1  # dark/blocked projections: keep as-is, avoid NaN
+                data *= mean_data_ref[k] / _mean
+                data[~cp.isfinite(data)] = 1
 
                 pdata_ds[k][j:end] = data.get()
 
                 if j % 100 == 0:
                     logger.debug(f'step2: proj {j:4d}/{ntheta}, dist {k+1}/{ndist}, mean={float(data[0].mean()):.4f}')
+
+    # Print per-rank norm of pdata (accumulated over all distances and local projections)
+    with h5py.File(fpath, 'r', driver='mpio', comm=comm) as fid:
+        _norm_sq = 0.0
+        _rbatch = max(1, (1 << 28) // (n * n))
+        for k in range(ndist):
+            ds = fid[f'/exchange/pdata{k}']
+            for _i0 in range(local_start, local_end, _rbatch):
+                _i1 = min(_i0 + _rbatch, local_end)
+                _chunk = cp.array(ds[_i0:_i1])
+                _norm_sq += float(cp.linalg.norm(_chunk)**2)
+    logger.info(f'step2: rank {rank:4d}  pdata norm = {_norm_sq**0.5:.6e}')
 
     logger.info('Step 2: done.')
 
@@ -701,7 +737,7 @@ else:
 
                 # Paganin phase retrieval
                 pj  = cp.array(srdata)          # [ndist, nobj_bin, nobj_bin]
-                mm  = float(pj[:, :32 * n_bin // 512].mean())
+                mm  = float(pj[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
                 pj  = cp.pad(pj, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
                              'constant', constant_values=mm)
                 phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 1e-5)
@@ -711,11 +747,12 @@ else:
                     logger.debug(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')
 
         # --- Background subtraction (approx global median via Allgather) ---
-        local_bg = np.float32(np.median(local_recPag[:, :, :16 * n_bin // 512]))
+        local_bg = np.float32(np.median(local_recPag[:, :, :16 * n_bin // 512, :16 * n_bin // 512]))
         all_bgs  = np.empty(size, dtype='float32')
         comm.Allgather(np.array([local_bg], dtype='float32'), all_bgs)
         global_bg = float(np.median(all_bgs))
         local_recPag -= global_bg
+        logger.info(f'step5 bin={bin}: rank {rank:4d}  paganin norm = {np.linalg.norm(local_recPag):.6e}')
 
         # --- Save Paganin projections to separate file (avoids 16 TiB Lustre limit) ---
         _proj_key = f'/exchange/proj_bin{bin}'
@@ -782,6 +819,7 @@ else:
         logger.info(f'step5 bin={bin}: FBP start, local_nz={local_nz}, nobj_bin={nobj_bin}')
         _fbp(cl, rec_loc, psi_z_c)
         logger.info(f'step5 bin={bin}: FBP done')
+        logger.info(f'step5 bin={bin}: rank {rank:4d}  fbp norm = {np.linalg.norm(rec_loc):.6e}')
         del psi_z_c, _psi_z_c_buf  # noqa: F821
 
         # --- Delete stale datasets (rank 0), then parallel write ---

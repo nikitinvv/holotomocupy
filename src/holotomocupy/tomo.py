@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import cupy as cp
+import cupyx.scipy.fft as cufft
 from .cuda_kernels import gather_kernel
 from .utils import redot, logger
 
@@ -60,7 +61,7 @@ class Tomo:
         cp.multiply(obj, phi, out=fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2])
         # STEP1: 2D FFT
         fde *= c2dfftshift
-        fde[:] = cp.fft.fft2(fde)
+        cufft.fft2(fde, overwrite_x=True)
         fde *= c2dfftshift
         # STEP2: NUFFT gather (Cartesian -> polar)
         gather_kernel(
@@ -70,7 +71,7 @@ class Tomo:
         )
         # STEP3: 1D IFFT along detector axis
         sino *= c1dfftshift
-        sino[:] = cp.fft.ifft(sino)
+        cufft.ifft(sino, overwrite_x=True)
         sino *= c1dfftshift
         # STEP4: normalization
         sino /= 4
@@ -87,7 +88,7 @@ class Tomo:
 
         # STEP1: 1D FFT along detector axis
         sino  = (data * c1dfftshift).astype('complex64')
-        sino[:] = cp.fft.fft(sino)
+        cufft.fft(sino, overwrite_x=True)
         sino *= c1dfftshift
         # STEP2: NUFFT scatter (polar -> Cartesian)
         fde = self._buf_fde[:nz]
@@ -99,7 +100,7 @@ class Tomo:
         )
         # STEP3: 2D IFFT
         fde *= c2dfftshift
-        fde[:] = cp.fft.ifft2(fde)
+        cufft.ifft2(fde, overwrite_x=True)
         fde *= c2dfftshift
         # STEP4: unpadding and multiplication by phi
         fde = fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi

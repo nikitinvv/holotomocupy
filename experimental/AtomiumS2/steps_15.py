@@ -688,7 +688,17 @@ else:
         local_ntheta = len(local_ids)
         local_recPag = np.empty([local_ntheta, nobj_bin, nobj_bin], dtype='float32')
 
-        with h5py.File(fpath) as fid:
+        pnobj = nobj_bin + nobj_bin // 4
+        fpath_pj = fpath.replace('.h5', f'_pj_bin{bin}.h5')
+        if rank == 0:
+            with h5py.File(fpath_pj, 'w') as _f:
+                for k in range(ndist):
+                    _f.create_dataset(f'/exchange/pj{k}', shape=(ntheta, pnobj, pnobj), dtype='float32')
+        comm.Barrier()
+
+        with h5py.File(fpath) as fid, \
+             h5py.File(fpath_pj, 'a', driver='mpio', comm=comm) as fid_pj:
+            pj_ds  = [fid_pj[f'/exchange/pj{k}'] for k in range(ndist)]
             srdata = cp.zeros([ndist, nobj_bin, nobj_bin], dtype='float32')
             for i, j in enumerate(local_ids):
                 data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
@@ -740,6 +750,8 @@ else:
                 mm  = float(pj[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
                 pj  = cp.pad(pj, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
                              'constant', constant_values=mm)
+                for k in range(ndist):
+                    pj_ds[k][j] = pj[k].get()
                 phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 1e-5)
                 local_recPag[i] = phase[nobj_bin//8:-nobj_bin//8, nobj_bin//8:-nobj_bin//8].get()
 
@@ -747,7 +759,7 @@ else:
                     logger.debug(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')
 
         # --- Background subtraction (approx global median via Allgather) ---
-        local_bg = np.float32(np.median(local_recPag[:, :, :16 * n_bin // 512, :16 * n_bin // 512]))
+        local_bg = np.float32(np.median(local_recPag[:, :16 * n_bin // 512, :16 * n_bin // 512]))
         all_bgs  = np.empty(size, dtype='float32')
         comm.Allgather(np.array([local_bg], dtype='float32'), all_bgs)
         global_bg = float(np.median(all_bgs))

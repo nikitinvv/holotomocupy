@@ -120,8 +120,9 @@ class Chunking:
             cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_inp):
                 extra = inp_pad if (j == 0 and inp_pad > 0) else 0
-                src = self.mk_slices(axis_inp, slice(st, end + extra))
-                dst = self.mk_slices(axis_inp, slice(0, end - st + extra))
+                ndim = inp[j].ndim
+                src = self.mk_slices(axis_inp, slice(st, end + extra), ndim)
+                dst = self.mk_slices(axis_inp, slice(0, end - st + extra), ndim)
                 if axis_inp == 1:
                     c_src = inp[j][src]
                     c_dst = inp_gpu[buf_id][j][dst]
@@ -143,10 +144,11 @@ class Chunking:
         def g2p(buf_id, k):
             st  = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
-            src = self.mk_slices(axis_out, slice(0, end - st))
-            dst = self.mk_slices(axis_out, slice(st, end))
             cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_out):
+                ndim = out[j].ndim
+                src = self.mk_slices(axis_out, slice(0, end - st), ndim)
+                dst = self.mk_slices(axis_out, slice(st, end), ndim)
                 if axis_out == 1:
                     c_src = out_gpu[buf_id][j][src]
                     c_dst = out[j][dst]
@@ -173,7 +175,7 @@ class Chunking:
             inp_gpu_c = []
             for j in range(proper_inp):
                 extra = inp_pad if (j == 0 and inp_pad > 0) else 0
-                slc = self.mk_slices(axis_inp, slice(0, n + extra))
+                slc = self.mk_slices(axis_inp, slice(0, n + extra), inp_gpu[buf_id][j].ndim)
                 inp_gpu_c.append(inp_gpu[buf_id][j][slc])
             out_gpu_c = self.slice_bufs(out_gpu[buf_id], axis_out, n)
             func(
@@ -219,12 +221,15 @@ class Chunking:
 
     ####################### Slicing #########################
     def slice_bufs(self, bufs, axis, n):
-        slc = [slice(None)] * 3
-        slc[axis] = slice(0, n)
-        return [b[tuple(slc)] for b in bufs]
+        result = []
+        for b in bufs:
+            slc = [slice(None)] * b.ndim
+            slc[axis] = slice(0, n)
+            result.append(b[tuple(slc)])
+        return result
 
-    def mk_slices(self, axis, sl):
-        res = [slice(None)] * 3
+    def mk_slices(self, axis, sl, ndim=3):
+        res = [slice(None)] * ndim
         res[axis] = sl
         return tuple(res)
 

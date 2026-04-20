@@ -25,6 +25,10 @@ class Rec:
         for key, value in vars(args).items():
             setattr(self, key, value)
 
+        # defaults for optional regularisation weights
+        if not hasattr(self, 'lam_laplacian'):
+            self.lam_laplacian = 0
+
         # list of functionals, gradients, differentials, and second-order differentials
         self.F = [self.F0, self.F1, self.F2, self.F3]
         self.gF = [self.gF0, self.gF1, self.gF2, self.gF3]
@@ -34,7 +38,7 @@ class Rec:
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
         multiplier = 16  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
         complex_item = np.dtype("complex64").itemsize
-        max_dim = max(self.nzobj, self.ntheta)
+        max_dim = max(self.nobj, self.nzobj, self.ntheta)
         nbytes = int(multiplier * self.nchunk * self.nobj * max_dim * complex_item)
 
         ### multinode processing

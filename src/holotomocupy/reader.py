@@ -112,11 +112,18 @@ class Reader:
         out[..., 1] += s
         return out
 
-    def read_prb(self, out=None):
-        """Initialise probe to all-ones (allocates CuPy array if None)."""
+    def read_prb(self, prb_file=None, out=None):
+        """Initialise probe. Loads all ndist probes from prb_file if given, else ones."""
         if out is None:
             out = cp.empty([self.ndist, self.nz, self.n], dtype='complex64')
-        out[:] = 1
+        if prb_file:
+            with h5py.File(prb_file, 'r') as _f:
+                for k in range(self.ndist):
+                    _amp   = _f['prb_amp'][k]
+                    _phase = _f['prb_phase'][k]
+                    out[k] = cp.array((_amp * np.exp(1j * _phase)).astype('complex64'))
+        else:
+            out[:] = 1
         return out
 
     def read_data(self, out=None):

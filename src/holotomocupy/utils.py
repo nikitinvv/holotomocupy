@@ -75,9 +75,9 @@ def mshow_pos(pos, show=False, **args):
         if isinstance(pos, cp.ndarray):
             pos = pos.get()
         _, ax = plt.subplots(1, 2, figsize=(10, 4))
-        ax[0].plot(pos[:, :, 1], ".")
+        ax[0].plot(pos[..., 1], ".")
         ax[0].set_title("x")
-        ax[1].plot(pos[:, :, 0], ".")
+        ax[1].plot(pos[..., 0], ".")
         ax[1].set_title("y")
         ax[0].grid()
         ax[1].grid()

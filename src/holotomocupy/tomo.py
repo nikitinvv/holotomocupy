@@ -170,8 +170,11 @@ class Tomo:
         -------
         Reconstruction array [nz, n, n], same dtype as `data`.
         """
+        norm_const = np.float32(np.sqrt(self.n / self.ntheta))
         data = cp.asarray(data)
-        return self.RT(self._filter_sino(data, filter_name))
+        res = self.RT(self._filter_sino(data, filter_name))
+        res *= norm_const
+        return  res
 
     def rec_tomo(self, d, niter=1):
         """Iterative CG tomography reconstruction for initial guess"""

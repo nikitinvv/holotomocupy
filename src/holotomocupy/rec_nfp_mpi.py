@@ -68,7 +68,8 @@ class RecNFP:
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
         self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj,
-                                 np.array([1.0], dtype='float32'), self.obj_dtype)
+                                 np.array([1.0], dtype='float32'), self.obj_dtype,
+                                 interp=getattr(self, 'interp', 1))
 
         self.alloc_arrays()
 

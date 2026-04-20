@@ -73,24 +73,28 @@ class Reader:
         obj_file = self.in_file.replace('.h5', '_obj.h5')
         if not os.path.exists(obj_file):
             obj_file = self.in_file
+        print(f"read object from {obj_file}")
         with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
-            obj_ds = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
-            nzobj0, nobj0 = obj_ds.shape[:2]
+            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
+            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
+            obj_ds_im = fid[im_key] if im_key in fid else None
+            nzobj0, nobj0 = obj_ds_re.shape[:2]
             stz  = nzobj0 // 2 - self.nzobj // 2
             stx  = nobj0  // 2 - self.nobj  // 2
             endx = nobj0  // 2 + self.nobj  // 2
             local_nz = self.end_obj - self.st_obj
             if out is None:
                 out = np.empty([local_nz, self.nobj, self.nobj], dtype=self.obj_dtype)
-            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds.dtype.itemsize))
+            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds_re.dtype.itemsize))
             for i0 in range(0, local_nz, batch):
                 i1 = min(i0 + batch, local_nz)
-                raw = obj_ds[stz + self.st_obj + i0 : stz + self.st_obj + i1, stx:endx, stx:endx]
+                sl = (slice(stz + self.st_obj + i0, stz + self.st_obj + i1),
+                      slice(stx, endx), slice(stx, endx))
                 if self.obj_dtype == 'complex64':
-                    out[i0:i1].real[:] = raw
-                    out[i0:i1].imag[:] = 0
+                    out[i0:i1].real[:] = obj_ds_re[sl]
+                    out[i0:i1].imag[:] = obj_ds_im[sl] if obj_ds_im is not None else 0
                 else:
-                    out[i0:i1] = raw
+                    out[i0:i1] = obj_ds_re[sl]
         return out
 
     def read_pos(self, out=None):
@@ -121,7 +125,15 @@ class Reader:
                 for k in range(self.ndist):
                     _amp   = _f['prb_amp'][k]
                     _phase = _f['prb_phase'][k]
-                    out[k] = cp.array((_amp * np.exp(1j * _phase)).astype('complex64'))
+                    prb = (_amp * np.exp(1j * _phase)).astype('complex64')
+                    nz0, n0 = prb.shape
+                    if nz0 > self.nz or n0 > self.n:
+                        bz = nz0 // self.nz
+                        bn = n0 // self.n
+                        prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
+                    out[k] = cp.array(prb)
+                if self.rank == 0:
+                    print(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}', flush=True)
         else:
             out[:] = 1
         return out
@@ -187,10 +199,13 @@ class Reader:
                 prb_raw = np.repeat(prb_raw, scale, axis=axis)
             prb_np[:] = prb_raw
 
-        else:
-            scale = None
-        scale = self.comm.bcast(scale, root=0)
-        self.comm.Bcast(prb_np, root=0)        
+        scale_arr = np.zeros(1, dtype='int32')
+        if self.rank == 0:
+            scale_arr[0] = scale
+        self.comm.Bcast(scale_arr, root=0)
+        scale = int(scale_arr[0])
+        self.comm.Bcast(prb_np, root=0)
+
         if out_prb is None:
             out_prb = cp.array(prb_np)
         else:
@@ -254,10 +269,12 @@ class Reader:
         if self.rank == 0:
             with h5py.File(path, 'r') as f:
                 scale = self.n // f['prb_abs'].shape[-1]
-        else:
-            scale = None
-        scale = self.comm.bcast(scale, root=0)
-       
+        scale_arr = np.zeros(1, dtype='int32')
+        if self.rank == 0:
+            scale_arr[0] = scale
+        self.comm.Bcast(scale_arr, root=0)
+        scale = int(scale_arr[0])
+
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
             pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
 

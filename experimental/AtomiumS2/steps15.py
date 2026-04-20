@@ -663,82 +663,79 @@ else:
         local_ntheta = len(local_ids)
         local_recPag = np.empty([local_ntheta, nobj_bin, nobj_bin], dtype='float32')
 
-        pnobj = nobj_bin + nobj_bin // 4
-        fpath_pj = fpath.replace('.h5', f'_pj_bin{bin}.h5')
+        def _stitch(fid, srdata, j):
+            data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
+            for k in range(ndist):
+                data_j[k] = cp.array(fid[f'/exchange/pdata{k}_{bin}'][j].astype('float32'))
+            rdata = data_j / (cref + 1e-5)
+            srdata.fill(0)
+            for k in range(ndist - 1, -1, -1):
+                tmp = rdata[k].astype('complex64')
+                tmp = cl_shift.curlySback(
+                    cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], k
+                )[0].real
+                tmp /= norm_magnifications[k]**2
+                tmp = cp.exp(tmp)
+                padx0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 0])
+                padx0 = min(nobj_bin, max(0, padx0)) + 5
+                pady0 = min(nobj_bin, max(0, pady0)) + 5
+                padx1 = min(nobj_bin, max(0, padx1)) + 5
+                pady1 = min(nobj_bin, max(0, pady1)) + 5
+                tmp = cp.pad(tmp[pady0:-pady1], ((pady0, pady1), (0, 0)), 'edge')
+                tmp = cp.pad(tmp[:, padx0:-padx1], ((0, 0), (padx0, padx1)),
+                             'linear_ramp', end_values=((1, 1), (1, 1)))
+                if k < ndist - 1:
+                    denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
+                    mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
+                    tmp  *= mmm
+                    wx = cp.ones(nobj_bin, dtype='float32')
+                    wy = cp.ones(nobj_bin, dtype='float32')
+                    wx[:padx0]                    = 0
+                    wx[padx0:padx0+npad_bin]      = v_bin
+                    wx[-padx1-npad_bin:-padx1]    = 1 - v_bin
+                    wx[-padx1:]                   = 0
+                    wy[:pady0]                    = 0
+                    wy[pady0:pady0+npad_bin]      = v_bin
+                    wy[-pady1-npad_bin:-pady1]    = 1 - v_bin
+                    wy[-pady1:]                   = 0
+                    w   = cp.outer(wy, wx)
+                    tmp = tmp * w + srdata[k+1] * (1 - w)
+                srdata[k] = tmp
+
+        srdata = cp.zeros([ndist, nobj_bin, nobj_bin], dtype='float32')
+
+        # --- Estimate mm and global_bg from projection 0 on rank 0, broadcast ---
+        calib = np.zeros(2, dtype='float32')
         if rank == 0:
-            with h5py.File(fpath_pj, 'w') as _f:
-                for k in range(ndist):
-                    _f.create_dataset(f'/exchange/pj{k}', shape=(ntheta, pnobj, pnobj), dtype='float32')
-        comm.Barrier()
+            with h5py.File(fpath) as fid:
+                _stitch(fid, srdata, 0)
+            pj0       = cp.array(srdata)
+            calib[0]  = float(pj0[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
+            pj0       = cp.pad(pj0, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
+                               'constant', constant_values=calib[0])
+            ph0       = multiPaganin(pj0, distances, wavelength, voxelsize_bin, paganin, 1e-5)
+            ph0_crop  = ph0[nobj_bin//8:-nobj_bin//8, nobj_bin//8:-nobj_bin//8]
+            calib[1]  = float(cp.median(ph0_crop[:16 * n_bin // 512, :16 * n_bin // 512]))
+        comm.Bcast(calib, root=0)
+        mm_fixed, global_bg = float(calib[0]), float(calib[1])
+        if rank == 0:
+            logger.info(f'step5 bin={bin}: mm={mm_fixed:.6f}  global_bg={global_bg:.6f}')
 
-        with h5py.File(fpath) as fid, \
-             h5py.File(fpath_pj, 'a', driver='mpio', comm=comm) as fid_pj:
-            pj_ds  = [fid_pj[f'/exchange/pj{k}'] for k in range(ndist)]
-            srdata = cp.zeros([ndist, nobj_bin, nobj_bin], dtype='float32')
+        with h5py.File(fpath) as fid:
             for i, j in enumerate(local_ids):
-                data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
-                for k in range(ndist):
-                    data_j[k] = cp.array(fid[f'/exchange/pdata{k}_{bin}'][j].astype('float32'))
-
-                rdata = data_j / (cref + 1e-5)
-                for k in range(ndist - 1, -1, -1):
-                    tmp = rdata[k].astype('complex64')
-                    tmp = cl_shift.curlySback(
-                        cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], k
-                    )[0].real
-                    tmp /= norm_magnifications[k]**2
-                    tmp = cp.exp(tmp)
-
-                    padx0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 1])
-                    pady0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 0])
-                    padx1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 1])
-                    pady1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 0])
-                    padx0 = min(nobj_bin, max(0, padx0)) + 5
-                    pady0 = min(nobj_bin, max(0, pady0)) + 5
-                    padx1 = min(nobj_bin, max(0, padx1)) + 5
-                    pady1 = min(nobj_bin, max(0, pady1)) + 5
-
-                    tmp = cp.pad(tmp[pady0:-pady1], ((pady0, pady1), (0, 0)), 'edge')
-                    tmp = cp.pad(tmp[:, padx0:-padx1], ((0, 0), (padx0, padx1)),
-                                 'linear_ramp', end_values=((1, 1), (1, 1)))
-
-                    if k < ndist - 1:
-                        denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
-                        mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
-                        tmp  *= mmm
-                        wx = cp.ones(nobj_bin, dtype='float32')
-                        wy = cp.ones(nobj_bin, dtype='float32')
-                        wx[:padx0]                    = 0
-                        wx[padx0:padx0+npad_bin]      = v_bin
-                        wx[-padx1-npad_bin:-padx1]    = 1 - v_bin
-                        wx[-padx1:]                   = 0
-                        wy[:pady0]                    = 0
-                        wy[pady0:pady0+npad_bin]      = v_bin
-                        wy[-pady1-npad_bin:-pady1]    = 1 - v_bin
-                        wy[-pady1:]                   = 0
-                        w   = cp.outer(wy, wx)
-                        tmp = tmp * w + srdata[k+1] * (1 - w)
-                    srdata[k] = tmp
-
-                # Paganin phase retrieval
-                pj  = cp.array(srdata)          # [ndist, nobj_bin, nobj_bin]
-                mm  = float(pj[:, :16 * n_bin // 512, :16 * n_bin // 512].mean())
+                _stitch(fid, srdata, j)
+                pj  = cp.array(srdata)
                 pj  = cp.pad(pj, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
-                             'constant', constant_values=mm)
-                for k in range(ndist):
-                    pj_ds[k][j] = pj[k].get()
-                # AtomiumS2: pass distances directly (no magnification^2 correction)
+                             'constant', constant_values=mm_fixed)
                 phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 1e-5)
                 local_recPag[i] = phase[nobj_bin//8:-nobj_bin//8, nobj_bin//8:-nobj_bin//8].get()
 
                 if i % 100 == 0:
                     logger.info(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')
 
-        # --- Background subtraction (approx global median via Allgather) ---
-        local_bg = np.float32(np.median(local_recPag[:, :16 * n_bin // 512, :16 * n_bin // 512]))
-        all_bgs  = np.empty(size, dtype='float32')
-        comm.Allgather(np.array([local_bg], dtype='float32'), all_bgs)
-        global_bg = float(np.median(all_bgs))
         local_recPag -= global_bg
         logger.info(f'step5 bin={bin}: rank {rank:4d}  paganin norm = {np.linalg.norm(local_recPag):.6e}')
 
@@ -772,29 +769,17 @@ else:
         z_end    = cl_mpi5.end_obj
         logger.debug(f'step5 bin={bin}: z-range [{z_start}:{z_end}), local_nz={local_nz}')
 
-        def _pinned(shape, dtype):
-            """Allocate a pinned (page-locked) numpy array; fall back to pageable on failure."""
-            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-            try:
-                buf = cp.cuda.alloc_pinned_memory(nbytes)
-                arr = np.ndarray(shape, dtype=dtype, buffer=buf)
-                return arr, buf
-            except Exception as _e:
-                logger.debug(f'pinned alloc failed ({nbytes//2**20} MiB): {_e} — using pageable')
-                return np.empty(shape, dtype=dtype), None
-
-        psi_z, _psi_z_buf = _pinned((ntheta, local_nz, nobj_bin), 'float32')
+        psi_z = np.empty((ntheta, local_nz, nobj_bin), dtype='float32')
         cl_mpi5.redist(local_recPag, psi_z, direction='backward')
         del local_recPag
 
         # --- Build complex psi and run FBP on each rank for its z-range ---
-        psi_z_c, _psi_z_c_buf = _pinned((ntheta, local_nz, nobj_bin), 'complex64')
+        psi_z_c = np.empty((ntheta, local_nz, nobj_bin), dtype='complex64')
         psi_z_c.real[:] = psi_z
         psi_z_c.imag[:] = psi_z / paganin
-        del psi_z, _psi_z_buf
+        del psi_z
 
-        rec_loc, _rec_loc_buf = _pinned((local_nz, nobj_bin, nobj_bin), 'complex64')
-        rec_loc[:] = 0
+        rec_loc = np.zeros((local_nz, nobj_bin, nobj_bin), dtype='complex64')
 
         cl_tomo = Tomo(nobj_bin, nchunk, theta, mask_r=0.9)
         nbytes  = 2 * (ntheta * nchunk * nobj_bin + nchunk * nobj_bin**2) * np.dtype('complex64').itemsize
@@ -808,7 +793,7 @@ else:
         _fbp(cl, rec_loc, psi_z_c)
         logger.info(f'step5 bin={bin}: FBP done')
         logger.info(f'step5 bin={bin}: rank {rank:4d}  fbp norm = {np.linalg.norm(rec_loc):.6e}')
-        del psi_z_c, _psi_z_c_buf  # noqa: F821
+        del psi_z_c
 
         # --- Delete stale datasets (rank 0), then parallel write ---
         paganin_tag = int(paganin) if paganin == int(paganin) else paganin
@@ -836,7 +821,7 @@ else:
                 _i1 = min(_i0 + _wbatch, local_nz)
                 re_ds[z_start + _i0 : z_start + _i1] = rec_loc[_i0:_i1].real
                 im_ds[z_start + _i0 : z_start + _i1] = rec_loc[_i0:_i1].imag
-        del rec_loc, _rec_loc_buf  # noqa: F821
+        del rec_loc
 
         if rank == 0:
             logger.info(f'Step 5: bin={bin} done.')

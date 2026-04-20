@@ -71,7 +71,8 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype,
+                              interp=getattr(self, 'interp', 1))
 
         self.alloc_arrays()
 

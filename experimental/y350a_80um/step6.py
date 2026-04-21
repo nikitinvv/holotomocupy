@@ -58,6 +58,27 @@ args.z1                      = reader.z1
 args.detector_pixelsize      = reader.detector_pixelsize
 args.theta                   = reader.theta
 
+# --- Print run summary (rank 0 only) ------------------------------------
+if comm.Get_rank() == 0:
+    mag  = args.focustodetectordistance / args.z1[0]
+    voxel_nm = args.detector_pixelsize / mag * 1e9
+    logger.info("=" * 60)
+    logger.info(f"  energy               : {args.energy:.4f} keV")
+    logger.info(f"  detector pixel size  : {args.detector_pixelsize*1e9:.3f} nm  (bin={args.bin})")
+    logger.info(f"  voxel size           : {voxel_nm:.3f} nm")
+    logger.info(f"  focus-det distance   : {args.focustodetectordistance*100:.3f} cm")
+    logger.info(f"  z1 distances         : {[f'{v*100:.3f} cm' for v in args.z1]}")
+    logger.info(f"  detector size        : {args.nz} x {args.n}")
+    logger.info(f"  object size          : {args.nzobj} x {args.nobj} x {args.nobj}")
+    logger.info(f"  n angles             : {args.ntheta}  (start={args.start_theta})")
+    logger.info(f"  n distances          : {args.ndist}")
+    logger.info(f"  rotation center shift: {args.rotation_center_shift:.4f} px")
+    logger.info(f"  paganin              : {args.paganin}")
+    logger.info(f"  n MPI ranks          : {comm.Get_size()}")
+    logger.info(f"  in_file              : {args.in_file}")
+    logger.info(f"  path_out             : {args.path_out}")
+    logger.info("=" * 60)
+
 # --- Initialise the reconstruction class --------------------------------
 logger.info("Create class")
 cl = Rec(args)

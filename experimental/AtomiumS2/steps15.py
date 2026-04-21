@@ -435,7 +435,9 @@ if rank == 0:
             raise KeyError(f'{varname!r} not found in {fpath}')
 
         rhapp_raw = _load_octave_text_mat(_rhapp_path, 'rhapp')
-        rhapp_shifts = (-rhapp_raw.swapaxes(0, 2)[:ntheta]).astype('float32')
+        rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
+        rhapp_reordered -= rhapp_reordered[:, ref_dist:ref_dist+1, :]
+        rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
         _motion_dname = f'{path}/{pfile}_{ref_dist+1}_'
@@ -719,24 +721,24 @@ else:
                 _stitch(fid, srdata, 0)
             pj0       = cp.array(srdata)
             calib[0]  = float(pj0[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
-            pj0       = cp.pad(pj0, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
-                               'constant', constant_values=calib[0])
-            ph0       = multiPaganin(pj0, distances, wavelength, voxelsize_bin, paganin, 1e-5)
-            ph0_crop  = ph0[nobj_bin//8:-nobj_bin//8, nobj_bin//8:-nobj_bin//8]
+            pad8      = nobj_bin // 8
+            pj0       = cp.pad(pj0, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
+            ph0       = multiPaganin(pj0, distances, wavelength, voxelsize_bin, paganin, 0.01)
+            ph0_crop  = ph0[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin]
             calib[1]  = float(cp.median(ph0_crop[:16 * n_bin // 512, :16 * n_bin // 512]))
         comm.Bcast(calib, root=0)
         mm_fixed, global_bg = float(calib[0]), float(calib[1])
         if rank == 0:
             logger.info(f'step5 bin={bin}: mm={mm_fixed:.6f}  global_bg={global_bg:.6f}')
 
+        pad8 = nobj_bin // 8
         with h5py.File(fpath) as fid:
             for i, j in enumerate(local_ids):
                 _stitch(fid, srdata, j)
                 pj  = cp.array(srdata)
-                pj  = cp.pad(pj, ((0, 0), (nobj_bin//8, nobj_bin//8), (nobj_bin//8, nobj_bin//8)),
-                             'constant', constant_values=mm_fixed)
-                phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 1e-5)
-                local_recPag[i] = phase[nobj_bin//8:-nobj_bin//8, nobj_bin//8:-nobj_bin//8].get()
+                pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
+                phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 0.01)
+                local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
 
                 if i % 100 == 0:
                     logger.info(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')

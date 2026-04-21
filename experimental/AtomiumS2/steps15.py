@@ -436,7 +436,6 @@ if rank == 0:
 
         rhapp_raw = _load_octave_text_mat(_rhapp_path, 'rhapp')
         rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
-        rhapp_reordered -= rhapp_reordered[:, ref_dist:ref_dist+1, :]
         rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---

@@ -630,6 +630,11 @@ else:
         phase *= delta_beta * 0.5
         return phase
 
+    fpath_obj = fpath.replace('.h5', '_obj.h5')
+    if rank == 0 and os.path.exists(fpath_obj):
+        os.remove(fpath_obj)
+    comm.Barrier()
+
     for bin in range(nlevels):
         n_bin         = n // (2**bin)
         nobj_bin      = nobj // (2**bin)
@@ -795,19 +800,10 @@ else:
         logger.info(f'step5 bin={bin}: rank {rank:4d}  fbp norm = {np.linalg.norm(rec_loc):.6e}')
         del psi_z_c
 
-        # --- Delete stale datasets (rank 0), then parallel write ---
         paganin_tag = int(paganin) if paganin == int(paganin) else paganin
-        fpath_obj = fpath.replace('.h5', '_obj.h5')
-        if rank == 0:
-            if not os.path.exists(fpath_obj):
-                with h5py.File(fpath_obj, 'w') as _f:
-                    pass
-            else:
-                with h5py.File(fpath_obj, 'a') as fid:
-                    for key in [f'/exchange/obj_init_re{paganin_tag}_{bin}',
-                                f'/exchange/obj_init_imag{paganin_tag}_{bin}']:
-                        if key in fid:
-                            del fid[key]
+        if rank == 0 and not os.path.exists(fpath_obj):
+            with h5py.File(fpath_obj, 'w') as _f:
+                pass
         comm.Barrier()
 
         # Batch writes to stay under the 2^31-byte MPI-IO transfer limit

@@ -70,6 +70,7 @@ def main():
 
     with h5py.File(paths[0], 'r') as f:
         nz, ny, nx = f['obj_re'].shape
+    print(nz,ny,nx)
 
     has_init = args.init is not None
     n = len(paths) + (1 if has_init else 0)

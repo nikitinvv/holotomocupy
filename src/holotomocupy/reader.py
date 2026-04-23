@@ -5,6 +5,62 @@ import numpy as np
 import cupy as cp
 
 
+def load_octave_text_mat(fpath, varname):
+    """Parse Octave/MATLAB text-format .mat file and return named variable as ndarray."""
+    with open(fpath, 'r') as f:
+        lines = f.read().splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == f'# name: {varname}':
+            i += 1
+            meta = {}
+            while i < len(lines) and lines[i].startswith('#'):
+                parts = lines[i][1:].strip().split(':', 1)
+                if len(parts) == 2:
+                    meta[parts[0].strip()] = parts[1].strip()
+                i += 1
+            if 'ndims' in meta:
+                shape = tuple(int(x) for x in lines[i].split())
+                i += 1
+                n = 1
+                for s in shape:
+                    n *= s
+                vals = []
+                while len(vals) < n:
+                    vals.extend(lines[i].split()); i += 1
+                return np.array(vals, dtype='float64').reshape(shape, order='F')
+            else:
+                rows = int(meta.get('rows', 1))
+                cols = int(meta.get('columns', 1))
+                vals = []
+                for _ in range(rows):
+                    vals.extend(lines[i].split()); i += 1
+                return np.array(vals, dtype='float64').reshape(rows, cols)
+        i += 1
+    raise KeyError(f'{varname!r} not found in {fpath}')
+
+
+def load_shrink_from_mats(path, pfile, ndist, ntheta):
+    """Build [ntheta, ndist] shrink array from per-distance shrink_list.mat files.
+
+    Each shrink_list.mat contains a (3,2) matrix; row 0 gives [h, v] incremental
+    shrink from the previous distance plane. The per-angle shrink for distance k at
+    angle j is linearly interpolated: cumulative[k] + increments[k] * j / ntheta.
+    Returns a zero array if any mat file is missing.
+    """
+    increments = []
+    for k in range(ndist):
+        mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
+        if not os.path.exists(mat_path):
+            return np.zeros((ntheta, ndist), dtype='float32')
+        sl = load_octave_text_mat(mat_path, 'shrink_list')
+        increments.append(float(sl[0, 0] + sl[0, 1]) / 2)
+    cumulative = np.concatenate([[0.0], np.cumsum(increments)])[:ndist]
+    j_frac = np.arange(ntheta) / ntheta
+    shrink_nd = cumulative[None, :] + np.array(increments)[None, :] * j_frac[:, None]
+    return shrink_nd.astype('float32')
+
+
 def find_latest_checkpoint(path_out, start_iter):
     """Return the path to the most recent checkpoint in path_out, or None."""
     if start_iter > 0:
@@ -65,7 +121,7 @@ class Reader:
             self.ids   = ids[:ntheta].astype('int')
             self.theta = -fid['/exchange/theta'][:, 0][self.ids] / 180 * np.pi
             self.detector_pixelsize *= 2**self.bin
-
+            
     def read_obj(self, out=None):
         """Read initial object guess for this rank's z-slice into out."""
         # obj_init may be in a separate _obj.h5 file (written there by step 5
@@ -115,6 +171,25 @@ class Reader:
             s = (s - 0.5) / 2
         out[..., 1] += s
         return out
+
+    def read_shrink(self, out=None):
+        """Read [local_ntheta, ndist] shrink for this rank's theta-slice from HDF5.
+
+        Falls back to zeros if /exchange/shrink is not present (e.g. old files).
+        Writes into `out` if provided, otherwise returns a new array.
+        """
+        local_ntheta = self.end_theta - self.st_theta
+        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
+            if '/exchange/shrink' not in fid:
+                data = cp.zeros((local_ntheta, self.ndist), dtype='float32')
+            else:
+                data = cp.array(fid['/exchange/shrink'][
+                    self.ids[self.st_theta:self.end_theta], :self.ndist
+                ].astype('float32'))
+        if out is not None:
+            out[:] = data
+        else:
+            return data
 
     def read_prb(self, prb_file=None, out=None):
         """Initialise probe. Loads all ndist probes from prb_file if given, else ones."""

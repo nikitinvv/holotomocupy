@@ -49,6 +49,7 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
+reader.read_shrink(out=cl.shrink_nd)
 
 logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)

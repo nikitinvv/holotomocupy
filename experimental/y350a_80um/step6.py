@@ -82,7 +82,6 @@ if comm.Get_rank() == 0:
 # --- Initialise the reconstruction class --------------------------------
 logger.info("Create class")
 cl = Rec(args)
-cl.method=args.method
 logger.info(f"obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.nobj} x {cl.nobj}")
 logger.info(f"proj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.ntheta} x {cl.nobj}")
 logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta} x {cl.nzobj} x {cl.nobj}")
@@ -91,6 +90,7 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
+reader.read_shrink(out=cl.shrink_nd)
 
 # --- Load initial variables (object, probe, positions) ------------------
 # Resume from the latest checkpoint if one exists; otherwise use the

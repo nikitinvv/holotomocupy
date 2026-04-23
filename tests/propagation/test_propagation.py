@@ -186,7 +186,7 @@ steps_DT = {
     'zero_pad+copy':  lambda: (cl._buf_big[:ntheta].fill(0),
                                cl._buf_big[:ntheta].__setitem__(
                                    (slice(None), slice(cl.nz//2,-cl.nz//2), slice(cl.n//2,-cl.n//2)), phi)),
-    'conv2d.run':     lambda: cl._conv2d.run(ff_zpad, cl.fker_conj[j], y_buf2),
+    'conv2d.run':     lambda: cl._conv2d.run(ff_zpad, cl.fker[j].conj(), y_buf2),
     '_adj_pad':       lambda: cl._adj_pad(y_buf2, cp.empty([ntheta, nz, n], dtype='complex64')),
     'DT total':       lambda: cl.DT(phi, j),
 }
@@ -200,12 +200,12 @@ def _zpad(phi, ntheta, nz, n, cl):
 ff_zpad2 = cp.zeros([ntheta, 2*nz, 2*n], dtype='complex64')
 ff_zpad2[:, cl.nz//2:-cl.nz//2, cl.n//2:-cl.n//2] = phi
 ff_fft3  = cp.fft.fft2(ff_zpad2)
-ff_mul3  = ff_fft3 * cl.fker_conj[j]
+ff_mul3  = ff_fft3 * cl.fker[j].conj()
 
 steps_DT_cupy = {
     'zeros+copy':      lambda: _zpad(phi, ntheta, nz, n, cl),
     'fft2':            lambda: cp.fft.fft2(ff_zpad2),
-    'multiply fker_c': lambda: ff_fft3.__mul__(cl.fker_conj[j]),
+    'multiply fker_c': lambda: ff_fft3.__mul__(cl.fker[j].conj()),
     'ifft2(unnorm)':   lambda: cp.fft.ifft2(ff_mul3, norm="forward"),
     '_adj_pad':        lambda: cl._adj_pad(ff_mul3, cp.empty([ntheta, nz, n], dtype='complex64')),
     'DT total':        lambda: cl_cupy.DT(phi, j),

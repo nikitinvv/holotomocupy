@@ -67,9 +67,7 @@ class RecNFP:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
-        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj,
-                                 np.array([1.0], dtype='float32'), self.obj_dtype,
-                                 interp=getattr(self, 'interp', 1))
+        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj,self.obj_dtype)
 
         self.alloc_arrays()
 
@@ -355,7 +353,8 @@ class RecNFP:
         x31, x32, x33 = x
         c = self.cl_shift.coeff(x32)
         c = cp.tile(c[None], [len(x33), 1, 1])
-        return x31, self.cl_shift.curlySc(c, x33, 0)
+        m = cp.ones(len(x33), dtype='float32')
+        return x31, self.cl_shift.curlySc(c, x33, m)
 
     def dF3(self, x, y, return_x=True):
         x31, x32, x33 = x
@@ -364,9 +363,10 @@ class RecNFP:
         c  = cp.tile(c[None], [len(x33), 1, 1])
         c1 = self.cl_shift.coeff(y32)
         c1 = cp.tile(c1[None], [len(x33), 1, 1])
-        y22 = self.cl_shift.dcurlySc(c, x33, 0, c1, y33)
+        m = cp.ones(len(x33), dtype='float32')
+        y22 = self.cl_shift.dcurlySc(c, x33, m, c1, y33)
         if return_x:
-            x22 = self.cl_shift.curlySc(c, x33, 0)
+            x22 = self.cl_shift.curlySc(c, x33, m)
             return [x31, x22], [y31, y22]
         return [y31, y22]
 
@@ -382,10 +382,11 @@ class RecNFP:
         c  = cp.tile(c[None],  [n, 1, 1])
         cy = cp.tile(cy[None], [n, 1, 1])
         cz = cp.tile(cz[None], [n, 1, 1])
-        y22 = self.cl_shift.d2curlySc(c, x33, 0, cy, y33, cz, z33)
+        m = cp.ones(n, dtype='float32')
+        y22 = self.cl_shift.d2curlySc(c, x33, m, cy, y33, cz, z33)
         if w32 is not None:
             cw = cp.tile(self.cl_shift.coeff(w32)[None], [n, 1, 1])
-            y22 = y22 + self.cl_shift.dcurlySc(c, x33, 0, cw, w33)
+            y22 = y22 + self.cl_shift.dcurlySc(c, x33, m, cw, w33)
         return [w31, y22]
 
     def gF3(self, x, y):
@@ -394,7 +395,8 @@ class RecNFP:
         x31, x32, x33 = x
         c = self.cl_shift.coeff(x32)
         c = cp.tile(c[None], [len(x33), 1, 1])
-        Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, 0, y22)
+        m = cp.ones(len(x33), dtype='float32')
+        Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
         y32 = cp.zeros([self.nzobj, self.nobj], dtype=self.obj_dtype)
         y32[:] = cp.sum(Deltapsi, axis=0)
         y32[:] = self.cl_shift.coeff(y32)

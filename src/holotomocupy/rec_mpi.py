@@ -70,10 +70,9 @@ class Rec:
         # create classes (one GPU per MPI rank via CUDA_VISIBLE_DEVICES)
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
-        self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype,
-                              interp=getattr(self, 'interp', 1))
-
+        self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)        
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
+        
         self.alloc_arrays()
 
         # save convergence results
@@ -81,6 +80,7 @@ class Rec:
 
         # normalization constant to address work with normal operators
         self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))        
+        self.norm_magnifications = norm_magnifications
         # sizes for normalization        
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
@@ -124,7 +124,10 @@ class Rec:
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
         self.etas["obj"] = self.e_pad[2:-2]                                  # view — lives in e_pad
-        self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+        self.proj_tmp  = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+        
+        self.shrink_nd = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
+        self.eff_demagnifications = self.shrink_nd #reuse memory
 
     def BH(self, writer=None):
         # refs to preallocated memory for gradients                
@@ -132,6 +135,9 @@ class Rec:
         grads = self.grads
         etas = self.etas
         proj_tmp = self.proj_tmp
+
+        # shrinkage
+        self.eff_demagnifications[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
@@ -721,7 +727,7 @@ class Rec:
         x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
+            x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], self.eff_demagnifications[:, k])
 
         x21 = x31
         return [x21, x22]
@@ -739,10 +745,10 @@ class Rec:
         if return_x:
             x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
             for k in range(self.ndist):
-                x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
+                x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], self.eff_demagnifications[:, k])
 
         for k in range(self.ndist):
-            y22[:, k] = self.cl_shift.dcurlySc(c, x33[:, k], k, c1, y33[:, k])
+            y22[:, k] = self.cl_shift.dcurlySc(c, x33[:, k], self.eff_demagnifications[:, k], c1, y33[:, k])
 
         x21 = x31
         y21 = y31
@@ -764,12 +770,12 @@ class Rec:
         cy = self.cl_shift.coeff(y32)
         cz = self.cl_shift.coeff(z32)
         for k in range(self.ndist):
-            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], k, cy, y33[:, k], cz, z33[:, k])
+            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], self.eff_demagnifications[:, k], cy, y33[:, k], cz, z33[:, k])
 
         if w32 is not None:
             cy = self.cl_shift.coeff(w32)
             for k in range(self.ndist):
-                y22[:, k] += self.cl_shift.dcurlySc(c, x33[:, k], k, cy, w33[:, k])
+                y22[:, k] += self.cl_shift.dcurlySc(c, x33[:, k], self.eff_demagnifications[:, k], cy, w33[:, k])
 
         y21 = w31
 
@@ -789,7 +795,7 @@ class Rec:
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
         c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            Deltapsi, Deltar = self.cl_shift.dcurlySadjc(c, x33[:, k], k, y22[:, k])
+            Deltapsi, Deltar = self.cl_shift.dcurlySadjc(c, x33[:, k], self.eff_demagnifications[:, k], y22[:, k])
             y32[:] += Deltapsi
             y33[:, k] = Deltar
 

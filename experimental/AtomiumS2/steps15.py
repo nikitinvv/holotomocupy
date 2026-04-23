@@ -7,7 +7,7 @@ Step 2: outlier removal + intensity normalisation (GPU)
 Step 3: combine encoder / RHAPP / motion / 3-D-correction shifts → cshifts_final
 
 Launch with:
-    mpirun -n <N> python steps15.py config_steps15.conf
+    mpirun -n <N> python steps_15.py ...conf
 """
 
 import sys
@@ -29,6 +29,7 @@ from holotomocupy.chunking import Chunking
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.logger_config import logger, set_log_level
 from holotomocupy.config import parse_args_steps15
+from holotomocupy.reader import load_octave_text_mat, load_shrink_from_mats
 from holotomocupy.utils import *
 
 args = parse_args_steps15(sys.argv[1])
@@ -128,24 +129,27 @@ z1                      = np.array([read_sx(f) for f in h5files]) - sx0
 
 wavelength          = 1.24e-09 / energy
 z2                  = focustodetectordistance - z1
-# AtomiumS2: distances without magnification^2 correction (different reference frame)
-distances           = (z1 * z2) / focustodetectordistance
 magnifications      = focustodetectordistance / z1
 norm_magnifications = magnifications / magnifications[0]
+distances           = (z1 * z2) / focustodetectordistance * norm_magnifications**2
 voxelsizes          = np.abs(detector_pixelsize / magnifications)
 voxelsize           = voxelsizes[0]
 
-# AtomiumS2: crop from top-left corner (not centered as in Y350a)
+shrink_nd          = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist]
+shrink             = shrink_nd[0]
+eff_magnifications = norm_magnifications / (1 + shrink)
+
+# n from actual EDF file size (images are n×n), overrideable via --n
 n0, n1 = fabio.open(f'{dname0}/ref0000_0000.edf').data.shape
 n = args.n if args.n is not None else n0
-sty, endy = 0, n
-stx, endx = 0, n
+sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
+stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
 
 # Auto-detect number of flat / dark frames by counting files at angle 0
 nref  = len(glob.glob(f'{dname0}/ref*_0000.*'))
 ndark = len(glob.glob(f'{dname0}/darkend*.*'))
 
-# Stitched object size (same at all steps that use it: 4, 5), overrideable via nobj
+# Stitched object size (same at all steps that use it: 4, 5), overrideable via --nobj
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
 
 if rank == 0:
@@ -158,6 +162,7 @@ if rank == 0:
     logger.info(f'sx0                     = {sx0} m')
     logger.info(f'z1                      = {z1} m')
     logger.info(f'ndist={ndist}  n={n}  nobj={nobj}  nref={nref}  ndark={ndark}')
+    logger.info(f'shrink                  = {shrink}')
     logger.debug(f'wavelength              = {wavelength} m')
     logger.debug(f'magnifications          = {magnifications}')
     logger.debug(f'voxelsizes              = {voxelsizes} m')
@@ -293,6 +298,7 @@ else:
 
         ref_gpu  = cp.array(ref) - cp.array(dark)
         ref_gpu[ref_gpu < 0] = 1e-3
+        # ref_gpu[:, 1402:1430, 844:872] = ref_gpu.mean(axis=(1, 2), keepdims=True)
         ref_gpu[:] = remove_outliers(ref_gpu, radius, threshold)
         ref = ref_gpu.get()
     else:
@@ -350,6 +356,7 @@ else:
                 data = cp.array(fid[f'/exchange/data{k}'][j:end, :n, :n].astype('float32'))
                 data -= dark_gpu[k]
                 data[data < 0] = 0
+                # data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True)
                 data[:] = remove_outliers(data, radius, threshold)
                 _mean = data.mean(axis=(1, 2), keepdims=True)
                 _mean[_mean == 0] = 1  # dark/blocked projections: keep as-is, avoid NaN
@@ -401,41 +408,10 @@ if rank == 0:
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
         logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
 
-        def _load_octave_text_mat(fpath, varname):
-            """Parse Octave text-format .mat file and return named array."""
-            with open(fpath, 'r') as _f:
-                lines = _f.read().splitlines()
-            i = 0
-            while i < len(lines):
-                if lines[i].strip() == f'# name: {varname}':
-                    i += 1
-                    meta = {}
-                    while i < len(lines) and lines[i].startswith('#'):
-                        parts = lines[i][1:].strip().split(':', 1)
-                        if len(parts) == 2:
-                            meta[parts[0].strip()] = parts[1].strip()
-                        i += 1
-                    if 'ndims' in meta:          # N-D array
-                        shape = tuple(int(x) for x in lines[i].split())
-                        i += 1
-                        n = 1
-                        for s in shape: n *= s
-                        vals = []
-                        while len(vals) < n:
-                            vals.extend(lines[i].split()); i += 1
-                        return np.array(vals, dtype='float64').reshape(shape, order='F')
-                    else:                         # 2-D matrix
-                        rows = int(meta.get('rows', 1))
-                        cols = int(meta.get('columns', 1))
-                        vals = []
-                        for _ in range(rows):
-                            vals.extend(lines[i].split()); i += 1
-                        return np.array(vals, dtype='float64').reshape(rows, cols)
-                i += 1
-            raise KeyError(f'{varname!r} not found in {fpath}')
-
-        rhapp_raw = _load_octave_text_mat(_rhapp_path, 'rhapp')
+        rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
         rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
+        # NOTE: rhapp was found on shrink-corrected images in Peter's pipeline, so strictly
+        # it should be rescaled by (1+shrink) per plane; skipped here as Peter does not do it.
         rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
@@ -443,7 +419,7 @@ if rank == 0:
         _motion_path = f'{_motion_dname}/correct_motion.txt'
         logger.info(f'Step 3: reading motion      from {_motion_path}')
         raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-        motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
+        motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
         motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
@@ -463,6 +439,9 @@ if rank == 0:
             if '/exchange/cshifts_final' in fid:
                 del fid['/exchange/cshifts_final']
             fid.create_dataset('/exchange/cshifts_final', data=shifts_final)
+            if '/exchange/shrink' in fid:
+                del fid['/exchange/shrink']
+            fid.create_dataset('/exchange/shrink', data=shrink_nd)
 
         logger.info('Step 3: done.')
 
@@ -513,7 +492,7 @@ else:
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
-    cl_shift = Shift(n, nobj, n, nobj, 1 / norm_magnifications, 'complex64')
+    cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cref     = cp.array(ref)
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
@@ -536,18 +515,21 @@ else:
             rdata = data / (cref + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
+                shrink_jk  = float(shrink_nd[j, k])
+                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
+                mag = cp.array(1.0 / eff_mag_jk)
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
                     cp.log(tmp[None]).astype('complex64'),
-                    cp.array(r[j:j+1, k]), k
+                    cp.array(r[j:j+1, k]), mag
                 )[0].real
-                tmp /= norm_magnifications[k]**2
+                tmp /= eff_mag_jk**2
                 tmp = cp.exp(tmp)
 
-                padx0 = int((nobj - n / norm_magnifications[k]) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj - n / norm_magnifications[k]) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj - n / norm_magnifications[k]) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj - n / norm_magnifications[k]) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj, max(0, padx0)) + 5
                 pady0 = min(nobj, max(0, pady0)) + 5
                 padx1 = min(nobj, max(0, padx1)) + 5
@@ -617,7 +599,8 @@ else:
     def multiPaganin(data, distances, wavelength, voxelsize, delta_beta, alpha):
         """Multi-distance Paganin phase retrieval on GPU. data: [ndist, ny, nx]."""
         fx = cp.fft.fftfreq(data.shape[-1], d=voxelsize).astype('float32')
-        fx, fy = cp.meshgrid(fx, fx)
+        fy = cp.fft.fftfreq(data.shape[-2], d=voxelsize).astype('float32')
+        fx, fy = cp.meshgrid(fx, fy)
         numerator   = 0
         denominator = 0
         for j in range(data.shape[0]):
@@ -660,7 +643,7 @@ else:
         comm.Bcast(ref, root=0)
 
         cref     = cp.array(ref)
-        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 1 / norm_magnifications, 'complex64')
+        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 'complex64')
         npad_bin = n_bin // 16
         v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
         v_bin    = v_bin**5 * (126 - 420*v_bin + 540*v_bin**2 - 315*v_bin**3 + 70*v_bin**4)
@@ -676,16 +659,20 @@ else:
             rdata = data_j / (cref + 1e-5)
             srdata.fill(0)
             for k in range(ndist - 1, -1, -1):
+                shrink_jk  = float(shrink_nd[j, k])
+                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
+                mag = cp.array(1.0 / eff_mag_jk)
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
-                    cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], k
+                    cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
                 )[0].real
-                tmp /= norm_magnifications[k]**2
+                
+                tmp /= eff_mag_jk**2
                 tmp = cp.exp(tmp)
-                padx0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj_bin - n_bin / norm_magnifications[k]) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj_bin, max(0, padx0)) + 5
                 pady0 = min(nobj_bin, max(0, pady0)) + 5
                 padx1 = min(nobj_bin, max(0, padx1)) + 5
@@ -722,7 +709,8 @@ else:
             calib[0]  = float(pj0[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
             pad8      = nobj_bin // 8
             pj0       = cp.pad(pj0, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-            ph0       = multiPaganin(pj0, distances, wavelength, voxelsize_bin, paganin, 0.01)
+            
+            ph0       = multiPaganin(pj0, distances * (1 + shrink_nd[0, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
             ph0_crop  = ph0[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin]
             calib[1]  = float(cp.median(ph0_crop[:16 * n_bin // 512, :16 * n_bin // 512]))
         comm.Bcast(calib, root=0)
@@ -736,7 +724,7 @@ else:
                 _stitch(fid, srdata, j)
                 pj  = cp.array(srdata)
                 pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-                phase = multiPaganin(pj, distances, wavelength, voxelsize_bin, paganin, 0.01)
+                phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
                 local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
 
                 if i % 100 == 0:
@@ -826,3 +814,5 @@ else:
 
     if rank == 0:
         logger.info('Step 5: done.')
+
+comm.Barrier()

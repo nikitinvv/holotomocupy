@@ -621,6 +621,14 @@ else:
         os.remove(fpath_obj)
     comm.Barrier()
 
+    fpath_srdata = fpath.replace('.h5', '_srdata.h5')
+    if rank == 0:
+        if os.path.exists(fpath_srdata):
+            os.remove(fpath_srdata)
+        with h5py.File(fpath_srdata, 'w') as _f:
+            pass
+    comm.Barrier()
+
     for bin in range(nlevels):
         n_bin         = n // (2**bin)
         nobj_bin      = nobj // (2**bin)
@@ -719,23 +727,32 @@ else:
             logger.info(f'step5 bin={bin}: mm={mm_fixed:.6f}  global_bg={global_bg:.6f}')
 
         pad8 = nobj_bin // 8
-        with h5py.File(fpath) as fid:
-            for i, j in enumerate(local_ids):
-                _stitch(fid, srdata, j)
-                pj  = cp.array(srdata)
-                pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-                phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
-                local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
+        with h5py.File(fpath_srdata, 'a', driver='mpio', comm=comm) as fid_srdata:
+            srdata_ds = fid_srdata.create_dataset(
+                f'/exchange/srdata_bin{bin}',
+                shape=(ndist, nobj_bin, nobj_bin),
+                dtype='float32',
+            )
+            with h5py.File(fpath) as fid:
+                for i, j in enumerate(local_ids):
+                    _stitch(fid, srdata, j)
+                    if j == 0:
+                        srdata_ds[:] = srdata.get()
+                    pj  = cp.array(srdata)
+                    pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
+                    phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
+                    local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
 
-                if i % 100 == 0:
-                    logger.info(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')
+                    if i % 100 == 0:
+                        logger.info(f'step5 bin={bin}: proj {int(j):4d}/{ntheta}')
 
         local_recPag -= global_bg
         logger.info(f'step5 bin={bin}: rank {rank:4d}  paganin norm = {np.linalg.norm(local_recPag):.6e}')
 
-        # --- Save Paganin projections to separate file (avoids 16 TiB Lustre limit) ---
-        _proj_key = f'/exchange/proj_bin{bin}'
+        # --- Save Paganin projections (every 10th frame) to separate file ---
+        _proj_key  = f'/exchange/proj_bin{bin}'
         fpath_proj = fpath.replace('.h5', '_proj.h5')
+        n_proj_10  = len(range(0, ntheta, 10))
         if rank == 0:
             if not os.path.exists(fpath_proj):
                 with h5py.File(fpath_proj, 'w') as _f:
@@ -747,12 +764,10 @@ else:
         comm.Barrier()
         with h5py.File(fpath_proj, 'a', driver='mpio', comm=comm) as fid:
             proj_ds = fid.create_dataset(_proj_key,
-                                         shape=(ntheta, nobj_bin, nobj_bin), dtype='float32')
-            # Batch to stay under the 2^31-byte MPI-IO transfer limit
-            _wbatch = max(1, (1 << 28) // (nobj_bin * nobj_bin * 4))
-            for _i0 in range(0, local_end - local_start, _wbatch):
-                _i1 = min(_i0 + _wbatch, local_end - local_start)
-                proj_ds[local_start + _i0 : local_start + _i1] = local_recPag[_i0:_i1]
+                                         shape=(n_proj_10, nobj_bin, nobj_bin), dtype='float32')
+            for i, j in enumerate(local_ids):
+                if j % 10 == 0:
+                    proj_ds[j // 10] = local_recPag[i]
         logger.debug(f'step5 bin={bin}: saved {_proj_key} → {fpath_proj}')
 
         # --- Redistribute: theta-distributed → z-distributed via MPIClass.redist ---

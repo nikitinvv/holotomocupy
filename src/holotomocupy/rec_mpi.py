@@ -71,8 +71,14 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)        
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
-        
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+
+        # All hot-path FFTs now use manually pre-built plans; the auto-cache
+        # is only hit by one-time init calls (Paganin FBP, coeffback), so
+        # caching provides no benefit and wastes GPU memory.
+        import cupy.fft
+        cupy.fft.config.get_plan_cache().set_size(0)
+
         self.alloc_arrays()
 
         # save convergence results

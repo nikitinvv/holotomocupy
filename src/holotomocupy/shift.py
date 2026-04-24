@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import cupy as cp
+import cupyx.scipy.fft as cufft
 from .cuda_kernels import (
     s_kernel, sf_kernel,
     sback_kernel,
@@ -14,7 +15,7 @@ from .utils import redot
 class Shift():
     """Cubic B-spline shift operator (requires coeff() prefilter, C2 smooth)."""
 
-    def __init__(self, n, npsi, nz, nzpsi, obj_dtype):
+    def __init__(self, n, npsi, nz, nzpsi, obj_dtype, nchunk=None):
         self.n = n
         self.npsi = npsi
         self.nz = nz
@@ -29,6 +30,14 @@ class Shift():
         self.ifB3 = 1 / cp.fft.fftshift(cp.outer(divy, divx), axes=(-1, -2))
 
         
+        if nchunk is not None:
+            _tmp = cp.empty([nchunk, nzpsi, npsi], dtype='complex64')
+            self._plan_coeff       = cufft.get_fft_plan(_tmp, axes=(-2, -1), value_type='C2C')
+            self._plan_coeff_batch = nchunk
+            del _tmp
+        else:
+            self._plan_coeff = None
+
         self._sk      = s_kernel
         self._sfk     = sf_kernel
         self._dsk     = ds_kernel
@@ -63,7 +72,11 @@ class Shift():
     # ------------------------------------------------------------------
 
     def coeff(self, psi):
-        out = cp.fft.ifft2(cp.fft.fft2(psi) * self.ifB3)
+        if self._plan_coeff is not None and psi.shape[0] == self._plan_coeff_batch:
+            with self._plan_coeff:
+                out = cufft.ifft2(cufft.fft2(psi) * self.ifB3)
+        else:
+            out = cp.fft.ifft2(cp.fft.fft2(psi) * self.ifB3)
         if self.obj_dtype == 'float32':
             out = out.real
         return out
@@ -74,8 +87,8 @@ class Shift():
         self._ifB3back = []
         x = cp.linspace(-1/2, 1/2 - 1/self.npsi,  self.npsi ).astype('float32')
         y = cp.linspace(-1/2, 1/2 - 1/self.nzpsi, self.nzpsi).astype('float32')
-        dx = self.phi(cp.zeros(1, dtype='float32')[0]).astype('float32')
-        dy = self.phi(cp.zeros(1, dtype='float32')[0]).astype('float32')
+        dx = self.phi(0)
+        dy = self.phi(0)
         for k in range(1, 5):
             dx = (dx + 2 * self.phi(k / m) * cp.cos(2 * cp.pi * k * x)).astype('float32')
             dy = (dy + 2 * self.phi(k / m) * cp.cos(2 * cp.pi * k * y)).astype('float32')

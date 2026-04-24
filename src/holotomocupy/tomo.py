@@ -48,6 +48,12 @@ class Tomo:
         self.pars = m, mua, phi, c1dfftshift, c2dfftshift
         self._buf_fde = cp.empty([nz, 2 * n, 2 * n], dtype="complex64")
 
+        # One plan per shape covers both fwd and inv (cufftPlanMany is direction-agnostic).
+        _sino = cp.empty([self.ntheta, nz, n], dtype="complex64")
+        self._plan_2d  = cufft.get_fft_plan(self._buf_fde, axes=(-2, -1), value_type='C2C')
+        self._plan_1d  = cufft.get_fft_plan(_sino, axes=(-1,), value_type='C2C')
+        self._buf_sino = _sino   # reuse — avoids a second allocation
+
     def R(self, obj):
         """Radon transform"""
         nz = obj.shape[0]
@@ -61,7 +67,8 @@ class Tomo:
         cp.multiply(obj, phi, out=fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2])
         # STEP1: 2D FFT
         fde *= c2dfftshift
-        cufft.fft2(fde, overwrite_x=True)
+        with self._plan_2d:
+            cufft.fft2(fde, overwrite_x=True)
         fde *= c2dfftshift
         # STEP2: NUFFT gather (Cartesian -> polar)
         gather_kernel(
@@ -71,7 +78,8 @@ class Tomo:
         )
         # STEP3: 1D IFFT along detector axis
         sino *= c1dfftshift
-        cufft.ifft(sino, overwrite_x=True)
+        with self._plan_1d:
+            cufft.ifft(sino, overwrite_x=True)
         sino *= c1dfftshift
         # STEP4: normalization
         sino /= 4
@@ -88,7 +96,8 @@ class Tomo:
 
         # STEP1: 1D FFT along detector axis
         sino  = (data * c1dfftshift).astype('complex64')
-        cufft.fft(sino, overwrite_x=True)
+        with self._plan_1d:
+            cufft.fft(sino, overwrite_x=True)
         sino *= c1dfftshift
         # STEP2: NUFFT scatter (polar -> Cartesian)
         fde = self._buf_fde[:nz]
@@ -100,7 +109,8 @@ class Tomo:
         )
         # STEP3: 2D IFFT
         fde *= c2dfftshift
-        cufft.ifft2(fde, overwrite_x=True)
+        with self._plan_2d:
+            cufft.ifft2(fde, overwrite_x=True)
         fde *= c2dfftshift
         # STEP4: unpadding and multiplication by phi
         fde = fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi

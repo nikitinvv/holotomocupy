@@ -125,7 +125,9 @@ def timer(func):
         result = func(*args, **kwargs)
         elapsed = time.time() - start
         mem = _process.memory_info().rss / 1024**3
-        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
+        free, total = cp.cuda.runtime.memGetInfo()
+        gpu_mem = (total - free) / 1024**3
+        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB, GPU memory {gpu_mem:.2f} GB")
         return result
     return wrapper
 

@@ -27,9 +27,8 @@ class Propagation:
         for j in range(ndist):
             self.fker[j] = cp.exp(-1j * cp.pi * wavelength * distance[j] * f2) / norm
 
-        # Pre-allocated work buffers (avoid per-call allocation)
-        self._buf_big   = cp.empty([ntheta, 2 * nz, 2 * n], dtype="complex64")
-        self._buf_small = cp.empty([ntheta, nz, n],          dtype="complex64")
+        # Pre-allocated work buffer (avoid per-call allocation)
+        self._buf_big = cp.empty([ntheta, 2 * nz, 2 * n], dtype="complex64")
 
         # cuFFTDx handle (optional — falls back to cuPy if unavailable).
         # JIT compilation is expected to have been done already by rank 0 via

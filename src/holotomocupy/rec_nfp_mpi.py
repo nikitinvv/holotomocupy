@@ -1,6 +1,7 @@
 import numpy as np
 import cupy as cp
 import os
+import tifffile
 import warnings
 import pandas as pd
 import nvtx
@@ -423,6 +424,10 @@ class RecNFP:
         if writer is not None:
             if i > self.start_iter:
                 writer.write_checkpoint(vars, i)
+            if self.rank == 0 and hasattr(self, 'path_out') and self.path_out:
+                tiff_path = os.path.join(self.path_out, f'checkpoint_{i:04}_proj_re.tiff')
+                tifffile.imwrite(tiff_path, cp.asnumpy(vars['proj'].real))
+                logger.info(f"NFP: proj_re TIFF saved → {tiff_path}")
         elif self.rank == 0:
             if hasattr(self, 'path_out'):
                 logger.info(f"Saving iter {i}: proj, prb to {self.path_out}")

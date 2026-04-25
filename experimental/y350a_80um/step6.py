@@ -91,6 +91,7 @@ logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
 reader.read_shrink(out=cl.shrink_nd)
+logger.info(cl.shrink_nd[:3,:])
 
 # --- Load initial variables (object, probe, positions) ------------------
 # Resume from the latest checkpoint if one exists; otherwise use the

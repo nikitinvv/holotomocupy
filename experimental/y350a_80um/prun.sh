@@ -1,12 +1,12 @@
 #!/bin/bash
 #PBS -A 14347
-#PBS -l select=10:system=polaris
+#PBS -l select=64:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:grand:eagle
-#PBS -l walltime=01:00:00
+#PBS -l walltime=1:20:00
 #PBS -q prod
 #PBS -N holotomo_complex64
-#PBS -q debug-scaling
+##PBS -q debug-scaling
 #PBS -j oe
 ##PBS -m be
 ##PBS -M vnikitin@anl.gov
@@ -33,6 +33,7 @@ CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' 
 VENV_DIR="/home/vvnikitin/venvs/${CONDA_NAME}"
 source "${VENV_DIR}/bin/activate"
 
-mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python step6.py config_step6.conf
-# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python steps15.py config_steps15.conf
+# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python step6.py config_step6.conf
+# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python step5_extra.py
+mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python steps15.py config_steps15.conf
 # mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} ./set_affinity_gpu_polaris.sh python step0.py config_step0.conf

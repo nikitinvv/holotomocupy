@@ -79,6 +79,13 @@ ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+elif getattr(args, 'init_vol', None):
+    logger.info(f"Reading initial object from vol file: {args.init_vol}")
+    reader.read_vol_obj(args.init_vol, out=cl.vars['obj'])
+    reader.read_pos(out=cl.vars['pos'])
+    if args.prb_file:
+        logger.info(f"Loading {args.ndist} probes from: {args.prb_file}")
+    reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])

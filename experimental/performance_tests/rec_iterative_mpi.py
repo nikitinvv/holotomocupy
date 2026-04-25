@@ -56,10 +56,15 @@ ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+elif getattr(args, 'init_vol', None):
+    logger.info(f"Reading initial object from vol file: {args.init_vol}")
+    reader.read_vol_obj(args.init_vol, out=cl.vars['obj'])
+    reader.read_pos(out=cl.vars['pos'])
+    reader.read_prb(prb_file=getattr(args, 'prb_file', None), out=cl.vars['prb'])
 else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])
-    reader.read_prb(out=cl.vars['prb'])
+    reader.read_prb(prb_file=getattr(args, 'prb_file', None), out=cl.vars['prb'])
 
 logger.info("Run reconstruction")
 cl.BH(writer=writer)

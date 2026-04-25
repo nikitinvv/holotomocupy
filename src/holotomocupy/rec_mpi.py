@@ -845,6 +845,18 @@ class Rec:
             mshow_complex(vars['obj'][self.local_nzobj//2],True)
             mshow_polar(vars['prb'][0],True)
             mshow_pos(vars['pos']-self.pos_init,True)
+
+        if writer is not None and i > self.start_iter:
+            delta = cp.asnumpy(vars['pos'] - self.pos_init)   # [local_ntheta, ndist, 2]
+            abs_local = np.sum(np.abs(delta), axis=0)          # [ndist, 2]
+            abs_global = self.comm.allreduce(abs_local)
+            mean_err = abs_global / self.ntheta                # [ndist, 2]
+            if self.rank == 0:
+                parts = "  ".join(
+                    f"d{j}:({mean_err[j,0]:.4f},{mean_err[j,1]:.4f})"
+                    for j in range(self.ndist)
+                )
+                logger.warning(f"iter={i}: pos mean abs error [px]  {parts}")
             
     
     def error_debug(self, vars, i):

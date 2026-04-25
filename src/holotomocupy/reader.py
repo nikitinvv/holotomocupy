@@ -1,8 +1,10 @@
 import glob
+import math
 import os
 import h5py
 import numpy as np
 import cupy as cp
+from .logger_config import logger
 
 
 def load_octave_text_mat(fpath, varname):
@@ -395,6 +397,74 @@ class Reader:
             ].astype('float32'))
         pos[..., 1] += self.rotation_center_shift
         out[:] = pos * 2**(-self.bin)
+        return out
+
+    def read_vol_obj(self, vol_path, out, vol_dtype='float32'):
+        """Read this rank's z-slice from a raw binary .vol file as object initial guess.
+
+        Vol shape is nzobj*2^b x nobj*2^b x nobj*2^b where b is inferred from
+        the file size. Block-averaging downsampling is applied when b > 0.
+        Each rank reads independently (no MPI-IO needed for raw binary).
+        """
+        itemsize  = np.dtype(vol_dtype).itemsize
+        file_size = os.path.getsize(vol_path)
+        total_el  = file_size // itemsize
+
+        # Infer power-of-2 bin level: total_el = nzobj * nobj^2 * 8^b
+        base = self.nzobj * self.nobj * self.nobj
+        if total_el % base != 0:
+            raise ValueError(
+                f"{vol_path}: file has {total_el} elements, "
+                f"not a multiple of nzobj*nobj*nobj={base}"
+            )
+        ratio = total_el // base  # should be 8^b
+        b = round(math.log2(ratio) / 3) if ratio > 1 else 0
+        if 8 ** b != ratio:
+            raise ValueError(
+                f"{vol_path}: size ratio {ratio} is not a power of 8 "
+                f"(expected nzobj*nobj^2 * 8^b)"
+            )
+        factor   = 2 ** b
+        nobj_vol = self.nobj  * factor
+        nz_vol   = self.nzobj * factor
+
+        # Centre offsets — symmetric by construction when factor is a power of 2
+        stz_vol = (nz_vol   - self.nzobj * factor) // 2  # always 0
+        stx_vol = (nobj_vol - self.nobj  * factor) // 2  # always 0
+
+        slice_pixels = nobj_vol * nobj_vol
+        local_nz     = self.end_obj - self.st_obj
+
+        logger.info(
+            f"read_vol_obj: rank {self.rank} reading z=[{self.st_obj}:{self.end_obj}] "
+            f"from vol [{nz_vol},{nobj_vol},{nobj_vol}]"
+            + (f" (downsample 2^{b})" if b > 0 else "")
+            + f" -> rec [{self.nzobj},{self.nobj},{self.nobj}]"
+        )
+        with open(vol_path, 'rb') as fh:
+            for i in range(local_nz):
+                acc = np.zeros([self.nobj * factor, self.nobj * factor], dtype='float32')
+                for bz in range(factor):
+                    z_vol = stz_vol + (self.st_obj + i) * factor + bz
+                    if not (0 <= z_vol < nz_vol):
+                        continue
+                    fh.seek(z_vol * slice_pixels * itemsize)
+                    row = np.frombuffer(fh.read(slice_pixels * itemsize), dtype=vol_dtype).astype('float32')
+                    acc += row.reshape(nobj_vol, nobj_vol)[
+                        stx_vol:stx_vol + self.nobj * factor,
+                        stx_vol:stx_vol + self.nobj * factor,
+                    ]
+                acc /= factor
+                if factor > 1:
+                    acc = acc.reshape(self.nobj, factor, self.nobj, factor).mean(axis=(1, 3))
+                if self.obj_dtype == 'complex64':
+                    out[i].real[:] = acc
+                    out[i].imag[:] = 0
+                else:
+                    out[i][:] = acc
+
+        out /= np.float32(self.nobj / 4)
+        logger.info(f"read_vol_obj: rank {self.rank} done (normalised by nobj/4={self.nobj/4:.4f})")
         return out
 
     def read_pos_error_unbin(self, out):

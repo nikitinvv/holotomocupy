@@ -42,6 +42,8 @@ def parse_args(config_file):
         args.start_method = cfg.getint("start_method", fallback=1)
         args.pos_checkpoint = cfg.get("pos_checkpoint", fallback=None)
         args.prb_file       = cfg.get("prb_file",       fallback=None)
+        _init_vol           = cfg.get("init_vol",        fallback=None)
+        args.init_vol       = _init_vol.strip() if _init_vol and _init_vol.strip() else None
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
 

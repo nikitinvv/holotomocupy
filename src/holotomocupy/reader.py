@@ -399,7 +399,7 @@ class Reader:
         out[:] = pos * 2**(-self.bin)
         return out
 
-    def read_vol_obj(self, vol_path, out, vol_dtype='float32'):
+    def read_vol_obj(self, vol_path, out, scale=1.0, vol_dtype='float32'):
         """Read this rank's z-slice from a raw binary .vol file as object initial guess.
 
         Vol shape is nzobj*2^b x nobj*2^b x nobj*2^b where b is inferred from
@@ -463,8 +463,9 @@ class Reader:
                 else:
                     out[i][:] = acc
 
-        out /= np.float32(self.nobj / 4)
-        logger.info(f"read_vol_obj: rank {self.rank} done (normalised by nobj/4={self.nobj/4:.4f})")
+        if scale != 1.0:
+            out /= np.float32(scale)
+        logger.info(f"read_vol_obj: rank {self.rank} done (scale={scale})")
         return out
 
     def read_pos_error_unbin(self, out):

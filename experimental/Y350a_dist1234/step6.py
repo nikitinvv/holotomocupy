@@ -81,7 +81,7 @@ if ckpt:
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
 elif getattr(args, 'init_vol', None):
     logger.info(f"Reading initial object from vol file: {args.init_vol}")
-    reader.read_vol_obj(args.init_vol, out=cl.vars['obj'])
+    reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))
     reader.read_pos(out=cl.vars['pos'])
     if args.prb_file:
         logger.info(f"Loading {args.ndist} probes from: {args.prb_file}")

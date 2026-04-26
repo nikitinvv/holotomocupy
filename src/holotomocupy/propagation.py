@@ -12,9 +12,9 @@ class Propagation:
     """Functionality for Propagation"""
 
     def __init__(self, n, nz, ntheta, ndist, wavelength, voxelsize, distance):
-        self.n      = n
-        self.nz     = nz
-        self.ntheta = ntheta
+        self.n       = n
+        self.nz      = nz
+        self._ntheta = ntheta
 
         # Fresnel kernels on the padded (2n × 2nz) grid
         fx = cp.fft.fftfreq(2 * n,  d=voxelsize).astype("float32")
@@ -40,6 +40,8 @@ class Propagation:
             except Exception as e:
                 print(f"  cuFFTDx unavailable ({e}), falling back to cuPy FFT.", flush=True)
                 self._use_cufftdx = False
+        if not self._use_cufftdx:
+            self._plan_2d = cufft.get_fft_plan(self._buf_big, axes=(-2, -1), value_type='C2C')
             
     def _fwd_pad(self, f, fpad):
         """Symmetric padding: f (ntheta, nz, n) -> fpad (ntheta, 2nz, 2n)"""
@@ -71,17 +73,20 @@ class Propagation:
         if added_dim:
             psi = psi[cp.newaxis]
 
-        ff = self._buf_big[:psi.shape[0]]
-        self._fwd_pad(psi, ff)
+        ntheta = psi.shape[0]
+        self._buf_big.fill(0)
+        self._fwd_pad(psi, self._buf_big[:ntheta])
         if self._use_cufftdx:
-            self._conv2d.run(ff, self.fker[j], ff)
+            self._conv2d.run(self._buf_big, self.fker[j], self._buf_big)
         else:
-            cufft.fft2(ff, overwrite_x=True)
-            ff *= self.fker[j]
-            cufft.ifft2(ff, overwrite_x=True, norm="forward")
-        big_psi = ff[:, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2].copy()
+            with self._plan_2d:
+                cufft.fft2(self._buf_big, overwrite_x=True)
+            self._buf_big *= self.fker[j]
+            with self._plan_2d:
+                cufft.ifft2(self._buf_big, overwrite_x=True, norm="forward")
+        result = self._buf_big[:ntheta, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2].copy()
 
-        return big_psi[0] if added_dim else big_psi
+        return result[0] if added_dim else result
 
     def DT(self, big_psi, j):
         """Adjoint propagator."""
@@ -89,17 +94,19 @@ class Propagation:
         if added_dim:
             big_psi = big_psi[cp.newaxis]
 
-        ff = self._buf_big[:big_psi.shape[0]]
-        ff.fill(0)
-        ff[:, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2] = big_psi
+        ntheta = big_psi.shape[0]
+        self._buf_big.fill(0)
+        self._buf_big[:ntheta, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2] = big_psi
         if self._use_cufftdx:
-            self._conv2d.run(ff, self.fker[j].conj(), ff)
+            self._conv2d.run(self._buf_big, self.fker[j].conj(), self._buf_big)
         else:
-            cufft.fft2(ff, overwrite_x=True)
-            ff *= self.fker[j].conj()
-            cufft.ifft2(ff, overwrite_x=True, norm="forward")
+            with self._plan_2d:
+                cufft.fft2(self._buf_big, overwrite_x=True)
+            self._buf_big *= self.fker[j].conj()
+            with self._plan_2d:
+                cufft.ifft2(self._buf_big, overwrite_x=True, norm="forward")
 
-        psi = cp.zeros_like(big_psi)
-        self._adj_pad(ff, psi)
+        result = cp.zeros_like(big_psi)
+        self._adj_pad(self._buf_big[:ntheta], result)
 
-        return psi[0] if added_dim else psi
+        return result[0] if added_dim else result

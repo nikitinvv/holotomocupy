@@ -81,7 +81,7 @@ _lib_cache: dict = {}
 
 
 def _compile(nx, ny, ept_x, fpb_x, ept_y, fpb_y) -> ctypes.CDLL:
-    so = _SO_DIR / f"libconv2d_{nx}x{ny}_xe{ept_x}f{fpb_x}_ye{ept_y}f{fpb_y}.so"
+    so = _SO_DIR / f"libconv2d_sm{_SM}_{nx}x{ny}_xe{ept_x}f{fpb_x}_ye{ept_y}f{fpb_y}.so"
     if not so.exists() or so.stat().st_mtime < _SRC.stat().st_mtime:
         print(f"  JIT-compiling {nx}x{ny} EPT_X={ept_x} FPB_X={fpb_x} "
               f"EPT_Y={ept_y} FPB_Y={fpb_y} …", flush=True)

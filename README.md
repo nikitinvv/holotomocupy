@@ -30,6 +30,7 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 | mpi4py | MPI bindings |
 | h5py | HDF5 I/O — must be built with parallel (OpenMPI) support |
 | tifffile | TIFF I/O for checkpoint slices |
+| nvtx | NVIDIA NVTX profiling markers (used in the BH solver loop) |
 | dxchange | Tomography I/O utilities |
 | matplotlib | Visualization in notebooks |
 | NVIDIA mathDX *(optional)* | Enables the cuFFTDx-based fast Fresnel propagator |
@@ -82,7 +83,7 @@ The first time a new grid size is used, the package JIT-compiles a small CUDA sh
 
 ```bash
 conda create -n holotomocupy -c conda-forge \
-    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange tifffile \
+    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange tifffile nvtx \
     setuptools matplotlib psutil jupyter matplotlib-scalebar
 conda activate holotomocupy
 ```

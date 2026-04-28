@@ -135,22 +135,33 @@ class Shift():
     # Back-projection shift for Paganin initial guess
     # ------------------------------------------------------------------
 
-    def Sback(self, spsi, r, m):
-        ntheta = spsi.shape[0]
-        c    = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype='complex64')
-        spsi = cp.ascontiguousarray(spsi)
+    def coeff_back(self, psi):
+        """B-spline prefilter on the small (n x nz) input grid for back-interpolation."""
+        xs = cp.linspace(-1/2, 1/2 - 1/self.n,  self.n ).astype('float32')
+        ys = cp.linspace(-1/2, 1/2 - 1/self.nz, self.nz).astype('float32')
+        divx = (self.phi(0) + 2 * self.phi(1) * cp.cos(2 * cp.pi * xs)).astype('float32')
+        divy = (self.phi(0) + 2 * self.phi(1) * cp.cos(2 * cp.pi * ys)).astype('float32')
+        ifB3 = 1 / cp.fft.fftshift(cp.outer(divy, divx), axes=(-1, -2))
+        return cp.fft.ifft2(cp.fft.fft2(psi) * ifB3)
+
+    def Sback(self, c, r, m):
+        """Gather-interpolate from small (n x nz) B-spline coefficients to large (npsi x nzpsi) grid."""
+        ntheta = c.shape[0]
+        g    = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype='complex64')
+        c    = cp.ascontiguousarray(c)
         r    = cp.ascontiguousarray(r)
         m    = cp.ascontiguousarray(cp.asarray(m, dtype='float32'))
         sback_kernel(
-            (math.ceil(self.n / 32), math.ceil(self.nz / 32), ntheta),
+            (math.ceil(self.npsi / 32), math.ceil(self.nzpsi / 32), ntheta),
             (32, 32, 1),
-            (spsi, c, r, m,
-             self.n, self.npsi, self.nz, self.nzpsi, ntheta, 1),
+            (g, c, r, m,
+             self.n, self.npsi, self.nz, self.nzpsi, ntheta),
         )
-        return c
+        return g
 
     def curlySback(self, psi, r, m):
-        return self.coeffback(self.Sback(psi, r, m), m)
+        """Interpolate from small (n x nz) grid to large (npsi x nzpsi) with shift+magnification."""
+        return self.Sback(self.coeff_back(psi), r, m)
 
     # ------------------------------------------------------------------
     # Optimized coefficient-space variants  (operate on pre-computed coefficients)

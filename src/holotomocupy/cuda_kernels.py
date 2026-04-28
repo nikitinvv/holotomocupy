@@ -307,60 +307,52 @@ sback_kernel = cp.RawKernel(
 extern "C"
 {
 """
-    + fun_phi_back
+    + fun_phi
     + r"""
 void __global__ sback(float2* g, float2* f, float* r, float* mag,
-                  int n, int npsi, int nz, int nzpsi, int ntheta, bool dir)
+                      int n, int npsi, int nz, int nzpsi, int ntheta)
 {
-    int tx = blockDim.x * blockIdx.x + threadIdx.x;
-    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;  // in [0, npsi)
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;  // in [0, nzpsi)
     int tz = blockDim.z * blockIdx.z + threadIdx.z;
 
-    if (tx >= n || ty >= nz || tz >= ntheta) return;
+    if (tx >= npsi || ty >= nzpsi || tz >= ntheta) return;
 
     const float mag0   = mag[tz];
     const float half   = (mag0 - 1.0f) / 2.0f;
-    const float x      = (mag0 * (tx - n / 2) - r[2 * tz + 1] + half) + npsi  / 2;
-    const float y      = (mag0 * (ty - nz / 2) - r[2 * tz + 0] + half) + nzpsi / 2;
+    const float x      = (tx - npsi / 2.0f + r[2 * tz + 1] - half) / mag0 + n   / 2.0f;
+    const float y      = (ty - nzpsi/ 2.0f + r[2 * tz + 0] - half) / mag0 + nz  / 2.0f;
     const int   ix     = (int)floorf(x);
     const int   iy     = (int)floorf(y);
     const float dx     = x - ix;
     const float dy     = y - iy;
-    const int   g_ind  = tx + ty * n + tz * n * nz;
-    const int   tz_off = tz * npsi * nzpsi;
-    const float span   = 2.0f * mag0;
+    const int   g_ind  = tx + ty * npsi + tz * npsi * nzpsi;
+    const int   tz_off = tz * n * nz;
 
-    float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
+    float px[4];
+    for (int jx = -1; jx < 3; jx++) px[jx + 1] = phi(dx - jx);
 
-    for (int jy = (int)ceilf(dy - span); jy < (int)(dy + span); jy++)
+    float2 g0 = make_float2(0.0f, 0.0f);
+
+    for (int jy = -1; jy < 3; jy++)
     {
         int indy = iy + jy;
-        if (indy < 0 || indy >= nzpsi) continue;
-        float pdym    = phi(dy - jy, mag0);
-        int   row_off = indy * npsi + tz_off;
+        if (indy < 0 || indy >= nz) continue;
+        float pdym    = phi(dy - jy);
+        int   row_off = indy * n + tz_off;
 
-        for (int jx = (int)ceilf(dx - span); jx < (int)(dx + span); jx++)
+        for (int jx = -1; jx < 3; jx++)
         {
             int indx = ix + jx;
-            if (indx < 0 || indx >= npsi) continue;
-
-            float w   = phi(dx - jx, mag0) * pdym;
+            if (indx < 0 || indx >= n) continue;
+            float w   = px[jx + 1] * pdym;
             int   idx = indx + row_off;
-
-            if (dir == 0)
-            {
-                g0.x += w * f[idx].x;
-                g0.y += w * f[idx].y;
-            }
-            else
-            {
-                atomicAdd(&(f[idx].x), w * g0.x);
-                atomicAdd(&(f[idx].y), w * g0.y);
-            }
+            g0.x += w * f[idx].x;
+            g0.y += w * f[idx].y;
         }
     }
 
-    if (dir == 0) g[g_ind] = g0;
+    g[g_ind] = g0;
 }
 }
 """,

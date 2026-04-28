@@ -414,6 +414,13 @@ if rank == 0:
         rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
         # NOTE: rhapp was found on shrink-corrected images in Peter's pipeline, so strictly
         # it should be rescaled by (1+shrink) per plane; skipped here as Peter does not do it.
+
+        # Subtract mean of dist-0 shifts over all projections from all planes
+        # (Peter's shift_first_plane_zero=1): sets mean rotation-axis position to zero.
+        avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)   # [2]
+        rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
+        logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
+
         rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
@@ -497,6 +504,13 @@ else:
     cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cref     = cp.array(ref)
 
+    # Smooth reference with Gaussian (Peter's approach): divide by blurred ref
+    # to correct for large-scale illumination variations without removing
+    # fine structure from the flat-field. FWHM = 17 * (n/2048) pixels.
+    fwhm_ref  = 17.0 * (n / 2048)
+    sigma_ref = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
+    cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
+
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         data_out = [[fid.create_dataset(f'/exchange/pdata{k}_{bin}',
                                         shape=(ntheta, n // 2**bin, n // 2**bin),
@@ -514,7 +528,8 @@ else:
             for k in range(ndist):
                 data[k] = cp.array(fid[f'/exchange/pdata{k}'][j, :n, :n].astype('float32'))
 
-            rdata = data / (cref + 1e-5)
+            data_smooth = cp.stack([ndimage.gaussian_filter(data[k], sigma_ref) for k in range(ndist)])
+            rdata = data_smooth / (cref_smooth + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])
@@ -652,7 +667,10 @@ else:
             ref = np.empty([ndist, n_bin, n_bin], dtype='float32')
         comm.Bcast(ref, root=0)
 
-        cref     = cp.array(ref)
+        cref        = cp.array(ref)
+        fwhm_ref    = 17.0 * (n_bin / 2048)
+        sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
+        cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
         cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin,  'complex64')
         npad_bin = n_bin // 16
         v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
@@ -666,7 +684,8 @@ else:
             data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
             for k in range(ndist):
                 data_j[k] = cp.array(fid[f'/exchange/pdata{k}_{bin}'][j].astype('float32'))
-            rdata = data_j / (cref + 1e-5)
+            data_j_smooth = cp.stack([ndimage.gaussian_filter(data_j[k], sigma_ref) for k in range(ndist)])
+            rdata = data_j_smooth / (cref_smooth + 1e-5)
             srdata.fill(0)
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])

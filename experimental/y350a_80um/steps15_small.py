@@ -168,7 +168,6 @@ def _stitch(fid, srdata, j):
         tmp = cl_shift.curlySback(
             cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
         )[0].real
-        tmp /= eff_mag_jk**2
         tmp = cp.exp(tmp)
         padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
         pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])

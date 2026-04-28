@@ -2,6 +2,7 @@ import os
 import h5py
 import numpy as np
 import cupy as cp
+import tifffile
 from .logger_config import logger
 
 
@@ -98,6 +99,12 @@ class Writer:
                 f['prb_abs'][:]   = np.abs(prb).astype('float32')
                 f['prb_phase'][:] = np.angle(prb).astype('float32')
         self.comm.Barrier()
-        if self.rank == 0:        
+        if self.rank == 0:
             logger.info(f"Writer: checkpoint saved → {path}")
+            mid = self.nzobj // 2
+            with h5py.File(path, 'r') as f:
+                slice_re = f['obj_re'][mid]
+            tiff_path = os.path.join(self.path_out, f"checkpoint_{i:04}_obj_re.tiff")
+            tifffile.imwrite(tiff_path, slice_re)
+            logger.info(f"Writer: mid-slice TIFF saved → {tiff_path}")
         

@@ -1,8 +1,66 @@
 import glob
+import math
 import os
 import h5py
 import numpy as np
 import cupy as cp
+from .logger_config import logger
+
+
+def load_octave_text_mat(fpath, varname):
+    """Parse Octave/MATLAB text-format .mat file and return named variable as ndarray."""
+    with open(fpath, 'r') as f:
+        lines = f.read().splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == f'# name: {varname}':
+            i += 1
+            meta = {}
+            while i < len(lines) and lines[i].startswith('#'):
+                parts = lines[i][1:].strip().split(':', 1)
+                if len(parts) == 2:
+                    meta[parts[0].strip()] = parts[1].strip()
+                i += 1
+            if 'ndims' in meta:
+                shape = tuple(int(x) for x in lines[i].split())
+                i += 1
+                n = 1
+                for s in shape:
+                    n *= s
+                vals = []
+                while len(vals) < n:
+                    vals.extend(lines[i].split()); i += 1
+                return np.array(vals, dtype='float64').reshape(shape, order='F')
+            else:
+                rows = int(meta.get('rows', 1))
+                cols = int(meta.get('columns', 1))
+                vals = []
+                for _ in range(rows):
+                    vals.extend(lines[i].split()); i += 1
+                return np.array(vals, dtype='float64').reshape(rows, cols)
+        i += 1
+    raise KeyError(f'{varname!r} not found in {fpath}')
+
+
+def load_shrink_from_mats(path, pfile, ndist, ntheta):
+    """Build [ntheta, ndist] shrink array from per-distance shrink_list.mat files.
+
+    Each shrink_list.mat contains a (3,2) matrix; row 0 gives [h, v] incremental
+    shrink from the previous distance plane. The per-angle shrink for distance k at
+    angle j is linearly interpolated: cumulative[k] + increments[k] * j / ntheta.
+    Returns a zero array if any mat file is missing.
+    """
+    increments = []
+    for k in range(ndist):
+        mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
+        if not os.path.exists(mat_path):
+            return np.zeros((ntheta, ndist), dtype='float32')
+        sl = load_octave_text_mat(mat_path, 'shrink_list')
+        increments.append(float(sl[0, 0] + sl[0, 1]) / 2)
+    cumulative = np.concatenate([[0.0], np.cumsum(increments)])[:ndist]
+    j_frac = np.arange(ntheta) / ntheta
+    shrink_nd = cumulative[None, :] + np.array(increments)[None, :] * j_frac[:, None]
+    return shrink_nd.astype('float32')
 
 
 def find_latest_checkpoint(path_out, start_iter):
@@ -65,27 +123,36 @@ class Reader:
             self.ids   = ids[:ntheta].astype('int')
             self.theta = -fid['/exchange/theta'][:, 0][self.ids] / 180 * np.pi
             self.detector_pixelsize *= 2**self.bin
-
+            
     def read_obj(self, out=None):
         """Read initial object guess for this rank's z-slice into out."""
-        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            obj_ds = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
-            nzobj0, nobj0 = obj_ds.shape[:2]
+        # obj_init may be in a separate _obj.h5 file (written there by step 5
+        # to avoid the ~16 TiB Lustre per-file size limit).
+        obj_file = self.in_file.replace('.h5', '_obj.h5')
+        if not os.path.exists(obj_file):
+            obj_file = self.in_file
+        print(f"read object from {obj_file}")
+        with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
+            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
+            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
+            obj_ds_im = fid[im_key] if im_key in fid else None
+            nzobj0, nobj0 = obj_ds_re.shape[:2]
             stz  = nzobj0 // 2 - self.nzobj // 2
             stx  = nobj0  // 2 - self.nobj  // 2
             endx = nobj0  // 2 + self.nobj  // 2
             local_nz = self.end_obj - self.st_obj
             if out is None:
                 out = np.empty([local_nz, self.nobj, self.nobj], dtype=self.obj_dtype)
-            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds.dtype.itemsize))
+            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds_re.dtype.itemsize))
             for i0 in range(0, local_nz, batch):
                 i1 = min(i0 + batch, local_nz)
-                raw = obj_ds[stz + self.st_obj + i0 : stz + self.st_obj + i1, stx:endx, stx:endx]
+                sl = (slice(stz + self.st_obj + i0, stz + self.st_obj + i1),
+                      slice(stx, endx), slice(stx, endx))
                 if self.obj_dtype == 'complex64':
-                    out[i0:i1].real[:] = raw
-                    out[i0:i1].imag[:] = 0
+                    out[i0:i1].real[:] = obj_ds_re[sl]
+                    out[i0:i1].imag[:] = obj_ds_im[sl] if obj_ds_im is not None else 0
                 else:
-                    out[i0:i1] = raw
+                    out[i0:i1] = obj_ds_re[sl]
         return out
 
     def read_pos(self, out=None):
@@ -107,11 +174,45 @@ class Reader:
         out[..., 1] += s
         return out
 
-    def read_prb(self, out=None):
-        """Initialise probe to all-ones (allocates CuPy array if None)."""
+    def read_shrink(self, out=None):
+        """Read [local_ntheta, ndist] shrink for this rank's theta-slice from HDF5.
+
+        Falls back to zeros if /exchange/shrink is not present (e.g. old files).
+        Writes into `out` if provided, otherwise returns a new array.
+        """
+        local_ntheta = self.end_theta - self.st_theta
+        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
+            if '/exchange/shrink' not in fid:
+                data = cp.zeros((local_ntheta, self.ndist), dtype='float32')
+            else:
+                data = cp.array(fid['/exchange/shrink'][
+                    self.ids[self.st_theta:self.end_theta], :self.ndist
+                ].astype('float32'))
+        if out is not None:
+            out[:] = data
+        else:
+            return data
+
+    def read_prb(self, prb_file=None, out=None):
+        """Initialise probe. Loads all ndist probes from prb_file if given, else ones."""
         if out is None:
             out = cp.empty([self.ndist, self.nz, self.n], dtype='complex64')
-        out[:] = 1
+        if prb_file:
+            with h5py.File(prb_file, 'r') as _f:
+                for k in range(self.ndist):
+                    _amp   = _f['prb_amp'][k]
+                    _phase = _f['prb_phase'][k]
+                    prb = (_amp * np.exp(1j * _phase)).astype('complex64')
+                    nz0, n0 = prb.shape
+                    if nz0 > self.nz or n0 > self.n:
+                        bz = nz0 // self.nz
+                        bn = n0 // self.n
+                        prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
+                    out[k] = cp.array(prb)
+                if self.rank == 0:
+                    print(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}', flush=True)
+        else:
+            out[:] = 1
         return out
 
     def read_data(self, out=None):
@@ -175,10 +276,13 @@ class Reader:
                 prb_raw = np.repeat(prb_raw, scale, axis=axis)
             prb_np[:] = prb_raw
 
-        else:
-            scale = None
-        scale = self.comm.bcast(scale, root=0)
-        self.comm.Bcast(prb_np, root=0)        
+        scale_arr = np.zeros(1, dtype='int32')
+        if self.rank == 0:
+            scale_arr[0] = scale
+        self.comm.Bcast(scale_arr, root=0)
+        scale = int(scale_arr[0])
+        self.comm.Bcast(prb_np, root=0)
+
         if out_prb is None:
             out_prb = cp.array(prb_np)
         else:
@@ -234,6 +338,31 @@ class Reader:
 
         return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos}
 
+    def read_pos_checkpoint(self, path, out=None):
+        """Read positions from a checkpoint file and upsample to current resolution.
+
+        Scale is inferred from the checkpoint probe size vs self.n.
+        """
+        if self.rank == 0:
+            with h5py.File(path, 'r') as f:
+                scale = self.n // f['prb_abs'].shape[-1]
+        scale_arr = np.zeros(1, dtype='int32')
+        if self.rank == 0:
+            scale_arr[0] = scale
+        self.comm.Bcast(scale_arr, root=0)
+        scale = int(scale_arr[0])
+
+        with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
+            pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
+
+        pos_up = pos * scale
+        pos_up[..., 1] += 0.5 * (scale - 1)
+        if out is None:
+            out = cp.array(pos_up)
+        else:
+            out[:] = cp.array(pos_up, dtype='float32')
+        return out
+
     def read_obj_unbin(self, out):
         """Read initial object in one bulk I/O call and upsample by 2**bin."""
         st, end = self.st_obj, self.end_obj
@@ -268,6 +397,75 @@ class Reader:
             ].astype('float32'))
         pos[..., 1] += self.rotation_center_shift
         out[:] = pos * 2**(-self.bin)
+        return out
+
+    def read_vol_obj(self, vol_path, out, scale=1.0, vol_dtype='float32'):
+        """Read this rank's z-slice from a raw binary .vol file as object initial guess.
+
+        Vol shape is nzobj*2^b x nobj*2^b x nobj*2^b where b is inferred from
+        the file size. Block-averaging downsampling is applied when b > 0.
+        Each rank reads independently (no MPI-IO needed for raw binary).
+        """
+        itemsize  = np.dtype(vol_dtype).itemsize
+        file_size = os.path.getsize(vol_path)
+        total_el  = file_size // itemsize
+
+        # Infer power-of-2 bin level: total_el = nzobj * nobj^2 * 8^b
+        base = self.nzobj * self.nobj * self.nobj
+        if total_el % base != 0:
+            raise ValueError(
+                f"{vol_path}: file has {total_el} elements, "
+                f"not a multiple of nzobj*nobj*nobj={base}"
+            )
+        ratio = total_el // base  # should be 8^b
+        b = round(math.log2(ratio) / 3) if ratio > 1 else 0
+        if 8 ** b != ratio:
+            raise ValueError(
+                f"{vol_path}: size ratio {ratio} is not a power of 8 "
+                f"(expected nzobj*nobj^2 * 8^b)"
+            )
+        factor   = 2 ** b
+        nobj_vol = self.nobj  * factor
+        nz_vol   = self.nzobj * factor
+
+        # Centre offsets — symmetric by construction when factor is a power of 2
+        stz_vol = (nz_vol   - self.nzobj * factor) // 2  # always 0
+        stx_vol = (nobj_vol - self.nobj  * factor) // 2  # always 0
+
+        slice_pixels = nobj_vol * nobj_vol
+        local_nz     = self.end_obj - self.st_obj
+
+        logger.info(
+            f"read_vol_obj: rank {self.rank} reading z=[{self.st_obj}:{self.end_obj}] "
+            f"from vol [{nz_vol},{nobj_vol},{nobj_vol}]"
+            + (f" (downsample 2^{b})" if b > 0 else "")
+            + f" -> rec [{self.nzobj},{self.nobj},{self.nobj}]"
+        )
+        with open(vol_path, 'rb') as fh:
+            for i in range(local_nz):
+                acc = np.zeros([self.nobj * factor, self.nobj * factor], dtype='float32')
+                for bz in range(factor):
+                    z_vol = stz_vol + (self.st_obj + i) * factor + bz
+                    if not (0 <= z_vol < nz_vol):
+                        continue
+                    fh.seek(z_vol * slice_pixels * itemsize)
+                    row = np.frombuffer(fh.read(slice_pixels * itemsize), dtype=vol_dtype).astype('float32')
+                    acc += row.reshape(nobj_vol, nobj_vol)[
+                        stx_vol:stx_vol + self.nobj * factor,
+                        stx_vol:stx_vol + self.nobj * factor,
+                    ]
+                acc /= factor
+                if factor > 1:
+                    acc = acc.reshape(self.nobj, factor, self.nobj, factor).mean(axis=(1, 3))
+                if self.obj_dtype == 'complex64':
+                    out[i].real[:] = acc
+                    out[i].imag[:] = 0
+                else:
+                    out[i][:] = acc
+
+        if scale != 1.0:
+            out /= np.float32(scale)
+        logger.info(f"read_vol_obj: rank {self.rank} done (scale={scale})")
         return out
 
     def read_pos_error_unbin(self, out):

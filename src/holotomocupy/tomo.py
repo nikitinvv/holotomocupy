@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import cupy as cp
+import cupyx.scipy.fft as cufft
 from .cuda_kernels import gather_kernel
 from .utils import redot, logger
 
@@ -8,7 +9,7 @@ from .utils import redot, logger
 class Tomo:
     """Functionality for Radon transforms and exp"""
 
-    def __init__(self, n, theta, mask_r):
+    def __init__(self, n, nz, theta, mask_r):
         """Usfft parameters"""
         eps = 1e-3  # accuracy of usfft
         mu = -math.log(eps) / (2 * n * n)
@@ -45,37 +46,44 @@ class Tomo:
         self.mask = mask
         phi *= cp.array(mask / (n * np.sqrt(n * self.ntheta)))
         self.pars = m, mua, phi, c1dfftshift, c2dfftshift
+        self._buf_fde = cp.empty([nz, 2 * n, 2 * n], dtype="complex64")
+
+        self._nz       = nz
+        self._buf_sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
+        self._plan_2d  = cufft.get_fft_plan(self._buf_fde,  axes=(-2, -1), value_type='C2C')
+        self._plan_1d  = cufft.get_fft_plan(self._buf_sino, axes=(-1,),    value_type='C2C')
 
     def R(self, obj):
         """Radon transform"""
         nz = obj.shape[0]
         n  = self.n
         m, mua, phi, c1dfftshift, c2dfftshift = self.pars
-        sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
 
-        # STEP0: multiplication by phi, padding
-        fde = obj * phi
-        fde = cp.pad(fde, ((0, 0), (n // 2, n // 2), (n // 2, n // 2)))
-        # STEP1: 2D FFT
-        fde *= c2dfftshift
-        fde  = cp.fft.fft2(fde)
-        fde *= c2dfftshift
-        # STEP2: NUFFT gather (Cartesian -> polar)
+        # STEP0: fill full fde buffer, zero-padding extra z-slices
+        self._buf_fde.fill(0)
+        cp.multiply(obj, phi, out=self._buf_fde[:nz, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2])
+        # STEP1: 2D FFT on full buffer (always matches plan)
+        self._buf_fde *= c2dfftshift
+        with self._plan_2d:
+            cufft.fft2(self._buf_fde, overwrite_x=True)
+        self._buf_fde *= c2dfftshift
+        # STEP2: NUFFT gather into full buf_sino (extra slices are zero, no effect)
+        self._buf_sino.fill(0)
         gather_kernel(
-            (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
+            (math.ceil(n / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),
-            (sino, fde, self.theta, m, mua, n, self.ntheta, nz, 0),
+            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.ntheta, self._nz, 0),
         )
-        # STEP3: 1D IFFT along detector axis
-        sino *= c1dfftshift
-        sino  = cp.fft.ifft(sino)
-        sino *= c1dfftshift
-        # STEP4: normalization
-        sino /= 4
-
+        # STEP3: 1D IFFT on full buf_sino
+        self._buf_sino *= c1dfftshift
+        with self._plan_1d:
+            cufft.ifft(self._buf_sino, overwrite_x=True)
+        self._buf_sino *= c1dfftshift
+        # STEP4: normalization, crop
+        result = self._buf_sino[:, :nz] / 4
         if obj.dtype == 'float32':
-            sino = sino.real
-        return cp.ascontiguousarray(sino)
+            result = result.real
+        return cp.ascontiguousarray(result)
 
     def RT(self, data):
         """Adjoint Radon transform"""
@@ -83,27 +91,29 @@ class Tomo:
         n  = self.n
         m, mua, phi, c1dfftshift, c2dfftshift = self.pars
 
-        # STEP1: 1D FFT along detector axis
-        sino  = data * c1dfftshift
-        sino  = cp.fft.fft(sino)
-        sino *= c1dfftshift
-        # STEP2: NUFFT scatter (polar -> Cartesian)
-        fde = cp.zeros([nz, 2 * n, 2 * n], dtype="complex64")
+        # STEP1: copy into full buf_sino, zero-pad, 1D FFT
+        self._buf_sino[:, :nz] = (data * c1dfftshift).astype('complex64')
+        self._buf_sino[:, nz:] = 0
+        with self._plan_1d:
+            cufft.fft(self._buf_sino, overwrite_x=True)
+        self._buf_sino *= c1dfftshift
+        # STEP2: NUFFT scatter from full buf_sino (extra slices are zero, contribute nothing)
+        self._buf_fde.fill(0)
         gather_kernel(
-            (math.ceil(n / 32), math.ceil(self.ntheta / 32), nz),
+            (math.ceil(n / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),
-            (sino, fde, self.theta, m, mua, n, self.ntheta, nz, 1),
+            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.ntheta, self._nz, 1),
         )
-        # STEP3: 2D IFFT
-        fde *= c2dfftshift
-        fde[:] = cp.fft.ifft2(fde)
-        fde *= c2dfftshift
-        # STEP4: unpadding and multiplication by phi
-        fde = fde[:, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi
-
+        # STEP3: 2D IFFT on full buffer (always matches plan)
+        self._buf_fde *= c2dfftshift
+        with self._plan_2d:
+            cufft.ifft2(self._buf_fde, overwrite_x=True)
+        self._buf_fde *= c2dfftshift
+        # STEP4: unpadding, crop to nz
+        result = self._buf_fde[:nz, n // 2 : 3 * n // 2, n // 2 : 3 * n // 2] * phi
         if data.dtype == 'float32':
-            fde = fde.real
-        return cp.ascontiguousarray(fde)
+            result = result.real
+        return cp.ascontiguousarray(result)
 
     def _filter_sino(self, data, filter_name):
         """Apply a 1-D frequency-domain filter along the detector axis (last axis).
@@ -119,7 +129,7 @@ class Tomo:
         """
         n  = self.n
         f  = cp.fft.fftfreq(n).astype('float32')   # f in [-0.5, 0.5)
-        af = cp.abs(f)
+        af = cp.abs(f)*4*n
 
         if filter_name == 'ramp':
             # Ram-Lak: |ω|
@@ -166,8 +176,11 @@ class Tomo:
         -------
         Reconstruction array [nz, n, n], same dtype as `data`.
         """
+        norm_const = np.float32(np.sqrt(self.n / self.ntheta))
         data = cp.asarray(data)
-        return self.RT(self._filter_sino(data, filter_name))
+        res = self.RT(self._filter_sino(data, filter_name))
+        res *= norm_const
+        return  res
 
     def rec_tomo(self, d, niter=1):
         """Iterative CG tomography reconstruction for initial guess"""

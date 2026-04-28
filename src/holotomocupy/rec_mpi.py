@@ -3,6 +3,7 @@ import cupy as cp
 import os
 import warnings
 import pandas as pd
+import nvtx
 
 from .tomo import Tomo
 from .propagation import Propagation
@@ -11,6 +12,7 @@ from .chunking import Chunking
 from .utils import *
 from .mpi_functions import *
 from .logger_config import logger
+from .conv2d_cufftdx import precompile as cufftdx_precompile
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
@@ -23,6 +25,10 @@ class Rec:
         for key, value in vars(args).items():
             setattr(self, key, value)
 
+        # defaults for optional regularisation weights
+        if not hasattr(self, 'lam_laplacian'):
+            self.lam_laplacian = 0
+
         # list of functionals, gradients, differentials, and second-order differentials
         self.F = [self.F0, self.F1, self.F2, self.F3]
         self.gF = [self.gF0, self.gF1, self.gF2, self.gF3]
@@ -32,18 +38,18 @@ class Rec:
         # estimate memory footprint for pinned + device buffer per GPU (complex64)
         multiplier = 16  # related to the number of arrays, experimentally chosen. the scheme will diverge if too low
         complex_item = np.dtype("complex64").itemsize
-        max_dim = max(self.nzobj, self.ntheta)
+        max_dim = max(self.nobj, self.nzobj, self.ntheta)
         nbytes = int(multiplier * self.nchunk * self.nobj * max_dim * complex_item)
 
         ### multinode processing
         self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
-        self.local_nzobj = self.cl_mpi.local_n_src
-        self.local_ntheta = self.cl_mpi.local_n_dst
+        self.local_nzobj = self.cl_mpi.local_nzobj
+        self.local_ntheta = self.cl_mpi.local_ntheta
         self.rank      = self.cl_mpi.rank
-        self.st_obj    = self.cl_mpi.st_src
-        self.end_obj   = self.cl_mpi.end_src
-        self.st_theta  = self.cl_mpi.st_dst
-        self.end_theta = self.cl_mpi.end_dst
+        self.st_obj    = self.cl_mpi.st_obj
+        self.end_obj   = self.cl_mpi.end_obj
+        self.st_theta  = self.cl_mpi.st_theta
+        self.end_theta = self.cl_mpi.end_theta
 
         # X-ray propagation and magnification parameters for classes
         wavelength = 1.24e-09 / self.energy
@@ -56,11 +62,22 @@ class Rec:
         # scaling variables
         self.rho_sq = {'obj': args.rho[0]**2, 'prb': args.rho[1]**2, 'pos': args.rho[2]**2}
 
+        # cuFFTDx JIT compile: rank 0 builds the .so, then all ranks proceed
+        if self.rank == 0:
+            cufftdx_precompile(2 * self.nz, 2 * self.n)
+        self.cl_mpi.comm.Barrier()
+
         # create classes (one GPU per MPI rank via CUDA_VISIBLE_DEVICES)
         self.cl_chunking = Chunking(nbytes, self.nchunk)
-        self.cl_tomo  = Tomo(self.nobj, self.theta, self.mask)
-        self.cl_prop  = Propagation(self.n, self.nz, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, 1.0 / norm_magnifications, self.obj_dtype)
+        self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
+        self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)        
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+
+        # All hot-path FFTs now use manually pre-built plans; the auto-cache
+        # is only hit by one-time init calls (Paganin FBP, coeffback), so
+        # caching provides no benefit and wastes GPU memory.
+        import cupy.fft
+        cupy.fft.config.get_plan_cache().set_size(0)
 
         self.alloc_arrays()
 
@@ -69,6 +86,7 @@ class Rec:
 
         # normalization constant to address work with normal operators
         self.norm_const = np.float32(np.sqrt(self.nobj / self.ntheta))        
+        self.norm_magnifications = norm_magnifications
         # sizes for normalization        
         self.data_size = self.ntheta * self.ndist * self.nz * self.n
         self.prb_size = self.ndist * self.nz * self.n
@@ -78,6 +96,7 @@ class Rec:
         self.gpu_batch = self.cl_chunking.gpu_batch
         self.redot_batch = self.cl_chunking.redot_batch
         self.linear_batch = self.cl_chunking.linear_batch
+        self.linear_redot_batch = self.cl_chunking.linear_redot_batch
         self.mulc_batch = self.cl_chunking.mulc_batch
         self.redist = self.cl_mpi.redist
         self.allreduce  = self.cl_mpi.allreduce
@@ -86,9 +105,16 @@ class Rec:
     def alloc_arrays(self):
         """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
         prb_shape = [self.ndist, self.nz, self.n]
+        # pre-allocated padded buffers for 3-D biharmonic regularization.
+        # u_pad[2:-2] IS vars['obj'];  e_pad[2:-2] IS etas['obj'].
+        # 2 ghost rows on each side let us compute (∇²)² in a single 5-slice pass.
+        self.u_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype=self.obj_dtype)
+        self.e_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype=self.obj_dtype)
+        self.u_pad[:] = 0
+        self.e_pad[:] = 0
         # reconstruction variables
         self.vars = {
-            'obj':  make_pinned([self.local_nzobj,  self.nobj, self.nobj], dtype=self.obj_dtype),
+            'obj':  self.u_pad[2:-2],                                        # view — lives in u_pad
             'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
             'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
@@ -103,7 +129,11 @@ class Rec:
             ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
-        self.proj_tmp = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+        self.etas["obj"] = self.e_pad[2:-2]                                  # view — lives in e_pad
+        self.proj_tmp  = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+        
+        self.shrink_nd = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
+        self.eff_demagnifications = self.shrink_nd #reuse memory
 
     def BH(self, writer=None):
         # refs to preallocated memory for gradients                
@@ -111,6 +141,9 @@ class Rec:
         grads = self.grads
         etas = self.etas
         proj_tmp = self.proj_tmp
+
+        # shrinkage
+        self.eff_demagnifications[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
 
         # normalize to work with normal operators (do this once, restore in finally)
         vars["obj"] /= self.norm_const
@@ -129,57 +162,69 @@ class Rec:
         self.time_start = time.time()
         for i in range(self.start_iter,self.niter):
             
+            nvtx.push_range("::BH:"+str(i))
                         
             # compute gradients
+            nvtx.push_range("gradients")
             self.gradients(vars, grads)      
-                
-            # scale
-            for v in ["obj", "prb", "pos"]:                
-                self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
-
+            nvtx.pop_range()       
+                                        
+            nvtx.push_range(":::BH:fwd_tomo")                                  
             self.fwd_tomo(grads["obj"], out=proj_tmp)
+            nvtx.pop_range()
 
+            nvtx.push_range(":::BH:redist",color='red')          
             self.cl_mpi.redist(proj_tmp, grads['proj'])
+            nvtx.pop_range()
             
             if i == self.start_iter:
                 # initial search direction (negative gradient)
-                for v in ["obj", "prb", "pos", "proj"]:
-                    self.mulc_batch(etas[v], grads[v], -1)
+                beta = 0
 
             else:
                 # calc beta using Hessian-weighted inner products
+                nvtx.push_range(":::BH:calc beta")
 
                 top = self.hessian(vars, grads, etas)
                 bottom = self.hessian(vars, etas, etas)
                 top, bottom = self.allreduce2(top, bottom)
                 beta = top / bottom
 
+                nvtx.pop_range()
 
-                # update search direction: eta = beta * previous_eta - grad
-                for v in ["obj", "prb", "pos","proj"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)                
-            
-            # calc alpha (step length)            
+            # update search direction and accumulate top for alpha in one pass
+            nvtx.push_range(":::BH:calc_alpha")
 
             top = 0
-            for v in ["obj", "pos"]:                
-                top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+            for v in ["obj", "pos"]:
+                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
+            
+            # probe is shared
+            dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
             if self.rank == 0:
-                top -= self.redot_batch(grads['prb'], etas['prb']) / self.rho_sq['prb']
+                top -= dot_prb / self.rho_sq['prb']
+            
+            # also update proj
+            self.linear_batch(etas['proj'], grads['proj'], beta, -1)
 
             bottom = self.hessian(vars, etas, etas)
 
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
+            nvtx.pop_range()      
             
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos", "proj"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)            
             
             # error and visualization debug
+            nvtx.push_range(":::BH:calc error",color='gray')  
             self.error_debug(vars, i)
+            nvtx.pop_range()  
             
+            nvtx.push_range(":::BH:vis_debug", color='gray')
             self.vis_debug(vars, i, writer)
+            nvtx.pop_range()
                         
         # normalize back
         vars["obj"] *= self.norm_const        
@@ -192,11 +237,14 @@ class Rec:
         2. probe fit term,
         3. regularization term"""
 
+        nvtx.push_range("hessian")
 
         w = self.hessian_cascade(vars, grads, etas)
         if self.rank==0:
             w += self.hessian_prbfit(vars["prb"], grads["prb"], etas["prb"])
+        w += self.hessian_laplacian(grads["obj"])
 
+        nvtx.pop_range()
         return w
 
     @timer
@@ -262,10 +310,13 @@ class Rec:
         
         self.gradients_cascade(vars,grads)
 
+        nvtx.push_range(":::BH:redist back",color='red')             
         self.cl_mpi.redist(grads['proj'], self.proj_tmp,direction='backward')
+        nvtx.pop_range() 
         
-        # part2, parallelization over object slices, formally gF4  
-        self.gF4(grads['obj'], self.proj_tmp)      
+        # part2, parallelization over object slices, formally gF4
+        self.gF4(grads['obj'], self.proj_tmp)
+        self.gradient_laplacian(grads['obj'])
 
         if self.rank==0:
             self.gradient_prbfit(grads["prb"], vars["prb"])
@@ -294,9 +345,10 @@ class Rec:
             # compute gradient by applying operators in forward order
             for id in range(len(self.gF)):  #last one computed separately because of different chunking
                 y = self.gF[id](x,y)                           
-            gradprb[:] += y[0]
-            gradproj[:] = y[1]
-            gradpos[:] = y[2]
+            # move variable scaling here to avoid additional data transfers
+            gradprb[:] += y[0]*self.rho_sq['prb']
+            gradproj[:] = y[1]*self.rho_sq['obj']
+            gradpos[:] = y[2]*self.rho_sq['pos']
 
         _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],self.data,vars["proj"],vars["pos"],vars["prb"])
         
@@ -305,7 +357,9 @@ class Rec:
         @self.gpu_batch(axis_out=0, axis_inp=1,nout=1)
         def _gF4(self, gradu, gradproj):
             gradu[:] = self.cl_tomo.RT(gradproj)        
+        nvtx.push_range("gF4",color='green')            
         _gF4(self, gradu, gradproj)      
+        nvtx.pop_range()     
 
     #### probe fit term
     @timer
@@ -318,7 +372,9 @@ class Rec:
         for j in range(self.ndist):
             tmp = self.cl_prop.D(prb[j : j + 1], j)
             td = self.ref[j : j + 1] * (tmp / (cp.abs(tmp)))
-            grad_prb[j : j + 1] += self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
+            td = self.lam_prbfit / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
+            # scaling moved here here
+            grad_prb[j : j + 1] += td*self.rho_sq['prb']                
         
     @timer
     def hessian_prbfit(self, prb, dprb1, dprb2):
@@ -340,6 +396,104 @@ class Rec:
             out += 2 * (v1 + v2)
         out = self.lam_prbfit * out / self.prb_size
         return out.get()### copy to cpu
+
+    #### 3-D Laplacian regularization
+
+    def _exchange_ghosts(self, pad):
+        """Fill pad[0:2] and pad[-2:] from neighbouring ranks (pad[2:-2] is the data).
+        2 ghost rows on each side are needed for the single-pass biharmonic (∇²)².
+        Zeroes ghost cells at the global domain boundary (no neighbour = zero padding).
+        """
+        left  = self.rank - 1 if self.rank > 0                      else MPI.PROC_NULL
+        right = self.rank + 1 if self.rank < self.cl_mpi.size - 1   else MPI.PROC_NULL
+        self.cl_mpi.comm.Sendrecv(
+            sendbuf=np.ascontiguousarray(pad[-4:-2]), dest=right,
+            recvbuf=pad[0:2], source=left)
+        self.cl_mpi.comm.Sendrecv(
+            sendbuf=np.ascontiguousarray(pad[2:4]),   dest=left,
+            recvbuf=pad[-2:], source=right)
+        if left  == MPI.PROC_NULL: pad[0:2]  = 0
+        if right == MPI.PROC_NULL: pad[-2:]  = 0
+
+    @timer
+    def gradient_laplacian(self, grad_obj):
+        """Add 2*lam/obj_size * (∇²)²u to grad_obj in-place (energy = lam/N * ||∇²u||²).
+        u_pad (size local_nzobj+4) is transferred as a single padded proper input:
+        each chunk gets chunk+4 rows so the kernel can compute (∇²)² without extra views.
+        """
+        if self.lam_laplacian == 0:
+            return
+        scale = np.float32(2.0 * self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.u_pad)
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_grad(self, g, u_pad_chunk, g_in):
+            # u_pad_chunk: [n+4, nobj, nobj]; g, g_in: [n, nobj, nobj]
+            def _lap(a, b, c):
+                return (a + c
+                        + cp.roll(b, -1, axis=1) + cp.roll(b,  1, axis=1)
+                        + cp.roll(b, -1, axis=2) + cp.roll(b,  1, axis=2)
+                        - 6 * b)
+            lap_zm1 = _lap(u_pad_chunk[:-4], u_pad_chunk[1:-3], u_pad_chunk[2:-2])
+            lap_z   = _lap(u_pad_chunk[1:-3], u_pad_chunk[2:-2], u_pad_chunk[3:-1])
+            lap_zp1 = _lap(u_pad_chunk[2:-2], u_pad_chunk[3:-1], u_pad_chunk[4:])
+            g[:] = g_in + scale * _lap(lap_zm1, lap_z, lap_zp1)
+
+        _biharm_grad(self, grad_obj, self.u_pad, grad_obj)
+
+    @timer
+    def hessian_laplacian(self, dobj1):
+        """2*lam/obj_size * Re<dobj1, (∇²)²e>, e = self.e_pad[2:-2] = etas['obj'].
+        e_pad (size local_nzobj+4) transferred as single padded proper input (inp_pad=4).
+        Allreduced over MPI ranks.
+        """
+        if self.lam_laplacian == 0:
+            return 0
+        scale = np.float32(2.0 * self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.e_pad)
+        acc = cp.zeros(1, dtype='float32')
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_dot(self, acc, e_pad_chunk, d1):
+            # e_pad_chunk: [n+4, nobj, nobj]; d1: [n, nobj, nobj]
+            def _lap(a, b, c):
+                return (a + c
+                        + cp.roll(b, -1, axis=1) + cp.roll(b,  1, axis=1)
+                        + cp.roll(b, -1, axis=2) + cp.roll(b,  1, axis=2)
+                        - 6 * b)
+            lap_zm1 = _lap(e_pad_chunk[:-4], e_pad_chunk[1:-3], e_pad_chunk[2:-2])
+            lap_z   = _lap(e_pad_chunk[1:-3], e_pad_chunk[2:-2], e_pad_chunk[3:-1])
+            lap_zp1 = _lap(e_pad_chunk[2:-2], e_pad_chunk[3:-1], e_pad_chunk[4:])
+            acc[:] += redot(d1, _lap(lap_zm1, lap_z, lap_zp1))
+
+        _biharm_dot(self, acc, self.e_pad, dobj1)
+        return float(self.allreduce(np.array(scale * float(acc[0]), dtype='float32')))
+
+    def _lap_energy_local(self):
+        """Local biharmonic energy (lam/obj_size)*||∇²u||² = (lam/obj_size)*Re<∇²u,∇²u>.
+        Only first Laplacian needed; 3 proper z-slice views of u_pad (each size local_nzobj).
+        u = self.u_pad[2:-2] = vars['obj']. No allreduce.
+        """
+        if self.lam_laplacian == 0:
+            return np.float32(0)
+        scale = np.float32(self.lam_laplacian / self.obj_size)
+        self._exchange_ghosts(self.u_pad)
+        acc = cp.zeros(1, dtype='float32')
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_e(self, acc, u_pad_chunk):
+            # u_pad_chunk: [n+4, nobj, nobj]; only first Laplacian needed for energy
+            u_zm1 = u_pad_chunk[1:-3]
+            u_z   = u_pad_chunk[2:-2]
+            u_zp1 = u_pad_chunk[3:-1]
+            lap = (u_zm1 + u_zp1
+                   + cp.roll(u_z, -1, axis=1) + cp.roll(u_z,  1, axis=1)
+                   + cp.roll(u_z, -1, axis=2) + cp.roll(u_z,  1, axis=2)
+                   - 6 * u_z)
+            acc[:] += redot(lap, lap)
+
+        _biharm_e(self, acc, self.u_pad)
+        return scale * float(acc[0])
 
     @timer
     def fwd_tomo(self, obj, out):
@@ -367,6 +521,7 @@ class Rec:
         t = cp.abs(x) - d
         return t * t
 
+    @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
         return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
@@ -376,6 +531,7 @@ class Rec:
     def _dF0_fused(x, d):
         return x - d * (x / cp.abs(x))
 
+    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
         return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
@@ -391,6 +547,7 @@ class Rec:
             v += reprod(x - d * l0, w)
         return v
 
+    @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
         return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
@@ -401,6 +558,7 @@ class Rec:
         td = y * (x / cp.abs(x))
         return scale * (x - td)
 
+    @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
 
@@ -411,6 +569,7 @@ class Rec:
         return self._gF0_fused(x, y, np.float32(2 / self.data_size))
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
+    @nvtx.annotate("F1", color="green")
     def F1(self, x):
         """In: (x11,x12), Out: x0"""
 
@@ -422,6 +581,7 @@ class Rec:
 
         return x0
 
+    @nvtx.annotate("dF1", color="green")
     def dF1(self, x, y, return_x=True):
         """In: (x11,x12),(y11,y12) Out: y0"""
 
@@ -439,6 +599,7 @@ class Rec:
 
         return (x0, y0) if return_x else y0
     
+    @nvtx.annotate("d2F_dF1", color="purple")
     def d2F_dF1(self, x, y, z, w):
         """In: (x11,x12),(y11,y12),(z11,z12) Out: y0"""
 
@@ -462,6 +623,7 @@ class Rec:
     
         return y0
    
+    @nvtx.annotate("gF1", color="green")
     def gF1(self, x, y):
         """In: x=(x01,x02,x03),(y0) Out: y11,y12"""
 
@@ -486,6 +648,7 @@ class Rec:
     def _F2_fused(x22):
         return cp.exp(1j * x22)
 
+    @nvtx.annotate("F2", color="green")
     def F2(self, x):
         """In: (x21,x22) Out: (x11,x12)"""
 
@@ -501,6 +664,7 @@ class Rec:
         y12 = x12 * 1j * y22
         return x12, y12
 
+    @nvtx.annotate("dF2", color="green")
     def dF2(self, x, y, return_x=True):
         """In: (x21,x22),(y21,y22) Out: (x11,x12),(y11,y12)"""
 
@@ -523,6 +687,7 @@ class Rec:
             y12 = y12 + cp.exp(1j * x22) * 1j * w22
         return y12
 
+    @nvtx.annotate("d2F_dF2", color="purple")
     def d2F_dF2(self, x, y, z, w):
         """In: (x21,x22),(y21,y22),(z21,z22),(w21,w22) Out: (y11,y12)"""
 
@@ -541,6 +706,7 @@ class Rec:
     def _gF2_fused(x22, y12):
         return (-1j) * y12 * cp.conj(cp.exp(1j * x22))
 
+    @nvtx.annotate("gF2", color="green")
     def gF2(self, x, y):
         """In: x(x01, x02, x03) ,(y11,y12) Out: (y21,y22)"""
 
@@ -558,6 +724,7 @@ class Rec:
         return [y21, y22]
     
     ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
+    @nvtx.annotate("F3", color="green")
     def F3(self, x):
         """In: (x31, x32, x33)  Out: (x21,x22)"""
 
@@ -566,11 +733,12 @@ class Rec:
         x22 = cp.empty([len(x33), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
         c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
+            x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], self.eff_demagnifications[:, k])
 
         x21 = x31
         return [x21, x22]
 
+    @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
         """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22)"""
 
@@ -583,10 +751,10 @@ class Rec:
         if return_x:
             x22 = cp.zeros([len(x32), self.ndist, self.nz, self.n], dtype=self.obj_dtype)
             for k in range(self.ndist):
-                x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], k)
+                x22[:, k] = self.cl_shift.curlySc(c, x33[:, k], self.eff_demagnifications[:, k])
 
         for k in range(self.ndist):
-            y22[:, k] = self.cl_shift.dcurlySc(c, x33[:, k], k, c1, y33[:, k])
+            y22[:, k] = self.cl_shift.dcurlySc(c, x33[:, k], self.eff_demagnifications[:, k], c1, y33[:, k])
 
         x21 = x31
         y21 = y31
@@ -594,6 +762,7 @@ class Rec:
 
     
 
+    @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):
         """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22)"""
 
@@ -607,17 +776,18 @@ class Rec:
         cy = self.cl_shift.coeff(y32)
         cz = self.cl_shift.coeff(z32)
         for k in range(self.ndist):
-            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], k, cy, y33[:, k], cz, z33[:, k])
+            y22[:, k] = self.cl_shift.d2curlySc(c, x33[:, k], self.eff_demagnifications[:, k], cy, y33[:, k], cz, z33[:, k])
 
         if w32 is not None:
             cy = self.cl_shift.coeff(w32)
             for k in range(self.ndist):
-                y22[:, k] += self.cl_shift.dcurlySc(c, x33[:, k], k, cy, w33[:, k])
+                y22[:, k] += self.cl_shift.dcurlySc(c, x33[:, k], self.eff_demagnifications[:, k], cy, w33[:, k])
 
         y21 = w31
 
         return [y21, y22]
 
+    @nvtx.annotate("gF3", color="green")
     def gF3(self, x, y):
         """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32)"""
 
@@ -631,13 +801,15 @@ class Rec:
         y33 = cp.empty([y22.shape[0], self.ndist, 2], dtype="float32")
         c = self.cl_shift.coeff(x32)
         for k in range(self.ndist):
-            Deltapsi, Deltar = self.cl_shift.dcurlySadjc(c, x33[:, k], k, y22[:, k])
+            Deltapsi, Deltar = self.cl_shift.dcurlySadjc(c, x33[:, k], self.eff_demagnifications[:, k], y22[:, k])
             y32[:] += Deltapsi
             y33[:, k] = Deltar
 
         y32[:] = self.cl_shift.coeff(y32)
 
         y31 = y21
+
+        
         return [y31, y32, y33]         
 
     @timer
@@ -660,7 +832,7 @@ class Rec:
             for j in range(self.ndist):
                 Dprb = self.cl_prop.D(prb[j : j + 1], j)[0]
                 out += self.lam_prbfit / self.prb_size * cp.linalg.norm(cp.abs(Dprb) - self.ref[j]) ** 2
-        return self.allreduce(out.get())
+        return self.allreduce(np.array(out.get() + self._lap_energy_local(), dtype='float32'))
 
     def vis_debug(self, vars, i,writer=None):
         """Save reconstruction checkpoint to HDF5."""
@@ -673,6 +845,18 @@ class Rec:
             mshow_complex(vars['obj'][self.local_nzobj//2],True)
             mshow_polar(vars['prb'][0],True)
             mshow_pos(vars['pos']-self.pos_init,True)
+
+        if writer is not None and i > self.start_iter:
+            delta = cp.asnumpy(vars['pos'] - self.pos_init)   # [local_ntheta, ndist, 2]
+            abs_local = np.sum(np.abs(delta), axis=0)          # [ndist, 2]
+            abs_global = self.comm.allreduce(abs_local)
+            mean_err = abs_global / self.ntheta                # [ndist, 2]
+            if self.rank == 0:
+                parts = "  ".join(
+                    f"d{j}:({mean_err[j,0]:.4f},{mean_err[j,1]:.4f})"
+                    for j in range(self.ndist)
+                )
+                logger.warning(f"iter={i}: pos mean abs error [px]  {parts}")
             
     
     def error_debug(self, vars, i):

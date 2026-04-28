@@ -7,11 +7,14 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 ## Key features
 
 - **GPU acceleration** via CuPy (drop-in GPU NumPy)
-- **MPI multi-GPU** — one rank per GPU, tested with 1–1024 GPUs - close to linear performance gain
+- **MPI multi-GPU** — one rank per GPU, tested with 1–1024 GPUs — close to linear performance gain
 - **`@gpu_batch` decorator** — automatically chunks data that exceeds GPU memory
-- **Modular operators** — tomographic projection, Fresnel propagator, B-spline shifts, scaling; all reusable independently
+- **Modular operators** — tomographic projection (R / RT / FBP), Fresnel propagator, B-spline shifts; all reusable independently
 - **Bilinear-Hessian (BH) solver** — joint optimization of object, probe, and sample positions
-- **Checkpointing** — automatically resumes from the latest saved iteration
+- **Checkpointing** — automatically resumes from the latest saved iteration; each checkpoint also writes a mid-slice TIFF of `obj_re` for quick visual inspection
+- **External initial guess** — load a pre-reconstructed `.vol` binary file (e.g. from a standard FBP pipeline) via `init_vol` in the config
+- **Position error monitoring** — RMS position errors per distance are logged at every checkpoint
+- **Accurate GPU memory reporting** — reports bytes visible to `nvidia-smi` (not just the CuPy pool)
 - **Jupyter notebook pipeline** — steps 1–5 for data preparation, step 6 for iterative reconstruction
 
 ---
@@ -25,20 +28,64 @@ Holotomography is a coherent imaging technique that reconstructs the 3-D complex
 | CUDA ≥ 11 | One GPU per MPI rank |
 | CuPy | GPU NumPy |
 | mpi4py | MPI bindings |
-| h5py **with MPI support** | HDF5 I/O — must be built with parallel HDF5 (the default `pip install h5py` is serial-only and will fail at checkpoint writing) |
+| h5py | HDF5 I/O — must be built with parallel (OpenMPI) support |
+| tifffile | TIFF I/O for checkpoint slices |
 | dxchange | Tomography I/O utilities |
 | matplotlib | Visualization in notebooks |
+| NVIDIA mathDX *(optional)* | Enables the cuFFTDx-based fast Fresnel propagator |
+
+### Optional: cuFFTDx fast propagator (NVIDIA mathDX)
+
+The Fresnel propagator (`propagation.py`) has two backends:
+
+| Backend | Speed | Requirement |
+|---|---|---|
+| cuPy (default) | baseline | none — works out of the box |
+| cuFFTDx | faster | NVIDIA mathDX + nvcc |
+
+The cuFFTDx backend is selected automatically at startup when mathDX is found. If it is unavailable, the package silently falls back to cuPy with no loss of correctness.
+
+**1. Download and install mathDX**
+
+Follow the installation guide at https://docs.nvidia.com/cuda/mathdx/installation.html to download and unpack the mathDX package:
+
+```bash
+tar -xzf nvidia-mathdx-*.tar.gz -C /opt/nvidia
+```
+
+**2. Set environment variables**
+
+```bash
+export MATHDX_ROOT=/opt/nvidia/nvidia-mathdx-25.12.1-cuda13/nvidia/mathdx/25.12
+export NVCC=/usr/local/cuda/bin/nvcc   # or wherever nvcc lives
+# Optional overrides:
+# export CUFFTDX_SM=80          # target SM version (default: 80)
+# export CUFFTDX_SO_DIR=/tmp    # where JIT-compiled .so files are cached
+```
+
+Add these lines to your `~/.bashrc` or the job script so they persist.
+
+**3. Verify detection**
+
+```python
+from holotomocupy.propagation import Propagation
+# Should print: "cuFFTDx (mathDX) available — using fast cuFFTDx propagator."
+```
+
+If mathDX is not found you will see a `UserWarning` explaining which path is missing.
+
+**JIT compilation and MPI**
+
+The first time a new grid size is used, the package JIT-compiles a small CUDA shared library with `nvcc` and caches it in `CUFFTDX_SO_DIR`. In an MPI run, **only rank 0 compiles**; all other ranks wait at a barrier and then load the pre-built library. Subsequent runs reuse the cached `.so` and skip compilation entirely.
 
 ### Conda environment
 
 ```bash
 conda create -n holotomocupy -c conda-forge \
-    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange \
+    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange tifffile \
     setuptools matplotlib psutil jupyter matplotlib-scalebar
 conda activate holotomocupy
 ```
-
-> **Important:** h5py must be built with parallel HDF5 (MPI) support — the `mpi_openmpi` build variant from conda-forge provides this. The default `pip install h5py` or the `nompi` conda variant will raise `ValueError: h5py was built without MPI support, can't use mpio driver` at runtime when saving checkpoints.
 
 ### Install the package
 
@@ -50,122 +97,48 @@ pip install -e .
 
 ---
 
-## Running tests
+## Reconstruction pipeline
 
-Tests live in `tests/`:
-
-| File | What it tests |
-|---|---|
-| `tests/test.ipynb` | End-to-end holotomography reconstruction (interactive, single process) |
-| `tests/test.py` | Same test as a plain Python script, runnable with MPI |
-
-### What the test does
-
-1. Builds a synthetic 3-D phantom object and loads a realistic probe from pre-saved TIFF files.
-2. Forward-simulates diffraction patterns and a flat-field reference from the ground-truth variables.
-3. Resets variables to an imperfect initial guess and runs the BH iterative solver.
-4. Saves reconstruction checkpoints to `tests/test_results/checkpoint_NNNN.h5` every `vis_step` iterations.
-
-### Running `test.py` with MPI
-
-`bind.sh` maps each MPI rank to a unique GPU via `CUDA_VISIBLE_DEVICES`:
-
-```bash
-cd tests
-mpirun -np 2 ./bind.sh python test.py
-```
-
-Replace `2` with the number of available GPUs. Each rank processes a contiguous slice of the object volume (z-axis) and a contiguous block of projections (theta-axis).
-
-To suppress UCX warnings add `--mca opal_common_ucx_opal_mem_hooks 1`:
-
-```bash
-mpirun --mca opal_common_ucx_opal_mem_hooks 1 -np 2 ./bind.sh python test.py
-```
-
-### Output
-
-Checkpoints are written to `tests/test_results/` as HDF5 files:
-
-```
-tests/test_results/
-    checkpoint_0016.h5   # iteration 16
-    checkpoint_0032.h5   # iteration 32
-    ...
-```
-
-Each file contains:
-
-| Dataset | Shape | Description |
-|---|---|---|
-| `obj_re` | `(nzobj, nobj, nobj)` | Real part of reconstructed object (refractive index decrement δ) |
-| `obj_im` | `(nzobj, nobj, nobj)` | Imaginary part (absorption β) — present when `obj_dtype=complex64` |
-| `prb_abs` | `(ndist, nz, n)` | Probe amplitude |
-| `prb_phase` | `(ndist, nz, n)` | Probe phase |
-| `pos` | `(ntheta, ndist, 2)` | Refined sample positions (pixels) |
-
-> **Note:** `h5py` with MPI support is required — see the Installation section.
-
----
-
-## Reconstruction pipeline for experimental data
-
-The full pipeline is in `experimental/Y350a_dist1234/`. Steps 1–5 are Jupyter notebooks; step 6 is a Python script launched with `mpirun`.
-
-> **Prerequisites — ID16A Octave pipeline:** This pipeline is designed for data collected at the ID16A nano-imaging beamline (ESRF). Before running step 3, a preliminary reconstruction must be performed with the ID16A Octave code. It produces three position-correction files that step 3 reads as the initial guess for sample positions:
->
-> | File | Description |
-> |---|---|
-> | `rhapp_python.mat` | Per-projection, per-distance 2-D shift corrections (shape: `[ntheta, ndist, 2]`, pixels). Must be exported from Octave in MATLAB v6 format so that `scipy.io.loadmat` can read it: `save -v6 rhapp_python.mat rhapp` |
-> | `correct_motion.txt` | Stage encoder position as a function of angle for a single reference distance — used to build the motion-correction shift field across all distances |
-> | `correct_correct3D.txt` | Residual per-projection shifts derived from a preliminary 3-D tomographic reconstruction — corrects slow drift not captured by the encoder |
->
-> Step 3 combines these three sources into the initial position array written into the HDF5 file as `/exchange/cshifts_error`, which step 6 then loads as the starting point for iterative position refinement.
-
-### Step 1 — Convert raw data
-
-Open `step1_convert.ipynb` and run all cells.
-
-Reads raw detector frames, applies flat-field correction, and writes a single HDF5 file consumed by all subsequent steps.
-
-### Step 2 — Preprocessing
-
-Open `step2_preprocessing.ipynb` and run all cells.
-
-Rings removal, background subtraction, binning.
-
-### Step 3 — Find shifts
-
-Open `step3_find_shifts.ipynb` and run all cells.
-
-Combines position corrections from the ID16A Octave pipeline (`rhapp_python.mat`, `correct_motion.txt`, `correct_correct3D.txt`) into a single initial shift array and writes it to the HDF5 file. This initial guess is used as the starting point for position refinement in step 6.
-
-### Step 4 — Make binned data
-
-Open `step4_make_binned.ipynb` and run all cells.
-
-Produces downsampled datasets at multiple bin levels for fast prototyping.
-
-### Step 5 — Paganin reconstruction
-
-Open `step5_rec_paganin.ipynb` and run all cells.
-
-Fast single-distance phase retrieval (Paganin filter) used as the initial guess for step 6.
-
-### Step 6 — Iterative MPI reconstruction
-
-GPU-binding wrapper maps each MPI rank to a unique GPU:
-
-```bash
-mpirun -np <ngpus> ./bind.sh python step6_rec_iterative_mpi.py configs/config.conf
-```
-
-Example with 4 GPUs:
+A complete example is in `experimental/Y350a_dist1234/`. The pipeline has two stages:
 
 ```bash
 cd experimental/Y350a_dist1234
-mpirun -np 4 ./bind.sh python step6_rec_iterative_mpi.py configs/config.conf
+
+# Stage 1 — data preparation (single node, steps 0–5)
+python step0.py config_step0.conf          # NFP probe calibration (optional)
+python steps15.py config_steps15.conf      # steps 1–5: convert, preprocess, shifts, Paganin
+
+# Stage 2 — iterative reconstruction (multi-node/multi-GPU)
+mpirun -np 4 ./bind.sh python step6.py config_step6.conf
 ```
+
+### Step 0 — NFP probe calibration (optional)
+
+Near-field ptychography (NFP) reconstruction of the illumination probe. Writes a probe HDF5 file that step 6 uses as its starting probe instead of a flat-field estimate.
+
+### Steps 1–5 — Data preparation (`steps15.py`)
+
+`steps15.py` runs all data preparation with MPI across multiple nodes and GPUs:
+
+- **Step 1** — reads raw EDF detector frames in parallel, writes a single HDF5 file with all distances, flat/dark fields, encoder shifts, and beam-monitor attributes
+- **Step 2** — outlier removal (median-filter spike detection) and intensity normalisation per projection (GPU)
+- **Step 3** — combines all shift sources into `cshifts_final`: encoder shifts from `correct.txt`, inter-plane alignment from Peter's RHAPP pipeline (`rhapp.mat`), slow-drift motion correction (`correct_motion.txt`), and optional 3-D tomographic correction
+- **Step 4** — multi-distance back-projection onto the object plane at multiple bin levels; includes amplitude normalisation across distances
+- **Step 5** — multi-distance Paganin phase retrieval followed by FBP reconstruction at all bin levels to produce the initial object guess for step 6
+
+### Step 6 — Iterative MPI reconstruction
+
+Joint iterative refinement of object, probe, and sample positions using the Bilinear-Hessian (BH) algorithm. Scales across multiple nodes and GPUs — one MPI rank per GPU:
+
+```bash
+mpirun -np <ngpus> ./bind.sh python step6.py config_step6.conf
+```
+
+**Startup order of priority for initial object:**
+
+1. Latest checkpoint in `path_out` (automatic resume)
+2. External `.vol` file specified by `init_vol` in the config
+3. Paganin reconstruction written by step 5
 
 ---
 
@@ -193,7 +166,7 @@ See [ALCF Python docs](https://docs.alcf.anl.gov/polaris/data-science/python/) f
 
 ### GPU affinity
 
-`experimental/Y350a_dist1234/set_affinity_gpu_polaris.sh` assigns GPUs in reverse order to match the Polaris PCIe topology (see [ALCF machine overview](https://www.alcf.anl.gov/support/user-guides/polaris/hardware-overview/machine-overview/index.html)):
+`polaris/set_affinity_gpu_polaris.sh` assigns GPUs in reverse order to match the Polaris PCIe topology (see [ALCF machine overview](https://www.alcf.anl.gov/support/user-guides/polaris/hardware-overview/machine-overview/index.html)):
 
 ```bash
 #!/bin/bash -l
@@ -205,7 +178,7 @@ exec "$@"
 
 ### PBS job script
 
-`experimental/Y350a_dist1234/prun.sh` — submit with `qsub prun.sh` from the experiment directory:
+`polaris/prun.sh` — submit with `qsub polaris/prun.sh` from the experiment directory:
 
 ```bash
 #!/bin/bash
@@ -226,6 +199,11 @@ export NTOTRANKS=$(( NNODES * NRANKS ))
 
 echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRANKS}"
 
+# NCCL networking settings for Polaris HPE Slingshot interconnect
+export NCCL_COLLNET_ENABLE=1
+export NCCL_NET_GDR_LEVEL=PHB
+export NCCL_SOCKET_IFNAME=hsn1
+
 # Activate conda + venv
 module use /soft/modulefiles; module load conda; conda activate base
 CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
@@ -234,7 +212,7 @@ source "$HOME/venvs/${CONDA_NAME}/bin/activate"
 mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} \
     --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} \
     ./set_affinity_gpu_polaris.sh \
-    python step6_rec_iterative_mpi.py configs/config.conf
+    python step6.py config_step6.conf
 ```
 
 ### Typical workflow on Polaris
@@ -261,15 +239,18 @@ cp /path/to/data.h5 /eagle/<project>/data.h5
 
 # 5. Edit the config to point to eagle paths
 cd experimental/Y350a_dist1234
-vi configs/config.conf   # set in_file and path_out
+vi config_step6.conf   # set in_file and path_out
 
-# 6. Edit prun.sh: set project ID, node count, config path
-vi prun.sh
+# 6. Copy the Polaris scripts next to your step6 script
+cp ../../polaris/set_affinity_gpu_polaris.sh .
 
-# 7. Submit
-qsub prun.sh
+# 7. Edit prun.sh: set project ID, node count, config path
+vi ../../polaris/prun.sh
 
-# 8. Monitor
+# 8. Submit
+qsub ../../polaris/prun.sh
+
+# 9. Monitor
 qstat -u $USER
 tail -f <jobid>.o
 ```
@@ -286,13 +267,15 @@ tail -f <jobid>.o
 
 ---
 
-## Configuration file
+## Configuration file (`config_step6.conf`)
 
-`configs/config.conf` — all parameters as `key=value`, comments with `#`:
+All parameters as `key=value`; inline comments with `#`:
 
 ```ini
 in_file=/data/dataset.h5       # input HDF5 file
 path_out=/data/results         # output directory for checkpoints and results
+prb_file=/data/nfp_results.h5  # probe initial guess from step 0 (optional)
+init_vol=/data/rec.vol         # external binary .vol initial guess (optional)
 
 # Data dimensions
 ntheta=2500                    # number of projection angles
@@ -301,16 +284,17 @@ n=1024                         # horizontal detector size (pixels)
 nzobj=1632                     # vertical object size (pixels)
 nobj=1632                      # horizontal/lateral object size (pixels)
 ndist=4                        # number of propagation distances
-bin=1                          # binning level (0 = full, 1 = 2×, -1 = 2× unbin)
+bin=1                          # binning level (0 = full resolution, 1 = 2×, ...)
 
 # Solver
-niter=3                        # number of BH iterations
+niter=257                      # number of BH iterations
 nchunk=8                       # projection chunk size (tune to GPU memory)
 start_iter=0                   # resume from this iteration (0 = fresh start)
-err_step=1                     # compute/print error every N iterations (-1 = never)
-vis_step=-1                    # save visualization every N iterations (-1 = never)
+err_step=8                     # compute/print error every N iterations (-1 = never)
+vis_step=8                     # save checkpoint every N iterations (-1 = never)
 
 # Physics
+energy=17.23                   # X-ray energy (keV)
 paganin=20                     # Paganin regularization constant
 rotation_center_shift=-8.78    # rotation center offset from detector center (pixels)
 mask=1.1                       # tomographic mask radius (fraction of detector half-width)
@@ -318,11 +302,55 @@ obj_dtype=complex64            # object dtype: complex64 or float32
 
 # Regularization
 lam_prbfit=3.1e-3              # probe fit weight
+lam_laplacian=0                # 3-D Laplacian regularization weight
 rho=1,0.05,0.02                # step-size scaling for object, probe, positions
 
 # Misc
 start_theta=0                  # first angle index
-log_level=DEBUG                # DEBUG / INFO / WARNING / ERROR
+log_level=WARNING              # DEBUG / INFO / WARNING / ERROR
+pos_checkpoint=                # override positions from a checkpoint file (optional)
+```
+
+### `init_vol` — external initial object
+
+When `init_vol` is set, the solver reads a raw binary file as the starting object instead of the Paganin reconstruction. The expected format is a C-order `float32` flat binary array of shape `nzobj·2^b × nobj·2^b × nobj·2^b` where `b ≥ 0` is inferred automatically from the file size. When `b > 0`, block-averaging downsampling is applied. Values are normalized by `nobj/4` to match the internal reconstruction scale.
+
+---
+
+## Checkpoint outputs
+
+At each `vis_step` interval (when `vis_step != -1` and `i > start_iter`), the following files are written to `path_out`:
+
+| File | Content |
+|---|---|
+| `checkpoint_{iter:04}.h5` | Full object (real + imag), probe, positions |
+| `checkpoint_{iter:04}_obj_re.tiff` | Middle z-slice of `obj_re` for quick visual check |
+
+The log also records the mean absolute position error per distance at each checkpoint:
+
+```
+iter=256: pos mean abs error [px]  d0:(0.023,0.019)  d1:(0.026,0.020)  d2:(0.030,0.024)  d3:(0.031,0.026)
+```
+
+---
+
+## Running tests
+
+Tests live in `tests/` as Jupyter notebooks:
+
+| Notebook | What it tests |
+|---|---|
+| `tests/shift/` | B-spline shift operators (forward, adjoint, derivatives) |
+| `tests/tomo/` | Radon transform R / RT / FBP |
+| `tests/holotomo3d/` | End-to-end holotomography reconstruction |
+| `tests/nfp/` | Near-field ptychography probe calibration |
+| `tests/mosaic/` | Mosaic / tiled reconstruction |
+
+Run from the command line:
+
+```bash
+jupyter nbconvert --to notebook --execute tests/shift/test_shift.ipynb
+jupyter nbconvert --to notebook --execute tests/holotomo3d/test.ipynb
 ```
 
 ---
@@ -332,29 +360,33 @@ log_level=DEBUG                # DEBUG / INFO / WARNING / ERROR
 ```
 src/holotomocupy/
     rec_mpi.py          # BH iterative solver (MPI-aware)
-    tomo.py             # tomographic projection (RT / FBP)
-    shift.py            # B-spline sub-pixel shift operators
-    propagation.py      # Fresnel propagator
-    chunking.py         # @gpu_batch decorator
-    cuda_kernels.py     # raw CUDA kernels (spline interpolation, NUFFT gather)
-    reader.py           # MPI-aware HDF5 reader
-    writer.py           # MPI-aware HDF5 writer / checkpointing
-    mpi_functions.py    # MPI collective helpers
-    config.py           # configuration file parser
+    rec_nfp_mpi.py      # near-field ptychography probe calibration solver (MPI-aware)
+    tomo.py             # tomographic projection: R, RT, FBP (ramp/shepp/parzen), rec_tomo CG
+    shift.py            # B-spline sub-pixel shift operators (S, S*, curlyS, derivatives)
+    propagation.py      # Fresnel propagator (cuFFTDx or cuPy backend)
+    conv2d_cufftdx.py   # cuFFTDx JIT wrapper + availability flag
+    cuda/conv2d.cu      # cuFFTDx 2-D convolution kernel source
+    chunking.py         # @gpu_batch decorator — auto-chunks over GPU memory limit
+    cuda_kernels.py     # raw CUDA kernels (spline interpolation, NUFFT gather/scatter)
+    reader.py           # MPI-aware HDF5 reader, raw .vol binary reader, Octave mat loader
+    writer.py           # MPI-aware HDF5 writer / checkpointing + TIFF slice output
+    mpi_functions.py    # MPI collective helpers (allreduce, redistribute)
+    config.py           # configuration file parser (step 6 and steps 1–5)
+    utils.py            # GPU/CPU memory utilities, visualization helpers, timer decorator
     logger_config.py    # colored MPI-aware logger
-    utils.py            # visualization helpers (mshow, mshow_complex, read_tiff, …)
 
 experimental/
-    Y350a_dist1234/     # full brain dataset pipeline (steps 1–6)
-        bind.sh                      # GPU-to-rank binding (mpirun / SLURM)
-        set_affinity_gpu_polaris.sh  # GPU-to-rank binding for Polaris A100 topology
-        prun.sh                      # PBS job script for Polaris (ALCF)
-    performance_tests/  # timing benchmarks
+    Y350a_dist1234/     # brain dataset pipeline (steps 0–6, 4 distances)
+    AtomiumS2/          # Atomium S2 dataset pipeline (steps 0–6, 4 distances)
+    y350a_80um/         # y350a 80 µm dataset pipeline (steps 0–6, 4 distances)
+    performance_tests/  # timing benchmarks and MPI scaling tests
 
 tests/
-    test.ipynb          # end-to-end holotomography reconstruction test (interactive)
-    test.py             # same test as MPI-runnable script (mpirun -np N ./bind.sh python test.py)
-    bind.sh             # GPU-to-rank binding wrapper
+    shift/              # B-spline shift kernel adjoint / derivative tests
+    tomo/               # Radon transform consistency tests
+    holotomo3d/         # end-to-end holotomography reconstruction test
+    nfp/                # near-field ptychography test
+    mosaic/             # mosaic reconstruction test
 ```
 
 ---

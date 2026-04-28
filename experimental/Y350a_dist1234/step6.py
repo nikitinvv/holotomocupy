@@ -14,6 +14,7 @@ run resumes automatically from the latest saved iteration.
 """
 
 import sys
+import h5py
 from mpi4py import MPI
 from holotomocupy.rec_mpi import Rec
 from holotomocupy.config import parse_args
@@ -22,6 +23,7 @@ from holotomocupy.reader import Reader, find_latest_checkpoint
 from holotomocupy.writer import Writer
 from holotomocupy.logger_config import logger, set_log_level
 
+import numpy as np
 import cupy as cp
 cp.cuda.set_pinned_memory_allocator(None)
 
@@ -37,15 +39,15 @@ cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
 # --- Build I/O helpers --------------------------------------------------
 reader = Reader(
     args.in_file, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
 )
 writer = Writer(
     args.path_out, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
 )
 
@@ -77,10 +79,22 @@ ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+elif getattr(args, 'init_vol', None):
+    logger.info(f"Reading initial object from vol file: {args.init_vol}")
+    reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))
+    reader.read_pos(out=cl.vars['pos'])
+    if args.prb_file:
+        logger.info(f"Loading {args.ndist} probes from: {args.prb_file}")
+    reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])
-    reader.read_prb(out=cl.vars['prb'])
+    if args.prb_file:
+        logger.info(f"Loading {args.ndist} probes from: {args.prb_file}")
+    reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
+if args.pos_checkpoint:
+    logger.info(f"Overriding positions from: {args.pos_checkpoint}")
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

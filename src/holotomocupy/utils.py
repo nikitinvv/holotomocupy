@@ -74,9 +74,9 @@ def mshow_pos(pos, show=False, **args):
         if isinstance(pos, cp.ndarray):
             pos = pos.get()
         _, ax = plt.subplots(1, 2, figsize=(10, 4))
-        ax[0].plot(pos[:, :, 1], ".")
+        ax[0].plot(pos[..., 1], ".")
         ax[0].set_title("x")
-        ax[1].plot(pos[:, :, 0], ".")
+        ax[1].plot(pos[..., 0], ".")
         ax[1].set_title("y")
         ax[0].grid()
         ax[1].grid()
@@ -124,7 +124,9 @@ def timer(func):
         result = func(*args, **kwargs)
         elapsed = time.time() - start
         mem = _process.memory_info().rss / 1024**3
-        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB")
+        free, total = cp.cuda.runtime.memGetInfo()
+        gpu_mem = (total - free) / 1024**3
+        logger.debug(f"{func.__name__}: {elapsed:.4f} sec, process memory {mem:.2f} GB, GPU memory {gpu_mem:.2f} GB")
         return result
     return wrapper
 

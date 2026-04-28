@@ -35,13 +35,12 @@ occurs = {'gradients_cascade:':1,
           'gradient_prbfit:':1,
          'allreduce:':2,
          'allreduce2:':2,
-         'mulc_batch:':3,
          'fwd_tomo:':1,
          'hessian_cascade:':3,
          'hessian_prbfit:':3,
-         'linear_batch:':8,
-         'redot_batch:':3,
-         'min:':1}
+         'linear_batch:':5,
+         'linear_redot_batch:':3}
+         #'min:':1}
 
 times = {}
 rank = 0

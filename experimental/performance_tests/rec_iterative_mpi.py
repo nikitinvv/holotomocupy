@@ -20,15 +20,15 @@ cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
 
 reader = Reader(
     args.in_file, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
 )
 writer = Writer(
     args.path_out, comm,
-    cl_mpi.st_src, cl_mpi.end_src, args.nzobj, args.nobj,
-    cl_mpi.st_dst, cl_mpi.end_dst, args.ntheta,
+    cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
+    cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist, args.nz, args.n, args.obj_dtype,
 )
 
@@ -49,16 +49,22 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
+reader.read_shrink(out=cl.shrink_nd)
 
 logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+elif getattr(args, 'init_vol', None):
+    logger.info(f"Reading initial object from vol file: {args.init_vol}")
+    reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))
+    reader.read_pos(out=cl.vars['pos'])
+    reader.read_prb(prb_file=getattr(args, 'prb_file', None), out=cl.vars['prb'])
 else:
     reader.read_obj(out=cl.vars['obj'])
     reader.read_pos(out=cl.vars['pos'])
-    reader.read_prb(out=cl.vars['prb'])
+    reader.read_prb(prb_file=getattr(args, 'prb_file', None), out=cl.vars['prb'])
 
 logger.info("Run reconstruction")
 cl.BH(writer=writer)

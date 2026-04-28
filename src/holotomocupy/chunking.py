@@ -9,7 +9,7 @@ class Chunking:
         self.stream  = [cp.cuda.Stream(non_blocking=True) for _ in range(3)]
         self.chunk   = chunk
 
-    def gpu_batch(self, axis_out=0, axis_inp=0, nout=1):
+    def gpu_batch(self, axis_out=0, axis_inp=0, nout=1, inp_pad=0):
         """
         Single-GPU chunked processing of functions with syntax
         f(out1_proper, ..., out1_nonproper, ...,
@@ -26,6 +26,12 @@ class Chunking:
                      no CPU transfer).
         inp*_nonproper are numpy/CuPy arrays of non-chunking shape (replicated
                      to the GPU once).
+
+        inp_pad > 0: the FIRST argument after the nout outputs is a "padded"
+                     proper input whose shape[axis_inp] == size + inp_pad.
+                     Each chunk transfers (chunk + inp_pad) rows so the kernel
+                     receives the full padded window and can slice freely.
+                     size is derived as inp[0].shape[axis_inp] - inp_pad.
         """
 
         def decorator(func):
@@ -39,7 +45,8 @@ class Chunking:
                 out = args[1 : 1 + nout]
                 inp = args[1 + nout :]
 
-                size = inp[0].shape[axis_inp]
+                # size: actual chunking length (without padding)
+                size = inp[0].shape[axis_inp] - inp_pad
 
                 proper_inp,   nonproper_inp   = 0, 0
                 proper_out,   nonproper_out   = 0, 0
@@ -52,7 +59,10 @@ class Chunking:
                     elif isinstance(out[k], cp.ndarray):
                         nonproper_out += 1
 
-                for k in range(len(inp)):
+                # inp[0] when inp_pad > 0: always the padded proper input
+                padded_first = 1 if inp_pad > 0 else 0
+                proper_inp   = padded_first
+                for k in range(padded_first, len(inp)):
                     if ((isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray))
                             and len(inp[k].shape) > axis_inp + 1
                             and inp[k].shape[axis_inp] == size):
@@ -73,24 +83,31 @@ class Chunking:
                 self.run(cl, gout, ginp,
                          proper_inp, nonproper_inp,
                          proper_out, nonproper_out,
-                         axis_out, axis_inp, func)
+                         axis_out, axis_inp, func, inp_pad)
 
             return inner
 
         return decorator
 
-    def run(self, cl, out, inp, proper_inp, nonproper_inp, proper_out, nonproper_out, axis_out, axis_inp, func):
+    def run(self, cl, out, inp, proper_inp, nonproper_inp, proper_out, nonproper_out, axis_out, axis_inp, func, inp_pad=0):
         """Run by chunks with overlapped H2D / compute / D2H on three streams."""
 
         gpu_mem = self.gpu_mem
         stream  = self.stream
 
-        size   = inp[0].shape[axis_inp]
+        size   = inp[0].shape[axis_inp] - inp_pad
         nchunk = int(np.ceil(size / self.chunk))
 
         # pre-allocate double-buffered GPU arrays
         out_gpu, offset = self.alloc_double_buffers(out[:proper_out], axis_out, gpu_mem, 0, self.chunk)
-        inp_gpu, offset = self.alloc_double_buffers(inp[:proper_inp], axis_inp, gpu_mem, offset, self.chunk)
+
+        if inp_pad > 0 and proper_inp > 0:
+            # First proper input is padded: allocate chunk + inp_pad rows for it
+            inp_gpu_pad,  offset = self.alloc_double_buffers(inp[:1],              axis_inp, gpu_mem, offset, self.chunk + inp_pad)
+            inp_gpu_rest, offset = self.alloc_double_buffers(inp[1:proper_inp],    axis_inp, gpu_mem, offset, self.chunk)
+            inp_gpu = [[inp_gpu_pad[j][0]] + inp_gpu_rest[j] for j in (0, 1)]
+        else:
+            inp_gpu, offset = self.alloc_double_buffers(inp[:proper_inp], axis_inp, gpu_mem, offset, self.chunk)
 
         # move non-proper numpy inputs to GPU once
         for k in range(proper_inp, proper_inp + nonproper_inp):
@@ -99,10 +116,12 @@ class Chunking:
         def p2g(buf_id, k):
             st  = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
-            src = self.mk_slices(axis_inp, slice(st, end))
-            dst = self.mk_slices(axis_inp, slice(0, end - st))
             cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_inp):
+                extra = inp_pad if (j == 0 and inp_pad > 0) else 0
+                ndim = inp[j].ndim
+                src = self.mk_slices(axis_inp, slice(st, end + extra), ndim)
+                dst = self.mk_slices(axis_inp, slice(0, end - st + extra), ndim)
                 if axis_inp == 1:
                     c_src = inp[j][src]
                     c_dst = inp_gpu[buf_id][j][dst]
@@ -124,10 +143,11 @@ class Chunking:
         def g2p(buf_id, k):
             st  = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
-            src = self.mk_slices(axis_out, slice(0, end - st))
-            dst = self.mk_slices(axis_out, slice(st, end))
             cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_out):
+                ndim = out[j].ndim
+                src = self.mk_slices(axis_out, slice(0, end - st), ndim)
+                dst = self.mk_slices(axis_out, slice(st, end), ndim)
                 if axis_out == 1:
                     c_src = out_gpu[buf_id][j][src]
                     c_dst = out[j][dst]
@@ -149,8 +169,14 @@ class Chunking:
         def p(buf_id, k):
             st  = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
-            inp_gpu_c = self.slice_bufs(inp_gpu[buf_id], axis_inp, end - st)
-            out_gpu_c = self.slice_bufs(out_gpu[buf_id], axis_out, end - st)
+            n   = end - st
+            # Slice each proper input; padded input (j==0) gets n+inp_pad rows
+            inp_gpu_c = []
+            for j in range(proper_inp):
+                extra = inp_pad if (j == 0 and inp_pad > 0) else 0
+                slc = self.mk_slices(axis_inp, slice(0, n + extra), inp_gpu[buf_id][j].ndim)
+                inp_gpu_c.append(inp_gpu[buf_id][j][slc])
+            out_gpu_c = self.slice_bufs(out_gpu[buf_id], axis_out, n)
             func(
                 cl,
                 *out_gpu_c,
@@ -192,12 +218,15 @@ class Chunking:
 
     ####################### Slicing #########################
     def slice_bufs(self, bufs, axis, n):
-        slc = [slice(None)] * 3
-        slc[axis] = slice(0, n)
-        return [b[tuple(slc)] for b in bufs]
+        result = []
+        for b in bufs:
+            slc = [slice(None)] * b.ndim
+            slc[axis] = slice(0, n)
+            result.append(b[tuple(slc)])
+        return result
 
-    def mk_slices(self, axis, sl):
-        res = [slice(None)] * 3
+    def mk_slices(self, axis, sl, ndim=3):
+        res = [slice(None)] * ndim
         res[axis] = sl
         return tuple(res)
 
@@ -230,7 +259,23 @@ class Chunking:
             out[:] = a * x + b * y
 
         _linear(self, out, x, y, a, b)
-    
+
+    @timer
+    def linear_redot_batch(self, x, y, a, b):
+        """x = ax + by, returns Re<y, x_new> in one pass"""
+        if isinstance(x, cp.ndarray):
+            x[:] = a * x + b * y
+            return redot(y, x).get()
+        res = cp.zeros(1, dtype="float32")
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=2)
+        def _linear_redot(self, out, res, x, y, a, b):
+            out[:] = a * x + b * y
+            res[:] += redot(y, out)
+
+        _linear_redot(self, x, res, x, y, a, b)
+        return res[0].get()
+
     @timer
     def mulc_batch(self, out, x, a):
         """out = ax"""

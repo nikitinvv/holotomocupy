@@ -213,10 +213,10 @@ dkms.conf
 
 report*
 *.tiff
-*.conf
 *.npy
 *.nsys-rep
 *.nsys
+.claude
 .nfs*
 
 tests/test_results/

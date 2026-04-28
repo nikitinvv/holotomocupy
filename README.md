@@ -118,15 +118,13 @@ Near-field ptychography (NFP) reconstruction of the illumination probe. Writes a
 
 ### Steps 1–5 — Data preparation (`steps15.py`)
 
-`steps15.py` runs all data preparation sequentially on a single node without Jupyter:
+`steps15.py` runs all data preparation with MPI across multiple nodes and GPUs:
 
-- **Step 1** — reads raw detector frames, applies flat-field correction, writes a single HDF5 file
-- **Step 2** — ring removal, background subtraction, binning
-- **Step 3** — estimates sample position shifts between angles via cross-correlation
-- **Step 4** — produces downsampled datasets at multiple bin levels for fast prototyping
-- **Step 5** — Paganin single-distance phase retrieval to generate the initial object guess; refines sample positions and writes them back to the HDF5 file
-
-Individual steps are also available as Jupyter notebooks (`step1_convert.ipynb` … `step5_rec_paganin.ipynb`) for interactive exploration.
+- **Step 1** — reads raw EDF detector frames in parallel, writes a single HDF5 file with all distances, flat/dark fields, encoder shifts, and beam-monitor attributes
+- **Step 2** — outlier removal (median-filter spike detection) and intensity normalisation per projection (GPU)
+- **Step 3** — combines all shift sources into `cshifts_final`: encoder shifts from `correct.txt`, inter-plane alignment from Peter's RHAPP pipeline (`rhapp.mat`), slow-drift motion correction (`correct_motion.txt`), and optional 3-D tomographic correction
+- **Step 4** — multi-distance back-projection onto the object plane at multiple bin levels; includes amplitude normalisation across distances
+- **Step 5** — multi-distance Paganin phase retrieval followed by FBP reconstruction at all bin levels to produce the initial object guess for step 6
 
 ### Step 6 — Iterative MPI reconstruction
 
@@ -362,6 +360,7 @@ jupyter nbconvert --to notebook --execute tests/holotomo3d/test.ipynb
 ```
 src/holotomocupy/
     rec_mpi.py          # BH iterative solver (MPI-aware)
+    rec_nfp_mpi.py      # near-field ptychography probe calibration solver (MPI-aware)
     tomo.py             # tomographic projection: R, RT, FBP (ramp/shepp/parzen), rec_tomo CG
     shift.py            # B-spline sub-pixel shift operators (S, S*, curlyS, derivatives)
     propagation.py      # Fresnel propagator (cuFFTDx or cuPy backend)
@@ -369,7 +368,7 @@ src/holotomocupy/
     cuda/conv2d.cu      # cuFFTDx 2-D convolution kernel source
     chunking.py         # @gpu_batch decorator — auto-chunks over GPU memory limit
     cuda_kernels.py     # raw CUDA kernels (spline interpolation, NUFFT gather/scatter)
-    reader.py           # MPI-aware HDF5 reader + raw .vol binary reader
+    reader.py           # MPI-aware HDF5 reader, raw .vol binary reader, Octave mat loader
     writer.py           # MPI-aware HDF5 writer / checkpointing + TIFF slice output
     mpi_functions.py    # MPI collective helpers (allreduce, redistribute)
     config.py           # configuration file parser (step 6 and steps 1–5)

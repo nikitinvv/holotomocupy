@@ -63,6 +63,56 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta):
     return shrink_nd.astype('float32')
 
 
+def read_nxtomo_meta(nx_path):
+    """Read geometry and scan metadata from an ESRF NXtomo (.nx) file.
+
+    Returns a dict with:
+      entry           str   — HDF5 entry group name
+      energy          float — keV
+      pixel_size      float — m  (physical detector pixel size)
+      z1              float — m  (focus-to-sample propagation distance)
+      z_total         float — m  (focus-to-detector distance)
+      magnification   float
+      voxelsize       float — m
+      ny, nx          int   — full detector frame size
+      data_ids        ndarray[int] — frame indices where image_key == 0
+      flat_ids        ndarray[int] — frame indices where image_key == 1
+      dark_ids        ndarray[int] — frame indices where image_key == 2
+      x_trans         ndarray[float64] — mm, sample x_translation for data frames (≈ spy)
+      y_trans         ndarray[float64] — mm, sample y_translation for data frames (≈ spz)
+    """
+    with h5py.File(nx_path, 'r') as f:
+        entry = next(k for k in f if k.startswith('entry'))
+        g = f[entry]
+
+        energy     = float(g['instrument/beam/incident_energy'][()])           # keV
+        pixel_size = float(g['instrument/detector/x_pixel_size'][()]) * 1e-6  # µm → m
+        _src_dist  = float(g['instrument/source/distance'][()])                 # mm (negative)
+        z1         = -_src_dist * 1e-3                                        # mm → m
+        z_total    = (float(g['instrument/detector/distance'][()]) - _src_dist) * 1e-3  # mm → m
+
+        image_key = g['instrument/detector/image_key'][:]
+        data_ids  = np.where(image_key == 0)[0]
+        flat_ids  = np.where(image_key == 1)[0]
+        dark_ids  = np.where(image_key == 2)[0]
+
+        ny, nx = g['instrument/detector/data'].shape[1:3]
+
+        x_trans = g['sample/x_translation'][data_ids].astype('float64')  # mm (≈ spy)
+        y_trans = g['sample/y_translation'][data_ids].astype('float64')  # mm (≈ spz)
+
+    magnification = z_total / z1
+    voxelsize     = pixel_size / magnification
+
+    return dict(
+        entry=entry, energy=energy, pixel_size=pixel_size,
+        z1=z1, z_total=z_total, magnification=magnification, voxelsize=voxelsize,
+        ny=ny, nx=nx,
+        data_ids=data_ids, flat_ids=flat_ids, dark_ids=dark_ids,
+        x_trans=x_trans, y_trans=y_trans,
+    )
+
+
 def find_latest_checkpoint(path_out, start_iter):
     """Return the path to the most recent checkpoint in path_out, or None."""
     if start_iter > 0:

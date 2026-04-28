@@ -443,6 +443,11 @@ class RecNFP:
         if not (i % self.err_step == 0 and self.err_step != -1):
             return
         err = self.min(vars['prb'], vars['proj'], vars['pos'])
+
+        # Gather position errors from all ranks to rank 0
+        pos_err = (vars['pos'] - self.pos_init).get()   # [local_ntheta, 2]
+        all_pos_err = self.cl_mpi.comm.gather(pos_err, root=0)
+
         if self.rank == 0:
             if i == -1:
                 logger.warning(f"Initial {err=:1.5e}")
@@ -451,6 +456,9 @@ class RecNFP:
                 ittime = time.time() - self.time_start
                 logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e}")
                 self.table.loc[len(self.table)] = [i, err, ittime]
+            pos_err_all = np.concatenate(all_pos_err, axis=0)
+            logger.warning(f"  pos err y: {np.array2string(pos_err_all[:, 0], precision=4, separator=', ')}")
+            logger.warning(f"  pos err x: {np.array2string(pos_err_all[:, 1], precision=4, separator=', ')}")
             self.time_start = time.time()
             if hasattr(self, 'path_out'):
                 name = f"{self.path_out}/conv_nfp.csv"

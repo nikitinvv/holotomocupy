@@ -77,6 +77,31 @@ def parse_args_step0(config_file):
     return args
 
 
+def parse_args_step0_nx(config_file):
+    """Parse config for step0.py reading ESRF NXtomo (.nx) files."""
+    parser = configparser.ConfigParser(inline_comment_prefixes=("#",), interpolation=None)
+    with open(config_file, "r", encoding="utf-8") as f:
+        parser.read_string("[DEFAULT]\n" + f.read())
+    cfg = parser["DEFAULT"]
+
+    try:
+        args = SimpleNamespace()
+        args.nx_file  = cfg.get("nx_file")
+        args.h5_out   = cfg.get("h5_out")
+        args.path_out = cfg.get("path_out", fallback=None)
+        args.n        = cfg.getint("n",        fallback=2048)
+        args.niter    = cfg.getint("niter",    fallback=129)
+        args.nchunk   = cfg.getint("nchunk",   fallback=4)
+        args.vis_step = cfg.getint("vis_step", fallback=-1)
+        args.err_step = cfg.getint("err_step", fallback=32)
+        args.rho      = [float(x.strip()) for x in cfg.get("rho").split(",") if x.strip()]
+        args.log_level = cfg.get("log_level", fallback="INFO")
+    except configparser.NoOptionError as e:
+        raise ValueError(f"Missing required field in {config_file}: {e}") from e
+
+    return args
+
+
 def parse_args_steps15(config_file):
     parser = configparser.ConfigParser(inline_comment_prefixes=("#",))
     with open(config_file, "r", encoding="utf-8") as f:

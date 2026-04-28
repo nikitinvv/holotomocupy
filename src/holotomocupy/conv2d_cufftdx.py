@@ -55,12 +55,15 @@ _EPT_FPB: dict = {
     4096: (32, 4),
 }
 _WARP     = 32
-_MAX_SMEM = 163840  # sm_80 max optin shared memory per block
+_MAX_SMEM = cp.cuda.Device(0).attributes['MaxSharedMemoryPerBlockOptin']
 
 
 def _ept_fpb(n: int):
+    # Validate table entry against the current GPU's shared-memory limit before using it.
     if n in _EPT_FPB:
-        return _EPT_FPB[n]
+        ept, fpb = _EPT_FPB[n]
+        if n * fpb * 8 <= _MAX_SMEM:
+            return ept, fpb
     fpb = next(f for f in (8, 4, 2, 1) if n * f * 8 <= _MAX_SMEM)
     for max_block in (512, 1024):
         for ept in (1, 2, 4, 8, 16, 32, 64, 128):

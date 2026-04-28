@@ -42,7 +42,7 @@ _MATHDX      = pathlib.Path(os.environ.get(
 _CUTLASS     = _MATHDX / "external/cutlass/include"
 _CUFFTDX_EX  = _MATHDX / "example/cufftdx"   # common/ and 07_convolution_3d/ live here
 _NVCC    = os.environ.get("NVCC", "nvcc")
-_SM      = os.environ.get("CUFFTDX_SM", "80")
+_SM      = os.environ.get("CUFFTDX_SM") or cp.cuda.Device(0).compute_capability
 _SO_DIR  = pathlib.Path(os.environ.get("CUFFTDX_SO_DIR", str(_HERE)))
 
 # ---------------------------------------------------------------------------

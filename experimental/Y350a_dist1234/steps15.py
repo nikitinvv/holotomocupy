@@ -330,12 +330,13 @@ else:
     ref_start_gpu = cp.array(ref_start)
     ref_end_gpu   = cp.array(ref_end)
 
-    # --- Rank 0: write pref (= ref_start), delete any existing pdata -------
+    # --- Rank 0: write pref / pref_end, delete any existing pdata ----------
     if rank == 0:
         with h5py.File(fpath, 'a') as fid:
-            if '/exchange/pref' in fid:
-                del fid['/exchange/pref']
-            fid.create_dataset('/exchange/pref', data=ref_start)
+            for key, arr in (('/exchange/pref', ref_start), ('/exchange/pref_end', ref_end)):
+                if key in fid:
+                    del fid[key]
+                fid.create_dataset(key, data=arr)
             for k in range(ndist):
                 if f'/exchange/pdata{k}' in fid:
                     del fid[f'/exchange/pdata{k}']
@@ -468,26 +469,33 @@ else:
     # --- Rank 0 reads ref and full shift array; broadcast to all ranks ----
     if rank == 0:
         with h5py.File(fpath) as fid:
-            ref = fid['/exchange/pref'][:, :n, :n].astype('float32')   # [ndist, n, n]
-            r   = fid['/exchange/cshifts_final'][:].astype('float32')
+            ref     = fid['/exchange/pref'][:, :n, :n].astype('float32')     # [ndist, n, n]
+            ref_end = fid['/exchange/pref_end'][:, :n, :n].astype('float32') if '/exchange/pref_end' in fid else ref.copy()
+            r       = fid['/exchange/cshifts_final'][:].astype('float32')
         r[..., 1] += rotation_center_shift
     else:
-        ref = np.empty([ndist, n, n], dtype='float32')
-        r   = np.empty([ntheta, ndist, 2], dtype='float32')
+        ref     = np.empty([ndist, n, n], dtype='float32')
+        ref_end = np.empty([ndist, n, n], dtype='float32')
+        r       = np.empty([ntheta, ndist, 2], dtype='float32')
 
-    comm.Bcast(ref, root=0)
-    comm.Bcast(r,   root=0)
+    comm.Bcast(ref,     root=0)
+    comm.Bcast(ref_end, root=0)
+    comm.Bcast(r,       root=0)
 
     # --- Rank 0 writes binned refs ----------------------------------------
     if rank == 0:
-        ref0 = ref.copy()
+        ref0     = ref.copy()
+        ref0_end = ref_end.copy()
         with h5py.File(fpath, 'a') as fid:
             for bin in range(nlevels):
-                if f'/exchange/pref_{bin}' in fid:
-                    del fid[f'/exchange/pref_{bin}']
-                fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
-                ref0 = 0.5 * (ref0[..., ::2] + ref0[..., 1::2])
-                ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
+                for key, arr in ((f'/exchange/pref_{bin}', ref0), (f'/exchange/pref_end_{bin}', ref0_end)):
+                    if key in fid:
+                        del fid[key]
+                    fid.create_dataset(key, data=arr)
+                ref0     = 0.5 * (ref0[..., ::2]     + ref0[..., 1::2])
+                ref0     = 0.5 * (ref0[..., ::2, :]  + ref0[..., 1::2, :])
+                ref0_end = 0.5 * (ref0_end[..., ::2]    + ref0_end[..., 1::2])
+                ref0_end = 0.5 * (ref0_end[..., ::2, :] + ref0_end[..., 1::2, :])
 
             # Delete existing pdata{k}_{bin} datasets
             for bin in range(nlevels):
@@ -499,6 +507,8 @@ else:
     # --- All ranks create output datasets collectively + process -----------
     cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cref     = cp.array(ref)
+    cref_end = cp.array(ref_end)
+    t_scale  = max(ntheta - 1, 1)
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         data_out = [[fid.create_dataset(f'/exchange/pdata{k}_{bin}',
@@ -517,7 +527,9 @@ else:
             for k in range(ndist):
                 data[k] = cp.array(fid[f'/exchange/pdata{k}'][j, :n, :n].astype('float32'))
 
-            rdata = data / (cref + 1e-5)
+            t = float(j) / t_scale
+            cref_chunk = (1 - t) * cref + t * cref_end
+            rdata = data / (cref_chunk + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])

@@ -332,12 +332,13 @@ else:
     ref_start_gpu = cp.array(ref_start)
     ref_end_gpu   = cp.array(ref_end)
 
-    # --- Rank 0: write pref (= ref_start), delete any existing pdata -------
+    # --- Rank 0: write pref / pref_end, delete any existing pdata ----------
     if rank == 0:
         with h5py.File(fpath, 'a') as fid:
-            if '/exchange/pref' in fid:
-                del fid['/exchange/pref']
-            fid.create_dataset('/exchange/pref', data=ref_start)
+            for key, arr in (('/exchange/pref', ref_start), ('/exchange/pref_end', ref_end)):
+                if key in fid:
+                    del fid[key]
+                fid.create_dataset(key, data=arr)
             for k in range(ndist):
                 if f'/exchange/pdata{k}' in fid:
                     del fid[f'/exchange/pdata{k}']
@@ -470,38 +471,45 @@ else:
     # --- Rank 0 reads ref and full shift array; broadcast to all ranks ----
     if rank == 0:
         with h5py.File(fpath) as fid:
-            ref = fid['/exchange/pref'][:, :n, :n].astype('float32')   # [ndist, n, n]
-            r   = fid['/exchange/cshifts_final'][:].astype('float32')
+            ref     = fid['/exchange/pref'][:, :n, :n].astype('float32')     # [ndist, n, n]
+            ref_end = fid['/exchange/pref_end'][:, :n, :n].astype('float32') if '/exchange/pref_end' in fid else ref.copy()
+            r       = fid['/exchange/cshifts_final'][:].astype('float32')
         r[..., 1] += rotation_center_shift
     else:
-        ref = np.empty([ndist, n, n], dtype='float32')
-        r   = np.empty([ntheta, ndist, 2], dtype='float32')
+        ref     = np.empty([ndist, n, n], dtype='float32')
+        ref_end = np.empty([ndist, n, n], dtype='float32')
+        r       = np.empty([ntheta, ndist, 2], dtype='float32')
 
-    comm.Bcast(ref, root=0)
-    comm.Bcast(r,   root=0)
+    comm.Bcast(ref,     root=0)
+    comm.Bcast(ref_end, root=0)
+    comm.Bcast(r,       root=0)
 
     # --- Rank 0 writes binned refs ----------------------------------------
     if rank == 0:
-        ref0 = ref.copy()
+        ref0     = ref.copy()
+        ref0_end = ref_end.copy()
         with h5py.File(fpath, 'a') as fid:
             for bin in range(nlevels):
-                if f'/exchange/pref_{bin}' in fid:
-                    del fid[f'/exchange/pref_{bin}']
-                fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
-                ref0 = 0.5 * (ref0[..., ::2] + ref0[..., 1::2])
-                ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
+                for key, arr in ((f'/exchange/pref_{bin}', ref0), (f'/exchange/pref_end_{bin}', ref0_end)):
+                    if key in fid:
+                        del fid[key]
+                    fid.create_dataset(key, data=arr)
+                ref0     = 0.5 * (ref0[..., ::2]     + ref0[..., 1::2])
+                ref0     = 0.5 * (ref0[..., ::2, :]  + ref0[..., 1::2, :])
+                ref0_end = 0.5 * (ref0_end[..., ::2]    + ref0_end[..., 1::2])
+                ref0_end = 0.5 * (ref0_end[..., ::2, :] + ref0_end[..., 1::2, :])
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
     cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cref     = cp.array(ref)
+    cref_end = cp.array(ref_end)
 
-    # Smooth reference with Gaussian (Peter's approach): divide by blurred ref
-    # to correct for large-scale illumination variations without removing
-    # fine structure from the flat-field. FWHM = 17 * (n/2048) pixels.
     fwhm_ref  = 17.0 * (n / 2048)
     sigma_ref = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
-    cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
+    cref_smooth     = cp.stack([ndimage.gaussian_filter(cref[k],     sigma_ref) for k in range(ndist)])
+    cref_end_smooth = cp.stack([ndimage.gaussian_filter(cref_end[k], sigma_ref) for k in range(ndist)])
+    t_scale = max(ntheta - 1, 1)
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         data_out = [[fid.require_dataset(f'/exchange/pdata{k}_{bin}',
@@ -520,8 +528,10 @@ else:
             for k in range(ndist):
                 data[k] = cp.array(fid[f'/exchange/pdata{k}'][j, :n, :n].astype('float32'))
 
+            t = float(j) / t_scale
+            cref_chunk_smooth = (1 - t) * cref_smooth + t * cref_end_smooth
             data_smooth = cp.stack([ndimage.gaussian_filter(data[k], sigma_ref) for k in range(ndist)])
-            rdata = data_smooth / (cref_smooth + 1e-5)
+            rdata = data_smooth / (cref_chunk_smooth + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])

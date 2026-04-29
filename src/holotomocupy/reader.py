@@ -296,9 +296,13 @@ class Reader:
         raw_np = np.empty((self.ndist, nz, n), dtype='float32')
         if self.rank == 0:
             with h5py.File(self.in_file, 'r') as fid:
-                nz0 = fid[f'/exchange/pref_{self.bin}'].shape[1]
+                key_start = f'/exchange/pref_{self.bin}'
+                key_end   = f'/exchange/pref_end_{self.bin}'
+                nz0 = fid[key_start].shape[1]
                 st, end = nz0 // 2 - nz // 2, nz0 // 2 + nz // 2
-                raw_np[:] = fid[f'/exchange/pref_{self.bin}'][:self.ndist, st:end]
+                raw_np[:] = fid[key_start][:self.ndist, st:end]
+                if key_end in fid:
+                    raw_np[:] = 0.5 * (raw_np + fid[key_end][:self.ndist, st:end])
         self.comm.Bcast(raw_np, root=0)
         raw = cp.array(raw_np)
         if out is None:

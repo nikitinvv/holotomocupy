@@ -331,6 +331,8 @@ else:
     dark_gpu      = cp.array(dark)
     ref_start_gpu = cp.array(ref_start)
     ref_end_gpu   = cp.array(ref_end)
+    mmr_start = ref_start_gpu.mean(axis=(1, 2)).get()  # [ndist]
+    mmr_end   = ref_end_gpu.mean(axis=(1, 2)).get()    # [ndist]
 
     # --- Rank 0: write pref / pref_end, delete any existing pdata ----------
     if rank == 0:
@@ -360,10 +362,11 @@ else:
                 # data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True) ## broken region on Ximea detector
                 data[:] = remove_outliers(data, radius, threshold)
 
-                t = cp.arange(j, end, dtype='float32') / t_scale   # [chunk]
-                ref_chunk = ((1 - t)[:, None, None] * ref_start_gpu[k]
-                             + t[:, None, None]       * ref_end_gpu[k])   # [chunk, n, n]
-                data /= (ref_chunk + 1e-5)
+                t = cp.arange(j, end, dtype='float32') / t_scale
+                target = ((1 - t) * float(mmr_start[k]) + t * float(mmr_end[k]))[:, None, None]
+                _mean = data.mean(axis=(1, 2), keepdims=True)
+                _mean[_mean == 0] = 1
+                data *= target / _mean
                 data[~cp.isfinite(data)] = 1
 
                 pdata_ds[k][j:end] = data.get()

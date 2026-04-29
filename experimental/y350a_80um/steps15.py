@@ -348,9 +348,16 @@ else:
 
     # --- All ranks write pdata in parallel ---------------------------------
     t_scale = max(ntheta - 1, 1)
+    # Create output datasets first so all metadata is committed before data I/O
+    # (mixing dataset creation with reads in the same MPIO session can corrupt
+    # HDF5 object headers on Lustre when concurrent writes update metadata pages)
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
-        pdata_ds = [fid.create_dataset(f'/exchange/pdata{k}', shape=(ntheta, n, n), dtype='float32')
-                    for k in range(ndist)]
+        for k in range(ndist):
+            fid.create_dataset(f'/exchange/pdata{k}', shape=(ntheta, n, n), dtype='float32')
+    comm.Barrier()
+
+    with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
+        pdata_ds = [fid[f'/exchange/pdata{k}'] for k in range(ndist)]
 
         for k in range(ndist):
             for j in range(local_start, local_end, chunk_size):

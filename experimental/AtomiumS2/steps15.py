@@ -410,8 +410,10 @@ if rank == 0:
 
         rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
         rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
-        # NOTE: rhapp was found on shrink-corrected images in Peter's pipeline, so strictly
-        # it should be rescaled by (1+shrink) per plane; skipped here as Peter does not do it.
+        rhapp_reordered -= rhapp_reordered[:,ref_dist:ref_dist+1]
+        avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)
+        rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
+        logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
         rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---

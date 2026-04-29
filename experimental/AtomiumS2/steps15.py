@@ -284,67 +284,65 @@ else:
         mask  = cp.abs(data - fdata) > fdata * threshold
         return cp.where(mask, fdata, data)
 
-    # --- Rank 0 reads flat/dark fields, computes ref -----------------------
+    # --- Rank 0 reads flat/dark fields, computes ref_start and ref_end ------
     if rank == 0:
-        ref0 = np.empty([nref,  ndist, n, n], dtype='float32')
-        dark_arr = np.empty([ndark, ndist, n, n], dtype='float32')
+        ref0_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
+        ref1_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
+        dark_arr  = np.empty([ndark, ndist, n, n], dtype='float32')
         with h5py.File(fpath) as fid:
             for k in range(ndist):
-                ref0[:, k]     = fid[f'/exchange/data_white_start{k}'][:, :n, :n]
-                dark_arr[:, k] = fid[f'/exchange/data_dark{k}'][:, :n, :n]
+                ref0_arr[:, k]  = fid[f'/exchange/data_white_start{k}'][:, :n, :n]
+                ref1_arr[:, k]  = fid[f'/exchange/data_white_end{k}'][:, :n, :n]
+                dark_arr[:, k]  = fid[f'/exchange/data_dark{k}'][:, :n, :n]
 
         dark = np.mean(dark_arr, axis=0).astype('float32')   # [ndist, n, n]
-        ref  = np.mean(ref0,     axis=0).astype('float32')   # [ndist, n, n]
+        dark_gpu = cp.array(dark)
 
-        ref_gpu  = cp.array(ref) - cp.array(dark)
-        ref_gpu[ref_gpu < 0] = 1e-3
-        # ref_gpu[:, 1402:1430, 844:872] = ref_gpu.mean(axis=(1, 2), keepdims=True)
-        ref_gpu[:] = remove_outliers(ref_gpu, radius, threshold)
-        ref = ref_gpu.get()
+        def _process_ref(ref_raw):
+            r = cp.array(np.mean(ref_raw, axis=0).astype('float32')) - dark_gpu
+            r[r < 0] = 1e-3
+            r[:] = remove_outliers(r, radius, threshold)
+            return r
+
+        ref_start_gpu = _process_ref(ref0_arr)
+        ref_end_gpu   = _process_ref(ref1_arr)
+
+        # Cross-distance normalisation: scale all distances to distance 0 mean
+        mmr = ref_start_gpu.mean(axis=(1, 2))   # [ndist]
+        ref_start_gpu /= mmr[:, None, None] / mmr[0]
+        ref_end_gpu   /= mmr[:, None, None] / mmr[0]
+        # Normalise so ref_start mean == 1
+        ref_start_gpu /= mmr[0]
+        ref_end_gpu   /= mmr[0]
+
+        ref_start = ref_start_gpu.get()
+        ref_end   = ref_end_gpu.get()
     else:
-        ref  = np.empty([ndist, n, n], dtype='float32')
-        dark = np.empty([ndist, n, n], dtype='float32')
+        ref_start = np.empty([ndist, n, n], dtype='float32')
+        ref_end   = np.empty([ndist, n, n], dtype='float32')
+        dark      = np.empty([ndist, n, n], dtype='float32')
 
-    comm.Bcast(ref,  root=0)
-    comm.Bcast(dark, root=0)
+    comm.Bcast(ref_start, root=0)
+    comm.Bcast(ref_end,   root=0)
+    comm.Bcast(dark,      root=0)
 
-    dark_gpu = cp.array(dark)
+    dark_gpu      = cp.array(dark)
+    ref_start_gpu = cp.array(ref_start)
+    ref_end_gpu   = cp.array(ref_end)
 
-    # --- Compute mean_data_ref on rank 0, broadcast ------------------------
-    if rank == 0:
-        mean_data_ref = np.zeros(ndist, dtype='float32')
-        with h5py.File(fpath) as fid:
-            for k in range(ndist):
-                data = cp.array(fid[f'/exchange/data{k}'][0, :n, :n].astype('float32'))
-                data -= dark_gpu[k]
-                data[data < 0] = 0
-                data = remove_outliers(data[None], radius, threshold)[0]
-                mean_data_ref[k] = float(data.mean())
-
-        mmr = np.mean(ref, axis=(1, 2))
-        mean_data_ref *= mmr[0] / mmr[:]
-        ref           *= mmr[0] / mmr[:, None, None]
-        mean_data_ref /= mmr[0]
-        ref           /= mmr[0]
-    else:
-        mean_data_ref = np.zeros(ndist, dtype='float32')
-
-    comm.Bcast(mean_data_ref, root=0)
-    comm.Bcast(ref,           root=0)   # ref was rescaled above
-
-    # --- Rank 0: write pref, delete any existing pdata ---------------------
+    # --- Rank 0: write pref (= ref_start), delete any existing pdata -------
     if rank == 0:
         with h5py.File(fpath, 'a') as fid:
             if '/exchange/pref' in fid:
                 del fid['/exchange/pref']
-            fid.create_dataset('/exchange/pref', data=ref)
+            fid.create_dataset('/exchange/pref', data=ref_start)
             for k in range(ndist):
                 if f'/exchange/pdata{k}' in fid:
                     del fid[f'/exchange/pdata{k}']
     comm.Barrier()
 
     # --- All ranks write pdata in parallel ---------------------------------
-    ref_gpu = cp.array(ref)
+    t_scale = max(ntheta - 1, 1)
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         pdata_ds = [fid.create_dataset(f'/exchange/pdata{k}', shape=(ntheta, n, n), dtype='float32')
                     for k in range(ndist)]
@@ -358,9 +356,11 @@ else:
                 data[data < 0] = 0
                 # data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True)
                 data[:] = remove_outliers(data, radius, threshold)
-                _mean = data.mean(axis=(1, 2), keepdims=True)
-                _mean[_mean == 0] = 1  # dark/blocked projections: keep as-is, avoid NaN
-                data *= mean_data_ref[k] / _mean
+
+                t = cp.arange(j, end, dtype='float32') / t_scale   # [chunk]
+                ref_chunk = ((1 - t)[:, None, None] * ref_start_gpu[k]
+                             + t[:, None, None]       * ref_end_gpu[k])   # [chunk, n, n]
+                data /= (ref_chunk + 1e-5)
                 data[~cp.isfinite(data)] = 1
 
                 pdata_ds[k][j:end] = data.get()

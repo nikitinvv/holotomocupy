@@ -106,12 +106,14 @@ nobj_bin = nobj // (2**bin)
 
 tiff_dir  = f'{path_out}/srdata_bin{bin}'
 rdata_dir = f'{path_out}/rdata_bin{bin}'
+data_dir  = f'{path_out}/data_bin{bin}'
 if rank == 0:
     logger.info(f'path={path}  pfile={pfile}  ntheta={ntheta}  ndist={ndist}  n={n}  nobj={nobj}')
     logger.info(f'bin={bin}  n_bin={n_bin}  nobj_bin={nobj_bin}')
     logger.info(f'shrink[0]               = {[round(float(v), 6) for v in shrink_nd[0]]}')
     os.makedirs(tiff_dir,  exist_ok=True)
     os.makedirs(rdata_dir, exist_ok=True)
+    os.makedirs(data_dir,  exist_ok=True)
 comm.Barrier()
 
 ids_per_rank = np.array_split(np.arange(ntheta), size)
@@ -203,16 +205,17 @@ def _stitch(fid, srdata, j):
             wy[-pady1:]                = 0
             tmp = tmp * cp.outer(wy, wx) + srdata[k+1] * (1 - cp.outer(wy, wx))
         srdata[k] = tmp
-    return rdata
+    return rdata, data_j
 
 srdata = cp.zeros([ndist, nobj_bin, nobj_bin], dtype='float32')
 
 with h5py.File(fpath) as fid:
     for i, j in enumerate(local_ids):
-        rdata = _stitch(fid, srdata, j)
+        rdata, data_j = _stitch(fid, srdata, j)
         for k in range(ndist):
-            tifffile.imwrite(f'{tiff_dir}/ang{j:04d}_dist{k}.tiff', srdata[k].get())
+            tifffile.imwrite(f'{tiff_dir}/ang{j:04d}_dist{k}.tiff',  srdata[k].get())
             tifffile.imwrite(f'{rdata_dir}/ang{j:04d}_dist{k}.tiff', rdata[k].get())
+            tifffile.imwrite(f'{data_dir}/ang{j:04d}_dist{k}.tiff',  data_j[k].get())
         if i % 100 == 0:
             logger.info(f'stitching proj {int(j):4d}/{ntheta}')
 

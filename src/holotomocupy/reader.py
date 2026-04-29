@@ -395,15 +395,15 @@ class Reader:
         """
         if self.rank == 0:
             with h5py.File(path, 'r') as f:
-                scale = self.n // f['prb_abs'].shape[-1]
-        scale_arr = np.zeros(1, dtype='int32')
+                scale = self.n / f['prb_abs'].shape[-1]
+        scale_arr = np.zeros(1, dtype='float32')
         if self.rank == 0:
             scale_arr[0] = scale
         self.comm.Bcast(scale_arr, root=0)
-        scale = int(scale_arr[0])
+        scale = float(scale_arr[0])
 
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
-            pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
+            pos = f['pos'][self.ids][self.st_theta:self.end_theta].astype('float32')
 
         pos_up = pos * scale
         pos_up[..., 1] += 0.5 * (scale - 1)

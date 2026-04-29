@@ -69,9 +69,8 @@ class Writer:
         """
         path = os.path.join(self.path_out, f"checkpoint_{i:04}.h5")
 
-        obj = self._cpu(vars['obj']) * norm_const  # denormalise
         pos = self._cpu(vars['pos'])
-        prb = self._cpu(vars['prb']) 
+        prb = self._cpu(vars['prb'])
 
         # mpio block: all ranks create datasets and write obj/pos collectively
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
@@ -84,12 +83,25 @@ class Writer:
                 ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
             ds_pos = f.create_dataset('pos', shape=(self.ntheta, self.ndist, 2), dtype='float32')
             prb_shape = (self.ndist, self.nz, self.n)
-            ds_prb_abs = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
+            ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
             ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
 
-            ds_re[self.st_obj:self.end_obj] = obj.real
-            if self.obj_dtype == 'complex64':
-                ds_im[self.st_obj:self.end_obj] = obj.imag
+            # Write obj in z-batches: avoids a full [local_nzobj, nobj, nobj] copy.
+            # np.multiply(src, scalar, out=slab_buf) is zero-allocation per batch.
+            local_nz = self.end_obj - self.st_obj
+            z_batch  = max(1, (1 << 28) // (self.nobj * self.nobj * 4))  # ~256 MB slab
+            slab_buf = np.empty((z_batch, self.nobj, self.nobj), dtype='float32')
+            for i0 in range(0, local_nz, z_batch):
+                i1  = min(i0 + z_batch, local_nz)
+                nzb = i1 - i0
+                obj_slab = vars['obj'][i0:i1]          # pinned view, no copy
+                np.multiply(obj_slab.real, np.float32(norm_const), out=slab_buf[:nzb])
+                ds_re[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
+                if self.obj_dtype == 'complex64':
+                    np.multiply(obj_slab.imag, np.float32(norm_const), out=slab_buf[:nzb])
+                    ds_im[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
+            del slab_buf
+
             ds_pos[self.st_theta:self.end_theta] = pos
 
         # prb written by rank 0 only via serial driver after mpio block closes

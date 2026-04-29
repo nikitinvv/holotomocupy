@@ -329,6 +329,7 @@ class Reader:
             for axis in [2, 1]:
                 prb_raw = np.repeat(prb_raw, scale, axis=axis)
             prb_np[:] = prb_raw
+            del prb_raw
 
         scale_arr = np.zeros(1, dtype='int32')
         if self.rank == 0:
@@ -341,12 +342,16 @@ class Reader:
             out_prb = cp.array(prb_np)
         else:
             out_prb[:] = cp.array(prb_np)
+        del prb_np
         if scale > 1:
             from cupyx.scipy.ndimage import shift
-            shift_val = 0# -0.5 * (scale - 1)
+            shift_val = 0
             out_prb[:] = shift(out_prb, shift=(0, 0, shift_val), order=3, mode='nearest')
 
-        # --- obj: parallel read of each rank's slice, upsample ---
+        # --- obj: z-batched read to cap peak CPU RAM ---
+        # Old code read all nz_src slices into obj_re + obj_im + block at once,
+        # which can exceed tens of GB per rank for large objects.
+        # Now we process one z-batch at a time: peak extra RAM ≈ 2 × batch × nobj0² × 8 B.
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
             obj_dtype = f.attrs['obj_dtype']
             st_src  = self.st_obj  // scale
@@ -354,37 +359,48 @@ class Reader:
             n0      = self.end_obj - self.st_obj
             nz_src  = max(1, end_src - st_src)
             ds_re   = f['obj_re']
-            batch   = max(1, (1 << 28) // (ds_re.shape[1] * ds_re.shape[2] * ds_re.dtype.itemsize))
-            obj_re  = np.empty((nz_src,) + ds_re.shape[1:], dtype=ds_re.dtype)
-            for i0 in range(0, nz_src, batch):
-                i1 = min(i0 + batch, nz_src)
-                obj_re[i0:i1] = ds_re[st_src + i0 : st_src + i1]
-            if obj_dtype == 'complex64':
-                obj_im = np.empty_like(obj_re)
-                ds_im  = f['obj_im']
-                for i0 in range(0, nz_src, batch):
-                    i1 = min(i0 + batch, nz_src)
-                    obj_im[i0:i1] = ds_im[st_src + i0 : st_src + i1]
-                block = (obj_re + 1j * obj_im).astype('complex64')
-            else:
-                block = obj_re.astype('float32')
-            # upsample x and y
-            for axis in [2, 1]:
-                block = np.repeat(block, scale, axis=axis)
-            # map source z-slices → output z-slices (nearest-neighbour)
-            idx0   = np.clip(
-                (np.arange(n0) * nz_src / n0).astype(np.intp), 0, nz_src - 1
-            )
+            ds_im   = f['obj_im'] if obj_dtype == 'complex64' else None
+            nobj0   = ds_re.shape[1]
+
             if out_obj is None:
-                out_obj = block[idx0].astype(self.obj_dtype)
-            else:
-                out_obj[:] = block[idx0].astype(self.obj_dtype)
+                out_obj = np.empty((n0, self.nobj, self.nobj), dtype=self.obj_dtype)
+
+            # Target ~256 MB per batch (complex64 = 8 B worst case)
+            z_batch = max(1, (1 << 28) // (nobj0 * nobj0 * 8))
+
+            for i0 in range(0, n0, z_batch):
+                i1     = min(i0 + z_batch, n0)
+                src_i0 = int(i0 * nz_src / n0)
+                src_i1 = min(int((i1 - 1) * nz_src / n0) + 1, nz_src)
+                nz_b   = src_i1 - src_i0
+
+                # Read directly into a complex64 buffer via .real/.imag views
+                blk = np.zeros((nz_b, nobj0, nobj0), dtype='complex64')
+                _re = ds_re[st_src + src_i0:st_src + src_i1].astype('float32')
+                blk.real[:] = _re; del _re
+                if ds_im is not None:
+                    _im = ds_im[st_src + src_i0:st_src + src_i1].astype('float32')
+                    blk.imag[:] = _im; del _im
+
+                if scale > 1:
+                    for axis in [2, 1]:
+                        blk = np.repeat(blk, scale, axis=axis)
+
+                idx_local = np.clip(
+                    (np.arange(i0, i1) * nz_src / n0).astype(np.intp), 0, nz_src - 1
+                ) - src_i0
+
+                if self.obj_dtype == 'complex64':
+                    out_obj[i0:i1] = blk[idx_local]
+                else:
+                    out_obj[i0:i1] = blk[idx_local].real
+                del blk
 
             # --- pos: scale pixel coordinates up ---
             pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
-        pos_up = pos * scale 
-        pos_up[...,1] += 0.5 * (scale - 1)
+        pos_up = pos * scale
+        pos_up[..., 1] += 0.5 * (scale - 1)
         if out_pos is None:
             out_pos = cp.array(pos_up)
         else:

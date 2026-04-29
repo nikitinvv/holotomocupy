@@ -490,12 +490,6 @@ else:
                 fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
                 ref0 = 0.5 * (ref0[..., ::2] + ref0[..., 1::2])
                 ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
-
-            # Delete existing pdata{k}_{bin} datasets
-            for bin in range(nlevels):
-                for k in range(ndist):
-                    if f'/exchange/pdata{k}_{bin}' in fid:
-                        del fid[f'/exchange/pdata{k}_{bin}']
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
@@ -510,9 +504,9 @@ else:
     cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
-        data_out = [[fid.create_dataset(f'/exchange/pdata{k}_{bin}',
-                                        shape=(ntheta, n // 2**bin, n // 2**bin),
-                                        dtype='float32')
+        data_out = [[fid.require_dataset(f'/exchange/pdata{k}_{bin}',
+                                         shape=(ntheta, n // 2**bin, n // 2**bin),
+                                         dtype='float32', exact=True)
                      for k in range(ndist)]
                     for bin in range(nlevels)]
 

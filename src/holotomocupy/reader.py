@@ -54,6 +54,7 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta):
     for k in range(ndist):
         mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
         if not os.path.exists(mat_path):
+            logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
             return np.zeros((ntheta, ndist), dtype='float32')
         sl = load_octave_text_mat(mat_path, 'shrink_list')
         increments.append(float(sl[0, 0] + sl[0, 1]) / 2)

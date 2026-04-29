@@ -418,23 +418,30 @@ if rank == 0:
 
         # --- RHAPP inter-plane shifts (from Peter's MATLAB pipeline) ---
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
-        logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
-
-        rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
-        rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
-        rhapp_reordered -= rhapp_reordered[:,ref_dist:ref_dist+1]
-        avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)
-        rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
-        logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
-        rhapp_shifts = (-rhapp_reordered).astype('float32')
+        if not os.path.exists(_rhapp_path):
+            logger.warning(f'Step 3: rhapp.mat not found, using zeros: {_rhapp_path}')
+            rhapp_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+        else:
+            logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
+            rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
+            rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
+            rhapp_reordered -= rhapp_reordered[:,ref_dist:ref_dist+1]
+            avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)
+            rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
+            logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
+            rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
         _motion_dname = f'{path}/{pfile}_{ref_dist+1}_'
         _motion_path = f'{_motion_dname}/correct_motion.txt'
-        logger.info(f'Step 3: reading motion      from {_motion_path}')
-        raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-        motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
-        motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
+        if not os.path.exists(_motion_path):
+            logger.warning(f'Step 3: correct_motion.txt not found, using zeros: {_motion_path}')
+            motion_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+        else:
+            logger.info(f'Step 3: reading motion      from {_motion_path}')
+            raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
+            motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
+            motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
         _c3d_path = f'{path}/{pfile}_/correct_correct3D.txt'

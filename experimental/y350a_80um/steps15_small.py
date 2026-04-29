@@ -8,6 +8,7 @@ import json
 import os
 import numpy as np
 import cupy as cp
+import cupyx.scipy.ndimage as ndimage
 import tifffile
 from mpi4py import MPI
 from holotomocupy.shift import Shift
@@ -141,7 +142,10 @@ else:
     ref = np.empty([ndist, n_bin, n_bin], dtype='float32')
 comm.Bcast(ref, root=0)
 
-cref     = cp.array(ref)
+cref        = cp.array(ref)
+fwhm_ref    = 17.0 * (n_bin / 2048)
+sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
+cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
 cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 'complex64')
 npad_bin = n_bin // 16
 v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
@@ -156,7 +160,8 @@ def _stitch(fid, srdata, j):
     data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
     for k in range(ndist):
         data_j[k] = cp.array(fid[f'/exchange/pdata{k}_{bin}'][j].astype('float32'))
-    rdata = data_j / (cref + 1e-5)
+    data_j_smooth = cp.stack([ndimage.gaussian_filter(data_j[k], sigma_ref) for k in range(ndist)])
+    rdata = data_j_smooth / (cref_smooth + 1e-5)
     srdata.fill(0)
     for k in range(ndist - 1, -1, -1):
         shrink_jk  = float(shrink_nd[j, k])

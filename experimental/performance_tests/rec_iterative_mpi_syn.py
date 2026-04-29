@@ -49,7 +49,7 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 
 logger.info(f'Read data with unbinning')
 reader.read_prb_unbin(out=cl.vars['prb'])
-reader.read_pos_unbin(out=cl.vars['pos'])
+reader.read_pos(out=cl.vars['pos'])
 reader.read_obj_unbin(out=cl.vars['obj'])
 
 logger.debug(f"{cl.vars['pos'].shape=}")

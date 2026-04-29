@@ -132,11 +132,9 @@ else:
     cshifts = np.empty([ntheta, ndist, 2], dtype='float32')
 comm.Bcast(cshifts, root=0)
 
-s = rotation_center_shift
-for _ in range(bin):
-    s = (s - 0.5) / 2
-r     = (cshifts / 2**bin).astype('float32')
-r[..., 1] += s
+scale = 1.0 / 2**bin
+r = (cshifts * scale).astype('float32')
+r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
 r_gpu = cp.array(r)
 
 if rank == 0:

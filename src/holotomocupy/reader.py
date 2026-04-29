@@ -217,11 +217,11 @@ class Reader:
                     self.ids[self.st_theta:self.end_theta], :self.ndist
                 ], dtype='float32')
 
-        out /= 2**self.bin
-        s = self.rotation_center_shift
-        for _ in range(self.bin):
-            s = (s - 0.5) / 2
-        out[..., 1] += s
+        # Same formula as checkpoint scaling: pos*scale + 0.5*(scale-1) for [1].
+        # Raw cshifts don't include rotation_center_shift, so add it scaled too.
+        scale = np.float32(1.0 / 2**self.bin)
+        out *= scale
+        out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
         return out
 
     def read_shrink(self, out=None):
@@ -459,16 +459,6 @@ class Reader:
         out[:] = block[idx0].astype(self.obj_dtype)
         return out
 
-    def read_pos_unbin(self, out):
-        """Read initial positions with downsampling."""
-        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            pos = cp.array(fid['/exchange/cshifts_final'][
-                self.ids[self.st_theta:self.end_theta], :self.ndist
-            ].astype('float32'))
-        pos[..., 1] += self.rotation_center_shift
-        out[:] = pos * 2**(-self.bin)
-        return out
-
     def read_vol_obj(self, vol_path, out, scale=1.0, vol_dtype='float32'):
         """Read this rank's z-slice from a raw binary .vol file as object initial guess.
 
@@ -536,16 +526,6 @@ class Reader:
         if scale != 1.0:
             out /= np.float32(scale)
         logger.info(f"read_vol_obj: rank {self.rank} done (scale={scale})")
-        return out
-
-    def read_pos_error_unbin(self, out):
-        """Read position errors with downsampling."""
-        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            pos = cp.array(fid['/exchange/cshifts_error'][
-                self.ids[self.st_theta:self.end_theta], :self.ndist
-            ].astype('float32'))
-        pos[..., 1] += self.rotation_center_shift
-        out[:] = pos * 2**(-self.bin)
         return out
 
     def read_prb_unbin(self, out):

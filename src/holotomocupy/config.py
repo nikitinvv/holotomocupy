@@ -14,8 +14,12 @@ def parse_args(config_file):
 
     try:
         args = SimpleNamespace()
-        args.in_file = cfg.get("in_file")
-        args.path_out = cfg.get("path_out")
+        args.pfile    = cfg.get("pfile",    fallback=None)
+        args.path_out = cfg.get("path_out").rstrip('/')
+        if args.pfile:
+            args.in_file = f"{args.path_out}/{args.pfile}.h5"
+        else:
+            args.in_file = cfg.get("in_file")
         args.ntheta = cfg.getint("ntheta")
         args.start_theta = cfg.getint("start_theta")
         args.nz = cfg.getint("nz")
@@ -37,7 +41,7 @@ def parse_args(config_file):
         args.rotation_center_shift = cfg.getfloat("rotation_center_shift")
         args.bin = cfg.getint("bin")
         args.log_level = cfg.get("log_level", fallback="WARNING")
-        args.energy = cfg.getfloat("energy", fallback="WARNING")
+        args.energy = cfg.getfloat("energy", fallback=None)
         args.method = cfg.getint("method", fallback=0)
         args.start_method = cfg.getint("start_method", fallback=1)
         args.pos_checkpoint = cfg.get("pos_checkpoint", fallback=None)

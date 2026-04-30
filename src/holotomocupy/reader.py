@@ -218,11 +218,9 @@ class Reader:
                     self.ids[self.st_theta:self.end_theta], :self.ndist
                 ], dtype='float32')
 
-        # Same formula as checkpoint scaling: pos*scale + 0.5*(scale-1) for [1].
-        # Raw cshifts don't include rotation_center_shift, so add it scaled too.
         scale = np.float32(1.0 / 2**self.bin)
         out *= scale
-        out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
+        out[..., 1] += np.float32(self.rotation_center_shift * scale)
         return out
 
     def read_shrink(self, out=None):
@@ -401,7 +399,6 @@ class Reader:
             pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
         pos_up = pos * scale
-        pos_up[..., 1] += 0.5 * (scale - 1)
         if out_pos is None:
             out_pos = cp.array(pos_up)
         else:
@@ -427,7 +424,6 @@ class Reader:
             pos = f['pos'][self.ids][self.st_theta:self.end_theta].astype('float32')
 
         pos_up = pos * scale
-        pos_up[..., 1] += 0.5 * (scale - 1)
         if out is None:
             out = cp.array(pos_up)
         else:

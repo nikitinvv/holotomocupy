@@ -1,12 +1,12 @@
 #!/bin/bash
 #PBS -A 14347
-#PBS -l select=64:system=polaris
+#PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:grand:eagle
-#PBS -l walltime=1:20:00
+#PBS -l walltime=0:59:00
 #PBS -q prod
 #PBS -N holotomo_complex64
-##PBS -q debug-scaling
+#PBS -q debug
 #PBS -j oe
 ##PBS -m be
 ##PBS -M vnikitin@anl.gov

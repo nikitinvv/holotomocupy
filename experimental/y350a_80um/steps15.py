@@ -578,19 +578,20 @@ else:
                                 tmp[pady0:-pady1, padx0:-padx1].mean())
                     tmp     *= mmm
                     data[k] *= mmm
-                    cs   = min(nobj // 16, (nobj - pady0 - pady1) // 2, (nobj - padx0 - padx1) // 2)
-                    ch   = cs // 2
-                    midy = nobj // 2
-                    midx = nobj // 2
-                    ys   = [pady0,        midy - ch,        nobj - pady1 - cs]
-                    xs   = [padx0,        midx - ch,        nobj - padx1 - cs]
-                    ref  = srdata[k + 1]
-                    R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
-                                    for x in xs] for y in ys], dtype='float32')
-                    ratio_map = ndimage.zoom(R, nobj / 3, order=1)
-                    tmp *= ratio_map[:nobj, :nobj]
-                    ratio_crop = ratio_map[pady0:nobj-pady1, padx0:nobj-padx1]
-                    data[k] *= ndimage.zoom(ratio_crop, (n / ratio_crop.shape[0], n / ratio_crop.shape[1]), order=1)[:n, :n]
+                    if k==0:
+                        cs   = min(nobj // 16, (nobj - pady0 - pady1) // 2, (nobj - padx0 - padx1) // 2)
+                        ch   = cs // 2
+                        midy = nobj // 2
+                        midx = nobj // 2
+                        ys   = [pady0,        midy - ch,        nobj - pady1 - cs]
+                        xs   = [padx0,        midx - ch,        nobj - padx1 - cs]
+                        ref  = srdata[k + 1]
+                        R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                        for x in xs] for y in ys], dtype='float32')
+                        ratio_map = ndimage.zoom(R, nobj / 3, order=1)
+                        tmp *= ratio_map[:nobj, :nobj]
+                        ratio_crop = ratio_map[pady0:nobj-pady1, padx0:nobj-padx1]
+                        data[k] *= ndimage.zoom(ratio_crop, (n / ratio_crop.shape[0], n / ratio_crop.shape[1]), order=1)[:n, :n]
                     wx = cp.ones(nobj, dtype='float32')
                     wy = cp.ones(nobj, dtype='float32')
                     wx[:padx0]               = 0
@@ -683,7 +684,7 @@ else:
 
         scale = 1.0 / 2**bin
         r = (cshifts * scale).astype('float32')
-        r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+        r[..., 1] += rotation_center_shift * scale
         r_gpu = cp.array(r)
 
         # Ref for this bin level (rank 0 → Bcast)
@@ -738,17 +739,18 @@ else:
                     denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
                     mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
                     tmp  *= mmm
-                    cs   = min(nobj_bin // 16, (nobj_bin - pady0 - pady1) // 2, (nobj_bin - padx0 - padx1) // 2)
-                    ch   = cs // 2
-                    midy = nobj_bin // 2
-                    midx = nobj_bin // 2
-                    ys   = [pady0,        midy - ch,        nobj_bin - pady1 - cs]
-                    xs   = [padx0,        midx - ch,        nobj_bin - padx1 - cs]
-                    ref  = srdata[k + 1]
-                    R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
-                                    for x in xs] for y in ys], dtype='float32')
-                    ratio_map = ndimage.zoom(R, nobj_bin / 3, order=1)
-                    tmp *= ratio_map[:nobj_bin, :nobj_bin]
+                    if k==0:
+                        cs   = min(nobj_bin // 16, (nobj_bin - pady0 - pady1) // 2, (nobj_bin - padx0 - padx1) // 2)
+                        ch   = cs // 2
+                        midy = nobj_bin // 2
+                        midx = nobj_bin // 2
+                        ys   = [pady0,        midy - ch,        nobj_bin - pady1 - cs]
+                        xs   = [padx0,        midx - ch,        nobj_bin - padx1 - cs]
+                        ref  = srdata[k + 1]
+                        R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                        for x in xs] for y in ys], dtype='float32')
+                        ratio_map = ndimage.zoom(R, nobj_bin / 3, order=1)
+                        tmp *= ratio_map[:nobj_bin, :nobj_bin]
                     wx = cp.ones(nobj_bin, dtype='float32')
                     wy = cp.ones(nobj_bin, dtype='float32')
                     wx[:padx0]                    = 0

@@ -134,7 +134,7 @@ comm.Bcast(cshifts, root=0)
 
 scale = 1.0 / 2**bin
 r = (cshifts * scale).astype('float32')
-r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+r[..., 1] += rotation_center_shift * scale
 r_gpu = cp.array(r)
 
 if rank == 0:

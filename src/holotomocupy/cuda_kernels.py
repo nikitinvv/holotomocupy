@@ -19,8 +19,8 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     const float coeff1 = -PI * PI / mu0;
     const float inv_twon = 1.0f / ftwon;
 
-    const float x0 =  (tx - n / 2) / (float)n * __cosf(theta[ty]);
-    const float y0 = -(tx - n / 2) / (float)n * __sinf(theta[ty]);
+    const float x0 =  (tx - n / 2 + 0.5f) / (float)n * __cosf(theta[ty]);
+    const float y0 = -(tx - n / 2 + 0.5f) / (float)n * __sinf(theta[ty]);
 
     const int g_ind = tx + tz * n + ty * n * nz;  // swapped axes
     float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];

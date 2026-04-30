@@ -52,7 +52,7 @@ writer = Writer(
 )
 
 # Physics parameters are stored in the HDF5 file and forwarded to the solver
-args.energy                  = args.energy#reader.energy
+args.energy                  = args.energy if args.energy is not None else reader.energy
 args.focustodetectordistance = reader.focustodetectordistance
 args.z1                      = reader.z1
 args.detector_pixelsize      = reader.detector_pixelsize
@@ -75,7 +75,7 @@ if comm.Get_rank() == 0:
     logger.info(f"  rotation center shift: {args.rotation_center_shift:.4f} px")
     logger.info(f"  paganin              : {args.paganin}")
     logger.info(f"  n MPI ranks          : {comm.Get_size()}")
-    logger.info(f"  in_file              : {args.in_file}")
+    logger.info(f"  pfile                : {args.pfile or args.in_file}")
     logger.info(f"  path_out             : {args.path_out}")
     logger.info("=" * 60)
 

@@ -588,8 +588,9 @@ else:
                     R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
                                     for x in xs] for y in ys], dtype='float32')
                     ratio_map = ndimage.zoom(R, nobj / 3, order=1)
-                    tmp     *= ratio_map[:nobj, :nobj]
-                    data[k] *= ratio_map[:nobj, :nobj]
+                    tmp *= ratio_map[:nobj, :nobj]
+                    ratio_crop = ratio_map[pady0:nobj-pady1, padx0:nobj-padx1]
+                    data[k] *= ndimage.zoom(ratio_crop, (n / ratio_crop.shape[0], n / ratio_crop.shape[1]), order=1)[:n, :n]
                     wx = cp.ones(nobj, dtype='float32')
                     wy = cp.ones(nobj, dtype='float32')
                     wx[:padx0]               = 0

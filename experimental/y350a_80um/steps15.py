@@ -578,6 +578,18 @@ else:
                                 tmp[pady0:-pady1, padx0:-padx1].mean())
                     tmp     *= mmm
                     data[k] *= mmm
+                    cs   = min(nobj // 16, (nobj - pady0 - pady1) // 2, (nobj - padx0 - padx1) // 2)
+                    ch   = cs // 2
+                    midy = nobj // 2
+                    midx = nobj // 2
+                    ys   = [pady0,        midy - ch,        nobj - pady1 - cs]
+                    xs   = [padx0,        midx - ch,        nobj - padx1 - cs]
+                    ref  = srdata[k + 1]
+                    R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                    for x in xs] for y in ys], dtype='float32')
+                    ratio_map = ndimage.zoom(R, nobj / 3, order=1)
+                    tmp     *= ratio_map[:nobj, :nobj]
+                    data[k] *= ratio_map[:nobj, :nobj]
                     wx = cp.ones(nobj, dtype='float32')
                     wy = cp.ones(nobj, dtype='float32')
                     wx[:padx0]               = 0
@@ -725,6 +737,17 @@ else:
                     denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
                     mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
                     tmp  *= mmm
+                    cs   = min(nobj_bin // 16, (nobj_bin - pady0 - pady1) // 2, (nobj_bin - padx0 - padx1) // 2)
+                    ch   = cs // 2
+                    midy = nobj_bin // 2
+                    midx = nobj_bin // 2
+                    ys   = [pady0,        midy - ch,        nobj_bin - pady1 - cs]
+                    xs   = [padx0,        midx - ch,        nobj_bin - padx1 - cs]
+                    ref  = srdata[k + 1]
+                    R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                    for x in xs] for y in ys], dtype='float32')
+                    ratio_map = ndimage.zoom(R, nobj_bin / 3, order=1)
+                    tmp *= ratio_map[:nobj_bin, :nobj_bin]
                     wx = cp.ones(nobj_bin, dtype='float32')
                     wy = cp.ones(nobj_bin, dtype='float32')
                     wx[:padx0]                    = 0

@@ -116,7 +116,7 @@ if rank == 0:
     os.makedirs(data_dir,  exist_ok=True)
 comm.Barrier()
 
-ids_per_rank = np.array_split(np.arange(ntheta), size)
+ids_per_rank = np.array_split(np.arange(ntheta)[::50], size)
 local_ids    = ids_per_rank[rank]
 logger.info(f'theta-range [{int(local_ids[0])}:{int(local_ids[-1])+1}), local_ntheta={len(local_ids)}')
 
@@ -199,6 +199,17 @@ def _stitch(fid, srdata, j):
             denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
             mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
             tmp  *= mmm
+            cs   = min(nobj_bin // 16, (nobj_bin - pady0 - pady1) // 2, (nobj_bin - padx0 - padx1) // 2)
+            ch   = cs // 2
+            midy = nobj_bin // 2
+            midx = nobj_bin // 2
+            ys   = [pady0,        midy - ch,        nobj_bin - pady1 - cs]
+            xs   = [padx0,        midx - ch,        nobj_bin - padx1 - cs]
+            ref  = srdata[k + 1]
+            R = cp.array([[float(ref[y:y+cs, x:x+cs].mean() / (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                            for x in xs] for y in ys], dtype='float32')
+            ratio_map = ndimage.zoom(R, nobj_bin / 3, order=1)
+            tmp *= ratio_map[:nobj_bin, :nobj_bin]
             wx = cp.ones(nobj_bin, dtype='float32')
             wy = cp.ones(nobj_bin, dtype='float32')
             wx[:padx0]                 = 0

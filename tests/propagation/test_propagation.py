@@ -24,9 +24,14 @@ ndist = len(distances)
 
 cl      = Propagation(n, nz, ntheta, ndist, wavelength, voxelsize, distances)
 
-# cuPy-only reference (no cuFFTDx) for correctness and timing comparison
+# cuPy-only reference (no cuFFTDx) for correctness and timing comparison.
+# _plan_2d is only created when _use_cufftdx is False at construction,
+# so build it explicitly after flipping the flag.
+import cupyx.scipy.fft as cufft
 cl_cupy = Propagation(n, nz, ntheta, ndist, wavelength, voxelsize, distances)
 cl_cupy._use_cufftdx = False
+if not hasattr(cl_cupy, '_plan_2d'):
+    cl_cupy._plan_2d = cufft.get_fft_plan(cl_cupy._buf_big, axes=(-2, -1), value_type='C2C')
 
 print(f'n={n}, nz={nz}, ntheta={ntheta}, ndist={ndist}')
 print(f'distances: {distances}')

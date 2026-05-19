@@ -259,7 +259,7 @@ class RecNFP:
         return scale * (x - td)
 
     def gF0(self, x, y):
-        for id in range(1, 4)[::-1]:
+        for id in range(1, len(self.F))[::-1]:
             x = self.F[id](x)
         return self._gF0_fused(x, y, np.float32(2 / self.data_size))
 
@@ -293,7 +293,7 @@ class RecNFP:
 
     def gF1(self, x, y):
         y0 = y
-        for id in range(2, 4)[::-1]:   # apply F3, F2 to reach F1's input space
+        for id in range(2, len(self.F))[::-1]:   # apply higher-level Fs to reach F1's input space
             x = self.F[id](x)
         x11, x12 = x
         y12 = self.cl_prop.DT(y0, 0)
@@ -346,7 +346,7 @@ class RecNFP:
 
     def gF2(self, x, y):
         y11, y12 = y
-        for id in range(3, 4)[::-1]:   # apply F3 to reach F2's input space
+        for id in range(3, len(self.F))[::-1]:   # apply higher-level Fs to reach F2's input space
             x = self.F[id](x)
         x21, x22 = x
         y22 = self._gF2_fused(x22, y12)
@@ -396,7 +396,8 @@ class RecNFP:
 
     def gF3(self, x, y):
         y21, y22 = y
-        # x is already at the (prb, proj, pos) level — no forward apply needed
+        for id in range(4, len(self.F))[::-1]:   # apply higher-level Fs to reach F3's input space
+            x = self.F[id](x)
         x31, x32, x33 = x
         c = self.cl_shift.coeff(x32)
         c = cp.tile(c[None], [len(x33), 1, 1])

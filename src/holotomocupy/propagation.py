@@ -46,8 +46,7 @@ class Propagation:
     def _fwd_pad(self, f, fpad):
         """Symmetric padding: f (ntheta, nz, n) -> fpad (ntheta, 2nz, 2n)"""
         ntheta, nz, n = f.shape
-        if not f.flags['C_CONTIGUOUS']:
-            f = cp.ascontiguousarray(f)
+        f = cp.ascontiguousarray(f)
         pad_fwd_kernel(
             (math.ceil(2 * n / 32), math.ceil(2 * nz / 32), ntheta),
             (32, 32, 1),
@@ -59,8 +58,7 @@ class Propagation:
         ntheta = fpad.shape[0]
         nz     = fpad.shape[1] // 2
         n      = fpad.shape[2] // 2
-        if not fpad.flags['C_CONTIGUOUS']:
-            fpad = cp.ascontiguousarray(fpad)
+        fpad = cp.ascontiguousarray(fpad)
         pad_adj_kernel(
             (math.ceil(n / 32), math.ceil(nz / 32), ntheta),
             (32, 32, 1),

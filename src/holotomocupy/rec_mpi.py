@@ -211,8 +211,13 @@ class Rec:
 
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
-            nvtx.pop_range()      
-            
+            nvtx.pop_range()
+
+            # check quadratic approximation along the descent direction
+            nvtx.push_range(":::BH:check_approximation", color='gray')
+            self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
+            nvtx.pop_range()
+
             # update variables: var = var+alpha*eta
             for v in ["obj", "prb", "pos", "proj"]:
                 self.linear_batch(vars[v], etas[v], 1, alpha)            
@@ -887,6 +892,65 @@ class Rec:
                 fig.savefig(png_path, dpi=150)
                 plt.close(fig)
                 logger.info(f"pos error plot → {png_path}")
+
+    def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
+        """Compare the real functional along the descent direction with the
+        quadratic model used to pick alpha:
+            f_real(t)   = self.min(vars + t*etas)
+            f_approx(t) = self.min(vars) - top*t + 0.5*bottom*t**2
+        Sampled at npp points in [0, 2*alpha]. With a writer, saves a PNG per
+        triggered iteration under writer.path_out/check_approximation/; without
+        a writer, shows the plot inline (rank 0 only).
+        """
+        if not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
+            return
+
+        # lazy-allocate scratch buffers (only created on the first triggered iter)
+        if not hasattr(self, '_chk_objt'):
+            self._chk_objt  = make_pinned(vars['obj'].shape,  self.obj_dtype)
+            self._chk_projt = make_pinned(vars['proj'].shape, self.obj_dtype)
+            self._chk_prbt  = cp.empty_like(vars['prb'])
+            self._chk_post  = cp.empty_like(vars['pos'])
+
+        objt, prbt, post, projt = self._chk_objt, self._chk_prbt, self._chk_post, self._chk_projt
+
+        npp = 5
+        t = np.linspace(0, 2 * alpha, npp).astype('float32')
+        err_real = np.zeros(npp, dtype='float32')
+
+        for k in range(npp):
+            self.linear_batch(vars['obj'],  etas['obj'],  1, t[k], out=objt)
+            self.linear_batch(vars['prb'],  etas['prb'],  1, t[k], out=prbt)
+            self.linear_batch(vars['pos'],  etas['pos'],  1, t[k], out=post)
+            self.linear_batch(vars['proj'], etas['proj'], 1, t[k], out=projt)
+            err_real[k] = self.min(prbt, objt, post, projt)
+
+        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'])
+        err_approx = f0 - top * t + 0.5 * bottom * t * t
+
+        if self.rank != 0:
+            return
+
+        if writer is None:
+            mshow_approx(t, err_real, err_approx, True)
+            return
+
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(4, 4))
+        ax.plot(t, err_real,   "o-", label="real")
+        ax.plot(t, err_approx, "x-", label="approx")
+        ax.set_xlabel("t")
+        ax.set_ylabel("functional")
+        ax.set_title(f"iter {i}: alpha={alpha:.3e}")
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
+        out_dir  = os.path.join(writer.path_out, "check_approximation")
+        os.makedirs(out_dir, exist_ok=True)
+        png_path = os.path.join(out_dir, f"check_approx_{i:04}.png")
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"check_approximation plot → {png_path}")
 
     def error_debug(self, vars, i):
         """Error logging and CSV checkpoint export."""

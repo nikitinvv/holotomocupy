@@ -48,7 +48,7 @@ class Shift():
         self._dsadjfk = dsadjf_kernel
 
     # ------------------------------------------------------------------
-    # B-spline basis and its derivatives
+    # B-spline basis
     # ------------------------------------------------------------------
 
     def phi(self, t):
@@ -80,20 +80,6 @@ class Shift():
         if self.obj_dtype == 'float32':
             out = out.real
         return out
-
-    def coeffback(self, psi, m):
-        # Per-distance back-projection denominators (magnification-aware, k=0..4)
-        # Use first-angle magnification per distance for the frequency-domain prefilter.
-        self._ifB3back = []
-        x = cp.linspace(-1/2, 1/2 - 1/self.npsi,  self.npsi ).astype('float32')
-        y = cp.linspace(-1/2, 1/2 - 1/self.nzpsi, self.nzpsi).astype('float32')
-        dx = self.phi(0)
-        dy = self.phi(0)
-        for k in range(1, 5):
-            dx = (dx + 2 * self.phi(k / m) * cp.cos(2 * cp.pi * k * x)).astype('float32')
-            dy = (dy + 2 * self.phi(k / m) * cp.cos(2 * cp.pi * k * y)).astype('float32')
-        _ifB3back=1 / cp.fft.fftshift(cp.outer(dy, dx), axes=(-1, -2))
-        return cp.fft.ifft2(cp.fft.fft2(psi) * _ifB3back)
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*

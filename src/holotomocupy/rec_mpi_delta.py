@@ -26,7 +26,8 @@ import nvtx
 import pandas as pd
 
 from .rec_mpi import Rec
-from .utils import make_pinned, redot, mshow, mshow_polar, mshow_pos, logger, time
+import os
+from .utils import redot, mshow, mshow_polar, mshow_pos, mshow_approx, make_pinned, logger, time
 from .mpi_functions import *
 
 
@@ -59,29 +60,23 @@ class RecDelta(Rec):
 
     # ------------------------------------------------------------------ alloc
     def alloc_arrays(self):
-        super().alloc_arrays()
-
-        # obj (= delta) is real float32
-        self.u_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype='float32')
-        self.e_pad = make_pinned([self.local_nzobj + 4, self.nobj, self.nobj], dtype='float32')
-        self.u_pad[:] = 0
-        self.e_pad[:] = 0
-        self.vars['obj']  = self.u_pad[2:-2]
-        self.etas['obj']  = self.e_pad[2:-2]
-        self.grads['obj'] = make_pinned([self.local_nzobj, self.nobj, self.nobj], dtype='float32')
-
-        # proj cache: REAL float32 (R(delta) is real). Uses self.cl_mpi_real for MPI redist.
-        self.vars['proj']  = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='float32')
-        self.grads['proj'] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='float32')
-        self.etas['proj']  = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='float32')
+        # delta and R(delta) are real-valued, so temporarily flip self.obj_dtype
+        # to float32 just for the parent allocations. Restored immediately so
+        # downstream code (cl_shift, cl_prop, cl_mpi) still sees complex64.
+        saved, self.obj_dtype = self.obj_dtype, 'float32'
+        try:
+            super().alloc_arrays()
+        finally:
+            self.obj_dtype = saved
 
         # bd scalar
         self.vars['bd']  = cp.zeros((1,), dtype='float32')
         self.grads['bd'] = cp.zeros((1,), dtype='float32')
         self.etas['bd']  = cp.zeros((1,), dtype='float32')
 
-        # tmp pinned buffer for fwd_tomo on real obj (matches proj-side dtype/layout)
-        self.proj_tmp_real = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype='float32')
+        # alias parent's float32 proj_tmp under the name the rest of this
+        # class uses (kept for diff hygiene; consider renaming all callers).
+        self.proj_tmp_real = self.proj_tmp
 
     # ============================================================ NEW F4 layer
     @nvtx.annotate("F4", color="green")
@@ -235,6 +230,11 @@ class RecDelta(Rec):
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
+            nvtx.pop_range()
+
+            # ---- check quadratic approximation along the descent direction
+            nvtx.push_range(":::BH:check_approximation", color='gray')
+            self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
             nvtx.pop_range()
 
             # ---- update variables: var += alpha * eta
@@ -422,6 +422,61 @@ class RecDelta(Rec):
         return res
 
     # ============================================================ logging / vis
+    def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
+        """Same idea as parent but with the extra `bd` variable plumbed through
+        the perturbation and the 5-arg `min` signature."""
+        if not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
+            return
+
+        if not hasattr(self, '_chk_objt'):
+            self._chk_objt  = make_pinned(vars['obj'].shape,  vars['obj'].dtype)
+            self._chk_projt = make_pinned(vars['proj'].shape, vars['proj'].dtype)
+            self._chk_prbt  = cp.empty_like(vars['prb'])
+            self._chk_post  = cp.empty_like(vars['pos'])
+            self._chk_bdt   = cp.empty_like(vars['bd'])
+
+        objt, prbt, post, projt, bdt = (self._chk_objt, self._chk_prbt, self._chk_post,
+                                        self._chk_projt, self._chk_bdt)
+
+        npp = 5
+        t = np.linspace(0, 2 * alpha, npp).astype('float32')
+        err_real = np.zeros(npp, dtype='float32')
+
+        for k in range(npp):
+            self.linear_batch(vars['obj'],  etas['obj'],  1, t[k], out=objt)
+            self.linear_batch(vars['prb'],  etas['prb'],  1, t[k], out=prbt)
+            self.linear_batch(vars['pos'],  etas['pos'],  1, t[k], out=post)
+            self.linear_batch(vars['proj'], etas['proj'], 1, t[k], out=projt)
+            self.linear_batch(vars['bd'],   etas['bd'],   1, t[k], out=bdt)
+            err_real[k] = self.min(prbt, objt, post, projt, bdt)
+
+        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'], vars['bd'])
+        err_approx = f0 - top * t + 0.5 * bottom * t * t
+
+        if self.rank != 0:
+            return
+
+        if writer is None:
+            mshow_approx(t, err_real, err_approx, True)
+            return
+
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(4, 4))
+        ax.plot(t, err_real,   "o-", label="real")
+        ax.plot(t, err_approx, "x-", label="approx")
+        ax.set_xlabel("t")
+        ax.set_ylabel("functional")
+        ax.set_title(f"iter {i}: alpha={alpha:.3e}")
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
+        out_dir  = os.path.join(writer.path_out, "check_approximation")
+        os.makedirs(out_dir, exist_ok=True)
+        png_path = os.path.join(out_dir, f"check_approx_{i:04}.png")
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"check_approximation plot → {png_path}")
+
     def error_debug(self, vars, i):
         """Same as parent + log bd and 1/bd, also save delta/beta to conv.csv."""
         if not (i % self.error_step == 0 and self.error_step != -1):

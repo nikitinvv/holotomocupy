@@ -3,12 +3,12 @@ RecDelta: cascade-based parameterization u = delta * (1 + i * bd)
 
 Adds a NEW cascade level F4: (prb, proj, bd, pos) -> (prb, proj*(1+i*bd), pos).
 The Radon transform R: delta -> proj stays OUTSIDE the cascade (chunked over z),
-analogous to how parent Rec keeps the Radon outside; what was the parent's `gF4` (RT for grad_obj)
-is renamed `gF5` here.
+analogous to how parent Rec keeps the Radon outside; what was parent's `adj_tomo`
+(RT for grad_obj) is called `adj_tomo` here.
 
 Variables:
   vars['obj']  = delta       (real 3D, float32)
-  vars['proj'] = R(delta)    (REAL float32 -- proj-side MPI uses a separate float32 MPIClass)
+  vars['proj'] = R(delta)    (REAL float32 — proj-side MPI uses a separate float32 MPIClass)
   vars['bd']   = scalar      (cupy shape (1,) float32)
   vars['prb']  = probe       (complex)
   vars['pos']  = positions   (real)
@@ -17,6 +17,11 @@ Cascade variables at level 4: (prb, proj, bd, pos)
 Cascade variables at level 3: (prb, proj_complex, pos)        -- after F4
 F4 promotes proj (real) to proj_complex (complex) by multiplying by (1+i*bd).
 
+Parent's per-dist F1/F3 cascade methods are inherited as-is. Only gF3 is
+overridden so gF4 receives the coeff'd Deltapsi value (coeff applied per-dist;
+by linearity equivalent to parent's coeff-after-sum at the cost of ndist FFT
+pairs instead of one).
+
 args.rho is length 4: [obj, prb, pos, bd]
 """
 
@@ -24,11 +29,11 @@ import numpy as np
 import cupy as cp
 import nvtx
 import pandas as pd
+import os
 
 from .rec_mpi import Rec
-import os
-from .utils import redot, mshow, mshow_polar, mshow_pos, mshow_approx, make_pinned, logger, time
-from .mpi_functions import *
+from .utils import mshow_approx, make_pinned, logger, time, timer
+from .mpi_functions import MPIClass
 
 
 class RecDelta(Rec):
@@ -45,8 +50,9 @@ class RecDelta(Rec):
                 f"[obj, prb, pos, bd]; got {getattr(args, 'rho', None)}"
             )
         super().__init__(args)
-        # Extend cascade lists with F4 (innermost). Parent gF0..gF3 already handle len(self.F)
-        # via the patched range(_, len(self.F)) loops.
+        # Extend cascade lists with F4 (innermost). RecDelta's only F-family override
+        # is gF3 (applies coeff per-dist for gF4); everything else inherits parent's
+        # per-dist methods unchanged.
         self.F      = [self.F0, self.F1, self.F2, self.F3, self.F4]
         self.gF     = [self.gF0, self.gF1, self.gF2, self.gF3, self.gF4]
         self.dF     = [self.dF0, self.dF1, self.dF2, self.dF3, self.dF4]
@@ -57,6 +63,7 @@ class RecDelta(Rec):
         # Parent's self.cl_mpi (complex64) is unused by RecDelta but kept so inherited
         # methods don't break.
         self.cl_mpi_real = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, 'float32')
+        self.redist  = self.cl_mpi_real.redist
 
     # ------------------------------------------------------------------ alloc
     def alloc_arrays(self):
@@ -73,29 +80,21 @@ class RecDelta(Rec):
         self.vars['bd']  = cp.zeros((1,), dtype='float32')
         self.grads['bd'] = cp.zeros((1,), dtype='float32')
         self.etas['bd']  = cp.zeros((1,), dtype='float32')
-
-        # alias parent's float32 proj_tmp under the name the rest of this
-        # class uses (kept for diff hygiene; consider renaming all callers).
-        self.proj_tmp_real = self.proj_tmp
-
+        
     # ============================================================ NEW F4 layer
     @nvtx.annotate("F4", color="green")
     def F4(self, x):
-        """In: (prb, proj, bd, pos)
-        Out: (prb, proj * (1 + i*bd), pos)   -- shape matches level 3 input"""
+        """In: (prb, proj, bd, pos)  Out: (prb, proj * (1 + i*bd), pos)"""
         prb, proj, bd, pos = x
         proj_complex = proj * (1.0 + 1j * bd)
         return [prb, proj_complex, pos]
 
     @nvtx.annotate("dF4", color="green")
     def dF4(self, x, y, return_x=True):
-        """In:  x=(prb, proj, bd, pos),
-               y=(yprb, yproj, ybd, ypos)
-        Out:   ([prb, F4_proj, pos], [yprb, dF4_y, ypos])  if return_x
-               else just the second list."""
+        """In: x=(prb,proj,bd,pos), y=(yprb,yproj,ybd,ypos)
+        Out: ([prb,F4_proj,pos], [yprb,dF4_y,ypos])  if return_x else just second."""
         prb, proj, bd, pos = x
         yprb, yproj, ybd, ypos = y
-        # dF4: differential of (proj * (1+i*bd))
         yproj_complex = (1.0 + 1j * bd) * yproj + 1j * proj * ybd
         if return_x:
             xproj_complex = proj * (1.0 + 1j * bd)
@@ -104,19 +103,14 @@ class RecDelta(Rec):
 
     @nvtx.annotate("d2F_dF4", color="purple")
     def d2F_dF4(self, x, y, z, w):
-        """Cascade composition rule contribution at level 4.
-        d2F4(y, z) per element: only cross term (proj <-> bd) is nonzero
-            -> yproj_complex_part = i * (yproj * zbd + zproj * ybd)
-        Plus propagation of accumulator w via dF4 (if w not None, but at innermost level w==[None]*4).
-        Returns 3-element [yprb, yproj_complex, ypos]  (matches level 3 input arity)."""
+        """Cascade composition contribution at level 4. Cross derivative i*(yproj*zbd + zproj*ybd)
+        in proj slot; propagates accumulator w through dF4. Returns 3-element list (level 3 shape)."""
         prb, proj, bd, pos = x
         _, yproj, ybd, _ = y
         _, zproj, zbd, _ = z
 
-        # second-derivative cross term in proj_complex slot
         yproj_complex = 1j * (yproj * zbd + zproj * ybd)
 
-        # propagate w through dF4 (skip when w is the [None]*4 init from hessian_cascade)
         wprb_out, wpos_out = None, None
         if w is not None and w[1] is not None:
             w_prb, w_proj, w_bd, w_pos = w
@@ -124,9 +118,7 @@ class RecDelta(Rec):
             wprb_out = w_prb
             wpos_out = w_pos
 
-        # F4 doesn't touch pos, but parent's d2F_dF3 assumes w[1] and w[2] come paired
-        # (both None or both arrays). Since we emit a non-None proj contribution, also
-        # emit a zero pos contribution to maintain that invariant.
+        # F4 doesn't touch pos; emit zero pos perturbation to keep d2F_dF3's (w[1], w[2]) invariant.
         if wpos_out is None:
             wpos_out = cp.zeros_like(pos)
 
@@ -134,137 +126,67 @@ class RecDelta(Rec):
 
     @nvtx.annotate("gF4", color="green")
     def gF4(self, x, y):
-        """Adjoint of dF4s.
-        In:  x=(prb, proj, bd, pos)  at level 4,
-             y=(yprb, yproj_complex, ypos) at level 3 (cotangent).
-        Out: 4-element cotangent at level 4: [yprb, yproj_out, ybd_out, ypos]
-             ybd_out is a scalar (per-chunk sum; will be accumulated across chunks via += in
-             the gpu_batch wrapper)."""
+        """Adjoint of dF4. proj is REAL.
+          natural grad wrt proj = Re(grad_y) + bd*Im(grad_y)
+          natural grad wrt bd   = sum_chunk proj * Im(grad_y)  (scalar)
+        """
         prb, proj, bd_arr, pos = x
         yprb, yproj_complex, ypos = y
-        bd = bd_arr.reshape(())  # scalar broadcast
+        bd = bd_arr.reshape(())
 
         yproj_out = yproj_complex.real + bd * yproj_complex.imag
         ybd_out = (cp.sum(proj * yproj_complex.imag)).reshape(1)
 
         return [yprb, yproj_out, ybd_out, ypos]
 
-    # ======================================================== gF5 (was parent gF4: outside-cascade RT)
-    @nvtx.annotate("gF5", color="green")
-    def gF5(self, gradobj, gradproj):
-        """Adjoint Radon (chunked over z): grads['obj'] = RT(grads['proj']).
-        Both buffers are float32 -- Tomo.RT returns real for real input."""
-        @self.gpu_batch(axis_out=0, axis_inp=1, nout=1)
-        def _gF5(self, gradobj, gradproj):
-            gradobj[:] = self.cl_tomo.RT(gradproj)
-        _gF5(self, gradobj, gradproj)
+    # ======================================================== gF3 override
+    @nvtx.annotate("gF3", color="green")
+    def gF3(self, x, y):
+        """Parent's per-dist gF3 returns un-coeff'd Deltapsi (caller is expected to sum
+        across distances and apply cl_shift.coeff once). RecDelta's gF4 needs the
+        coeff'd value, so apply coeff per-dist here. By linearity of coeff this is
+        equivalent to coeff-after-sum, at the cost of ndist FFT pairs instead of one."""
+        out = super().gF3(x, y)
+        out[1] = self.cl_shift.coeff(out[1])
+        return out
 
-    # ============================================================ helpers
-    def _refresh_proj(self, vars):
-        """vars['proj'] = R(vars['obj']) (real float32; uses cl_mpi_real for redist)."""
-        self.fwd_tomo(vars['obj'], out=self.proj_tmp_real)
-        self.cl_mpi_real.redist(self.proj_tmp_real, vars['proj'])
 
-    # ============================================================ BH
-    def BH(self, writer=None):
-        vars = self.vars
-        grads = self.grads
-        etas = self.etas
-
-        # shrinkage (constant after init; kept here for parity with parent)
-        self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
-
-        # normalize obj for normal operators
-        vars["obj"] /= self.norm_const
-        if self.start_iter == 0:
-            vars["obj"] *= self.cl_tomo.mask
-
-        self.pos_init = vars['pos'].copy()
-
-        # initial proj = R(delta)
-        self._refresh_proj(vars)
-
-        # initial error
-        self.error_debug(vars, -1)
-
-        self.time_start = time.time()
-        for i in range(self.start_iter, self.niter):
-            nvtx.push_range("::BH:" + str(i))
-
-            # ---- gradients (writes grads['obj'] real, grads['proj'], grads['bd'] scalar)
-            nvtx.push_range("gradients")
+    def compute_gradient(self, vars, grads):
+        """gradients (RecDelta 5-level + adj_tomo) then propagate grads['obj']
+        through R via cl_mpi_real to populate grads['proj']."""
+        with nvtx.annotate("gradients"):
             self.gradients(vars, grads)
-            nvtx.pop_range()
+        with nvtx.annotate(":::BH:fwd_tomo"):
+            self.fwd_tomo(grads["obj"], out=self.proj_tmp)
+        with nvtx.annotate(":::BH:redist", color='red'):
+            self.redist(self.proj_tmp, grads['proj'])
 
-            # ---- propagate grads['obj'] through R to drive grads['proj']
-            #      (analogous to parent line 173: fwd_tomo(grads['obj']) -> grads['proj'])
-            nvtx.push_range(":::BH:fwd_tomo")
-            self.fwd_tomo(grads["obj"], out=self.proj_tmp_real)
-            nvtx.pop_range()
-            nvtx.push_range(":::BH:redist", color='red')
-            self.cl_mpi_real.redist(self.proj_tmp_real, grads['proj'])
-            nvtx.pop_range()
-
-            # ---- CG direction beta from Hessian-weighted inner products
-            if i == self.start_iter:
-                beta = 0
-            else:
-                nvtx.push_range(":::BH:calc beta")
-                top = self.hessian(vars, grads, etas)
-                bottom = self.hessian(vars, etas, etas)
-                top, bottom = self.allreduce2(top, bottom)
-                beta = top / bottom
-                nvtx.pop_range()
-
-            # ---- step size alpha
-            nvtx.push_range(":::BH:calc_alpha")
+    def compute_alpha(self, vars, grads, etas, beta):
+        """Parent's compute_alpha + 'bd' in the rho_sq-weighted numerator."""
+        with nvtx.annotate(":::BH:calc_alpha"):
             top = 0
-            for v in ["obj", "pos", "bd"]:
+            for v in ("obj", "pos", "bd"):
                 top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
             dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
             if self.rank == 0:
                 top -= dot_prb / self.rho_sq['prb']
-            # update etas['proj'] in lockstep (drift variable, no rho_sq term in numerator)
             self.linear_batch(etas['proj'], grads['proj'], beta, -1)
-
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
-            nvtx.pop_range()
+        return alpha, top, bottom
 
-            # ---- check quadratic approximation along the descent direction
-            nvtx.push_range(":::BH:check_approximation", color='gray')
-            self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
-            nvtx.pop_range()
-
-            # ---- update variables: var += alpha * eta
-            for v in ["obj", "prb", "pos", "proj", "bd"]:
-                self.linear_batch(vars[v], etas[v], 1, alpha)
-
-            # ---- refresh proj = R(delta) for next iter
-            self._refresh_proj(vars)
-
-            # ---- error / vis
-            nvtx.push_range(":::BH:calc error", color='gray')
-            self.error_debug(vars, i)
-            nvtx.pop_range()
-            nvtx.push_range(":::BH:vis_debug", color='gray')
-            self.vis_debug(vars, i, writer)
-            nvtx.pop_range()
-            nvtx.pop_range()  # ::BH:i
-
-        vars["obj"] *= self.norm_const
-        return vars
-
-    # ============================================================ gradients (5-level cascade)
+    def apply_step(self, vars, etas, alpha):
+        """var ← var + alpha·eta for every variable (incl. bd), then refresh proj = R(delta)."""
+        for v in ("obj", "prb", "pos", "proj", "bd"):
+            self.linear_batch(vars[v], etas[v], 1, alpha)
+        
+    # ============================================================ gradients (per-dist cascade)
+    @timer
     def gradients_cascade(self, vars, grads):
-        """Cascade gradient over the 5-level cascade.
-        Outputs (with rho_sq scaling applied here for uniformity):
-          grads['proj'] = y[1] * rho_sq['obj']
-          grads['pos']       = y[3] * rho_sq['pos']
-          grads['prb']       += y[0] * rho_sq['prb']  (accumulated across chunks)
-          grads['bd'] += y[2] * rho_sq['bd']  (accumulated; final allreduce in self.gradients)
-        """
+        """Cascade gradient over the 5-level cascade. Per-dist.
+        self.gF[id] dispatches to parent's per-dist gF0..gF3 (per __init__ patch) and
+        RecDelta's gF4. Per-k coeff_cache_reset() guards against id() reuse."""
         grads['prb'][:] = 0
         grads['bd'][:] = 0
 
@@ -273,18 +195,20 @@ class RecDelta(Rec):
                                gradproj, gradpos, gradprb, gradbd,
                                d, eff_demag, proj, pos, prb, bd):
             self._eff_demag_chunk = eff_demag
-            x = [prb, proj, bd, pos]
-            y = d
-            for id in range(len(self.gF)):  # 0, 1, 2, 3, 4
-                y = self.gF[id](x, y)
-            # y is now 4-element at level 4: [yprb, yproj, ybd, ypos]
-            gradprb[:]  += y[0] * self.rho_sq['prb']
-            gradproj[:] = y[1] * self.rho_sq['obj']
-            gradbd[:]   += y[2] * self.rho_sq['bd']
-            gradpos[:]  = y[3] * self.rho_sq['pos']
+            gradproj[:] = 0  # accumulator across dist within this chunk
+            for k in range(self.ndist):
+                self._dist_idx = k
+                self.cl_shift.coeff_cache_reset()
+                x = [prb[k], proj, bd, pos[:, k]]
+                y = d[:, k]
+                for id in range(len(self.gF)):
+                    y = self.gF[id](x, y)
+                # y is now 4-element at level 4: [yprb, yproj, ybd, ypos]
+                gradprb[k]    += y[0] * self.rho_sq['prb']
+                gradproj      += y[1] * self.rho_sq['obj']
+                gradbd        += y[2] * self.rho_sq['bd']
+                gradpos[:, k]  = y[3] * self.rho_sq['pos']
 
-        # IMPORTANT: gpu_batch needs proper inputs first (sliced over axis_inp=0), then nonproper.
-        # proj, pos: proper (chunked over theta).  prb, bd: nonproper (replicated).
         _gradients_cascade(self,
                            grads['proj'], grads['pos'], grads['prb'], grads['bd'],
                            self.data, self.eff_demagnifications,
@@ -292,32 +216,28 @@ class RecDelta(Rec):
                            vars['prb'], vars['bd'])
 
     def gradients(self, vars, grads):
-        """Full gradient: cascade -> proj, then gF5 (RT) -> obj, plus regularization + allreduces."""
-        # 1. cascade -> grads['proj'], grads['pos'], grads['prb'], grads['bd']
+        """Full gradient: cascade -> proj, adj_tomo (RT) -> obj, regularization + allreduces."""
         self.gradients_cascade(vars, grads)
 
-        # 2. gF5: RT applied chunked over z slices  -> grads['obj'] (real)
-        nvtx.push_range(":::BH:redist back", color='red')
-        self.cl_mpi_real.redist(grads['proj'], self.proj_tmp_real, direction='backward')
-        nvtx.pop_range()
-        self.gF5(grads['obj'], self.proj_tmp_real)
+        with nvtx.annotate(":::BH:redist back", color='red'):
+            self.redist(grads['proj'], self.proj_tmp, direction='backward')
+        self.adj_tomo(grads['obj'], self.proj_tmp)
 
-        # 3. biharmonic regularization on obj (in-place)
-        self.gradient_laplacian(grads['obj'])
+        if hasattr(self, 'cl_lap_term'):
+            self.cl_lap_term.gradient(grads['obj'])
 
-        # 4. probe-fit gradient (rank 0) + allreduce probe gradient across ranks
-        if self.rank == 0:
-            self.gradient_prbfit(grads["prb"], vars["prb"])
+        if self.rank == 0 and hasattr(self, 'cl_prb_term'):
+            self.cl_prb_term.gradient(grads["prb"], vars["prb"], self.rho_sq['prb'])
         grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
 
-        # 5. allreduce scalar bd gradient across MPI ranks
         grads['bd'][:] = cp.array(self.allreduce(grads['bd'].get()))
 
-    # ============================================================ hessian (5-level cascade)
+    # ============================================================ hessian (per-dist cascade)
     @timer
     def hessian_cascade(self, vars, grads, etas):
-        """Cascade Hessian-weighted inner product <H · grads, etas> over 5 levels.
-        Returns a single scalar (host)."""
+        """Cascade Hessian-weighted inner product <H · grads, etas> over 5 levels. Per-dist.
+        coeff_cache_reset() is called *per k-iteration* so id() collisions between
+        per-iter ephemeral arrays (x_proj_complex from F4) can't return stale entries."""
         out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
@@ -329,26 +249,24 @@ class RecDelta(Rec):
             x_bd,  y_bd,  z_bd,
         ):
             self._eff_demag_chunk = eff_demag
-            x = [x_prb, x_proj, x_bd, x_pos]
-            y = [y_prb, y_proj, y_bd, y_pos]
-            z = [z_prb, z_proj, z_bd, z_pos]
-            w = [None, None, None, None]
+            # Identity check on un-sliced prb refs (arr[k] views differ in identity).
+            y_is_z = y_prb is z_prb
+            for k in range(self.ndist):
+                self._dist_idx = k
+                self.cl_shift.coeff_cache_reset()
+                x = [x_prb[k], x_proj, x_bd, x_pos[:, k]]
+                y = [y_prb[k], y_proj, y_bd, y_pos[:, k]]
+                z = y if y_is_z else [z_prb[k], z_proj, z_bd, z_pos[:, k]]
+                w = [None, None, None, None]
 
-            y_is_z = y[0] is z[0]
+                for id in range(1, len(self.F))[::-1]:  # 4, 3, 2, 1
+                    w = self.d2F_dF[id](x, y, z, w)
+                    fx, y = self.dF[id](x, y)
+                    z = y if y_is_z else self.dF[id](x, z, return_x=False)
+                    x = fx
 
-            for id in range(1, len(self.F))[::-1]:  # 4, 3, 2, 1
-                w = self.d2F_dF[id](x, y, z, w)
-                fx, y = self.dF[id](x, y)
-                if y_is_z:
-                    z = y
-                else:
-                    z = self.dF[id](x, z, return_x=False)
-                x = fx
+                out[:] += self.d2F_dF[0](x, y, z, w, d[:, k])
 
-            out[:] += self.d2F_dF[0](x, y, z, w, d)
-
-        # proper inputs first (data, eff_demag, pos triple, proj triple),
-        # then nonproper (prb triple, bd triple).
         _hessian_cascade(
             self, out, self.data, self.eff_demagnifications,
             vars['pos'], grads['pos'],  etas['pos'],
@@ -359,47 +277,50 @@ class RecDelta(Rec):
 
         return out[0].get()
 
-    # ============================================================ min (5-level cascade)
+    # ============================================================ min (per-dist)
     @timer
     def min(self, prb, obj, pos, proj, bd):
-        """Loss evaluation. Override of parent.
-        Signature shadows parent's `min(prb, obj, pos, proj)` but takes proj + bd
-        instead of the complex proj."""
+        """Loss evaluation. 5-arg signature (with bd). Per-dist cascade."""
         out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _min(self, out, proj, pos, data, eff_demag, prb, bd):
             self._eff_demag_chunk = eff_demag
-            x = [prb, proj, bd, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:  # 4, 3, 2, 1
-                y = self.F[id](y)
-            out[:] += self.F0(y, data)
+            self.cl_shift.coeff_cache_reset()
+            for k in range(self.ndist):
+                self._dist_idx = k
+                x = [prb[k], proj, bd, pos[:, k]]
+                y = self.apply_F_from(x, 1)
+                out[:] += self.F0(y, data[:, k])
 
         _min(self, out, proj, pos, self.data, self.eff_demagnifications, prb, bd)
         out = out[0]
 
-        if self.rank == 0:
-            for j in range(self.ndist):
-                Dprb = self.cl_prop.D(prb[j : j + 1], j)[0]
-                out += self.lam_prbfit / self.prb_size * cp.linalg.norm(cp.abs(Dprb) - self.ref[j]) ** 2
-        return self.allreduce(np.array(out.get() + self._lap_energy_local(), dtype='float32'))
+        if self.rank == 0 and hasattr(self, 'cl_prb_term'):
+            out += self.cl_prb_term.energy_local(prb)
+        lap_e = self.cl_lap_term.energy_local() if hasattr(self, 'cl_lap_term') else 0
+        return self.allreduce(np.array(out.get() + lap_e, dtype='float32'))
 
     # ============================================================ synthetic data
     def gen_sqrt_data(self, vars, out):
-        """Generate synthetic |F(vars)| from real delta + scalar bd."""
+        """Generate synthetic |F(vars)| from real delta + scalar bd.
+        Per-dist cascade: F4 (RecDelta) then parent's per-dist F3/F2/F1.
+        Rec.F1/Rec.F3 are called explicitly so they bypass the multi-dist
+        overrides (which are still needed by gradients_cascade etc.)."""
         self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
         vars["obj"] /= self.norm_const
-        self._refresh_proj(vars)
+        self.fwd_tomo(vars['obj'], out=self.proj_tmp)
+        self.redist(self.proj_tmp, vars['proj'])
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, proj, pos, eff_demag, prb, bd):
             self._eff_demag_chunk = eff_demag
-            x = [prb, proj, bd, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:
-                y = self.F[id](y)
-            out[:] = cp.abs(y)
+            self.cl_shift.coeff_cache_reset()
+            for k in range(self.ndist):
+                self._dist_idx = k
+                x = [prb[k], proj, bd, pos[:, k]]
+                y = self.apply_F_from(x, 1)
+                out[:, k] = cp.abs(y)
 
         _gen_data(self, out,
                   vars['proj'], vars['pos'], self.eff_demagnifications,
@@ -407,25 +328,26 @@ class RecDelta(Rec):
         vars["obj"] *= self.norm_const
 
     def compute_residual(self, vars):
-        """Return float32 numpy [local_ntheta, ndist, nz, n]: |F(vars)| - sqrt(data)."""
-        self._refresh_proj(vars)
+        """Return float32 numpy [local_ntheta, ndist, nz, n]: |F(vars)| - sqrt(data).
+        Per-dist cascade via Rec.F1/Rec.F3 (parent per-dist)."""
         res = np.empty([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
         for theta_st in range(0, self.local_ntheta, self.nchunk):
             theta_end = min(theta_st + self.nchunk, self.local_ntheta)
             self._eff_demag_chunk = self.eff_demagnifications[theta_st:theta_end]
+            self.cl_shift.coeff_cache_reset()
             proj_ch = cp.array(vars['proj'][theta_st:theta_end])
-            pos_ch       = vars['pos'][theta_st:theta_end]
-            x = [vars['prb'], proj_ch, vars['bd'], pos_ch]
-            for id in range(1, len(self.F))[::-1]:
-                x = self.F[id](x)
-            res[theta_st:theta_end] = cp.asnumpy(cp.abs(x)) - self.data[theta_st:theta_end]
+            pos_ch  = vars['pos'][theta_st:theta_end]
+            for k in range(self.ndist):
+                self._dist_idx = k
+                x = [vars['prb'][k], proj_ch, vars['bd'], pos_ch[:, k]]
+                x = self.apply_F_from(x, 1)
+                res[theta_st:theta_end, k] = cp.asnumpy(cp.abs(x)) - self.data[theta_st:theta_end, k]
         return res
 
     # ============================================================ logging / vis
     def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
-        """Same idea as parent but with the extra `bd` variable plumbed through
-        the perturbation and the 5-arg `min` signature."""
-        if not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
+        """Parent's check_approximation but with extra `bd` variable + 5-arg min."""
+        if i != -1 and not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
             return
 
         if not hasattr(self, '_chk_objt'):
@@ -478,15 +400,14 @@ class RecDelta(Rec):
         logger.info(f"check_approximation plot → {png_path}")
 
     def error_debug(self, vars, i):
-        """Same as parent + log bd and 1/bd, also save delta/beta to conv.csv."""
-        if not (i % self.error_step == 0 and self.error_step != -1):
+        """Same as parent + log bd and 1/bd, also save delta/beta to conv.csv.
+        i=-1 is the initial-state call from BH and is always logged."""
+        if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"], vars["bd"])
         if self.rank == 0:
             bd = float(vars['bd'][0])
             inv_bd = 1.0 / bd if bd != 0 else float('inf')
-            # Add delta_beta column to the convergence table (defensive: user scripts
-            # may have re-initialised cl.table to the parent's 3-column schema).
             if 'delta_beta' not in self.table.columns:
                 self.table['delta_beta'] = pd.NA
             if i == -1:
@@ -498,25 +419,14 @@ class RecDelta(Rec):
                 self.table.loc[len(self.table)] = [i, err, ittime, inv_bd]
             self.time_start = time.time()
             if hasattr(self, 'path_out'):
-                import os as _os
                 name = f"{self.path_out}/conv.csv"
-                _os.makedirs(_os.path.dirname(name), exist_ok=True)
+                os.makedirs(os.path.dirname(name), exist_ok=True)
                 self.table.to_csv(name, index=False)
 
     def vis_debug(self, vars, i, writer=None):
-        """Inline display: real delta slice + log scalar bd."""
-        if not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
+        """Per-iter checkpoint write (residual + pos-error plot bundled in)."""
+        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
             return
-        if writer is not None:
-            if i > self.start_iter:
-                residual = self.compute_residual(vars)
-                writer.write_checkpoint(vars, i, self.norm_const, residual=residual)
-            # if self.rank == 0:
-                # logger.warning(f"iter={i}: bd={float(vars['bd'][0]):.6e}")
-            return
-        zmid = self.local_nzobj // 2
-        mshow(vars['obj'][zmid], True, figsize=(8, 3))
-        # mshow_polar(vars['prb'][0], True, figsize=(8, 3))
-        # mshow_pos(vars['pos'] - self.pos_init, True, figsize=(8, 3))
-        # if self.rank == 0:
-            # logger.warning(f"iter={i}: bd={float(vars['bd'][0]):.6e}")
+        residual = self.compute_residual(vars)
+        writer.write_checkpoint(vars, i, self.norm_const,
+                                residual=residual, pos_init=self.pos_init)

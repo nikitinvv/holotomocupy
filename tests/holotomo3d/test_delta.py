@@ -143,6 +143,7 @@ args.nchunk          = 16                       # projections/slices processed p
 args.checkpoint_step = 16                       # save checkpoint every N iters (-1 = never)
 args.error_step      = 8                        # log error every N iters (-1 = never)
 args.start_iter      = 0                        # resume from this iteration
+args.lam_laplacian = 0
 
 # --- MPI ---
 args.comm = MPI.COMM_WORLD
@@ -173,7 +174,7 @@ cl.vars['prb'][:] = cp.array(prb)
 cl.vars['pos'][:] = cp.array(pos[cl.st_theta:cl.end_theta])
 
 cl.gen_sqrt_data(cl.vars, cl.data)
-cl.gen_sqrt_ref(cl.vars['prb'], cl.ref)
+cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 #### Reconstruction — start from a perturbed initial guess
 cl.vars['obj'][:] = 0

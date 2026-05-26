@@ -31,7 +31,7 @@ def find_mem(rank):
 
 occurs = {'gradients_cascade:':1,
           'redist:':2,
-          'gF4:': 1,
+          'adj_tomo:': 1,
           'gradient_prbfit:':1,
          'allreduce:':2,
          'allreduce2:':2,

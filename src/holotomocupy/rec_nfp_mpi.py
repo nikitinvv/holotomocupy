@@ -5,6 +5,7 @@ import tifffile
 import warnings
 import pandas as pd
 import nvtx
+import cupy.fft
 
 from .propagation import Propagation
 from .shift import Shift
@@ -15,6 +16,7 @@ from .logger_config import logger
 
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=f".*peer.*")
+cupy.fft.config.get_plan_cache().set_size(0)  # dont waste GPU memory
 
 
 class RecNFP:
@@ -27,6 +29,10 @@ class RecNFP:
     Variables: prb (nz×n, complex), proj (nzobj×nobj, real), pos (ntheta×2)
     Parallelisation: theta distributed across MPI ranks; prb/proj replicated.
     """
+
+    # Variables driven by the BH loop. Subclasses with extra variables (e.g.
+    # RecNFPDelta adds 'bd') override this and inherit BH unchanged.
+    _var_names = ("prb", "proj", "pos")
 
     def __init__(self, args):
 
@@ -106,47 +112,73 @@ class RecNFP:
         grads = self.grads
         etas  = self.etas
 
-        self.pos_init = vars['pos'].copy()
+        self.precalc(vars)
         self.error_debug(vars, -1)
 
         self.time_start = time.time()
         for i in range(self.start_iter, self.niter):
-            nvtx.push_range("::BH:nfp:" + str(i))
-
-            self.gradients(vars, grads)
-
-            for v in ["proj", "prb", "pos"]:
-                self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
-
-            if i == self.start_iter:
-                for v in ["prb", "proj", "pos"]:
-                    self.mulc_batch(etas[v], grads[v], -1)
-            else:
-                top, bottom = self.allreduce2(
-                    self.hessian(vars, grads, etas),
-                    self.hessian(vars, etas,  etas),
-                )
-                beta = top / bottom
-                for v in ["prb", "proj", "pos"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)
-
-            top = -self.redot_batch(grads['pos'], etas['pos']) / self.rho_sq['pos']
-            if self.rank == 0:
-                top -= self.redot_batch(grads['prb'],  etas['prb'])  / self.rho_sq['prb']
-                top -= self.redot_batch(grads['proj'], etas['proj']) / self.rho_sq['proj']
-
-            bottom = self.hessian(vars, etas, etas)
-            top, bottom = self.allreduce2(top, bottom)
-            alpha = top / bottom
-
-            for v in ["prb", "proj", "pos"]:
-                self.linear_batch(vars[v], etas[v], 1, alpha)
-
-            self.error_debug(vars, i)
-            self.vis_debug(vars, i, writer)
-            nvtx.pop_range()
+            with nvtx.annotate(f"::BH:nfp:{i}"):
+                self.compute_gradient(vars, grads)
+                self.compute_beta(vars, grads, etas, i)
+                alpha = self.compute_alpha(vars, grads, etas)
+                self.apply_step(vars, etas, alpha)
+                self.log_iter(vars, i, writer)
 
         return vars
+
+    def precalc(self, vars):
+        """One-time setup at the start of BH: snapshot initial positions."""
+        self.pos_init = vars['pos'].copy()
+
+    def compute_gradient(self, vars, grads):
+        """Gradients + per-variable rho_sq scaling (NFP variant: scaling lives in BH,
+        not inside gF cascade, unlike rec_mpi.py)."""
+        with nvtx.annotate("gradients"):
+            self.gradients(vars, grads)
+        for v in self._var_names:
+            self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
+
+    def compute_beta(self, vars, grads, etas, i):
+        """Update etas in place: first iter is pure steepest descent (etas = -grads);
+        subsequent iters apply etas = beta*etas - grads with the CG coefficient."""
+        if i == self.start_iter:
+            for v in self._var_names:
+                self.mulc_batch(etas[v], grads[v], -1)
+            return
+        with nvtx.annotate(":::BH:calc beta"):
+            top, bottom = self.allreduce2(
+                self.hessian(vars, grads, etas),
+                self.hessian(vars, etas,  etas),
+            )
+            beta = top / bottom
+            for v in self._var_names:
+                self.linear_batch(etas[v], grads[v], beta, -1)
+
+    def compute_alpha(self, vars, grads, etas):
+        """Step size: alpha = top / bottom with top = -<grad, eta>/rho_sq (probe & proj
+        contributions only on rank 0 since they're replicated), bottom = <eta, H·eta>."""
+        with nvtx.annotate(":::BH:calc_alpha"):
+            top = -self.redot_batch(grads['pos'], etas['pos']) / self.rho_sq['pos']
+            if self.rank == 0:
+                for v in self._var_names:
+                    if v == 'pos':
+                        continue
+                    top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+            bottom = self.hessian(vars, etas, etas)
+            top, bottom = self.allreduce2(top, bottom)
+            return top / bottom
+
+    def apply_step(self, vars, etas, alpha):
+        """var ← var + alpha·eta for every variable."""
+        for v in self._var_names:
+            self.linear_batch(vars[v], etas[v], 1, alpha)
+
+    def log_iter(self, vars, i, writer):
+        """Error + checkpoint hooks for this iter."""
+        with nvtx.annotate(":::BH:calc error", color='gray'):
+            self.error_debug(vars, i)
+        with nvtx.annotate(":::BH:vis_debug", color='gray'):
+            self.vis_debug(vars, i, writer)
 
     def hessian(self, vars, grads, etas):
         return self.hessian_cascade(vars, grads, etas)
@@ -162,6 +194,7 @@ class RecNFP:
             x0, y0, z0,   # prb  — non-proper gpu
             x1, y1, z1,   # proj — non-proper gpu
         ):
+            self.cl_shift.coeff_cache_reset()
             x = [x0, x1, x2]
             y = [y0, y1, y2]
             z = [z0, z1, z2]
@@ -199,6 +232,7 @@ class RecNFP:
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
         def _gradients_cascade(self, gradpos, gradprb, gradproj, d, pos, prb, proj):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
             y = d
             for id in range(len(self.gF)):
@@ -219,6 +253,14 @@ class RecNFP:
     # F1: (prb, exp_proj) → D(prb · exp_proj)
     # F0: ||·| - d||²
     #################################################################
+
+    def apply_F_from(self, x, from_level):
+        """Apply F[from_level], F[from_level+1], ..., F[len(F)-1] inside-out, returning
+        the partial cascade value at level (from_level-1). Used by gF* methods that need
+        to fast-forward x through cascade levels above their own."""
+        for k in range(from_level, len(self.F))[::-1]:
+            x = self.F[k](x)
+        return x
 
     ####### F0: ||x0| - d||² / data_size
     @staticmethod
@@ -259,8 +301,7 @@ class RecNFP:
         return scale * (x - td)
 
     def gF0(self, x, y):
-        for id in range(1, len(self.F))[::-1]:
-            x = self.F[id](x)
+        x = self.apply_F_from(x, 1)
         return self._gF0_fused(x, y, np.float32(2 / self.data_size))
 
     ####### F1: (prb, exp_proj) → D(prb · exp_proj)
@@ -293,8 +334,7 @@ class RecNFP:
 
     def gF1(self, x, y):
         y0 = y
-        for id in range(2, len(self.F))[::-1]:   # apply higher-level Fs to reach F1's input space
-            x = self.F[id](x)
+        x = self.apply_F_from(x, 2)
         x11, x12 = x
         y12 = self.cl_prop.DT(y0, 0)
         y11 = cp.sum(y12 * cp.conj(x12), axis=0)  # sum over theta → (nz, n)
@@ -346,29 +386,35 @@ class RecNFP:
 
     def gF2(self, x, y):
         y11, y12 = y
-        for id in range(3, len(self.F))[::-1]:   # apply higher-level Fs to reach F2's input space
-            x = self.F[id](x)
+        x = self.apply_F_from(x, 3)
         x21, x22 = x
         y22 = self._gF2_fused(x22, y12)
         y22 = y22.real if self.obj_dtype == 'float32' else y22
         return [y11, y22]
 
     ####### F3: (prb, proj, pos) → (prb, S_pos(proj))
+    # coeff(x32) is cached within a chunk; callers (gradients_cascade / hessian_cascade
+    # closures) MUST invoke cl_shift.coeff_cache_reset() at chunk boundaries since
+    # id(arr) values are reused once an earlier array is GC'd.
+
+    def _tiled_coeff(self, psi, n):
+        """Cached coeff(psi) broadcast to [n, ...] for the per-theta shift kernels."""
+        return cp.tile(self.cl_shift.coeff_cached(psi)[None], [n, 1, 1])
+
     def F3(self, x):
         x31, x32, x33 = x
-        c = self.cl_shift.coeff(x32)
-        c = cp.tile(c[None], [len(x33), 1, 1])
-        m = cp.ones(len(x33), dtype='float32')
+        n = len(x33)
+        c = self._tiled_coeff(x32, n)
+        m = cp.ones(n, dtype='float32')
         return x31, self.cl_shift.curlySc(c, x33, m)
 
     def dF3(self, x, y, return_x=True):
         x31, x32, x33 = x
         y31, y32, y33 = y
-        c  = self.cl_shift.coeff(x32)
-        c  = cp.tile(c[None], [len(x33), 1, 1])
-        c1 = self.cl_shift.coeff(y32)
-        c1 = cp.tile(c1[None], [len(x33), 1, 1])
-        m = cp.ones(len(x33), dtype='float32')
+        n  = len(x33)
+        c  = self._tiled_coeff(x32, n)
+        c1 = self._tiled_coeff(y32, n)
+        m  = cp.ones(n, dtype='float32')
         y22 = self.cl_shift.dcurlySc(c, x33, m, c1, y33)
         if return_x:
             x22 = self.cl_shift.curlySc(c, x33, m)
@@ -380,28 +426,24 @@ class RecNFP:
         y31, y32, y33 = y
         z31, z32, z33 = z
         w31, w32, w33 = w
-        c  = self.cl_shift.coeff(x32)
-        cy = self.cl_shift.coeff(y32)
-        cz = self.cl_shift.coeff(z32)
         n  = len(x33)
-        c  = cp.tile(c[None],  [n, 1, 1])
-        cy = cp.tile(cy[None], [n, 1, 1])
-        cz = cp.tile(cz[None], [n, 1, 1])
-        m = cp.ones(n, dtype='float32')
+        c  = self._tiled_coeff(x32, n)
+        cy = self._tiled_coeff(y32, n)
+        cz = self._tiled_coeff(z32, n)
+        m  = cp.ones(n, dtype='float32')
         y22 = self.cl_shift.d2curlySc(c, x33, m, cy, y33, cz, z33)
         if w32 is not None:
-            cw = cp.tile(self.cl_shift.coeff(w32)[None], [n, 1, 1])
+            cw = self._tiled_coeff(w32, n)
             y22 = y22 + self.cl_shift.dcurlySc(c, x33, m, cw, w33)
         return [w31, y22]
 
     def gF3(self, x, y):
         y21, y22 = y
-        for id in range(4, len(self.F))[::-1]:   # apply higher-level Fs to reach F3's input space
-            x = self.F[id](x)
+        x = self.apply_F_from(x, 4)
         x31, x32, x33 = x
-        c = self.cl_shift.coeff(x32)
-        c = cp.tile(c[None], [len(x33), 1, 1])
-        m = cp.ones(len(x33), dtype='float32')
+        n = len(x33)
+        c = self._tiled_coeff(x32, n)
+        m = cp.ones(n, dtype='float32')
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
         y32 = cp.zeros([self.nzobj, self.nobj], dtype=self.obj_dtype)
         y32[:] = cp.sum(Deltapsi, axis=0)
@@ -414,10 +456,9 @@ class RecNFP:
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _min(self, out, pos, data, prb, proj):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:
-                y = self.F[id](y)
+            y = self.apply_F_from(x, 1)
             out[:] += self.F0(y, data)
 
         _min(self, out, pos, self.data, prb, proj)
@@ -447,7 +488,9 @@ class RecNFP:
                 mshow_pos(vars['pos'] - self.pos_init, True)
 
     def error_debug(self, vars, i):
-        if not (i % self.error_step == 0 and self.error_step != -1):
+        """i=-1 is the initial-state call from BH (before the loop) and is always logged
+        regardless of error_step."""
+        if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
         err = self.min(vars['prb'], vars['proj'], vars['pos'])
 
@@ -476,9 +519,8 @@ class RecNFP:
         """Generate synthetic sqrt(intensity) data."""
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, pos, prb, proj):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:
-                y = self.F[id](y)
+            y = self.apply_F_from(x, 1)
             out[:] = cp.abs(y)
         _gen_data(self, out, vars['pos'], vars['prb'], vars['proj'])

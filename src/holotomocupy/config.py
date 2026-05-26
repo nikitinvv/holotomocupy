@@ -33,7 +33,7 @@ def parse_args(config_file):
         args.paganin = cfg.getint("paganin")
         args.mask = cfg.getfloat("mask")
         args.lam_prbfit    = cfg.getfloat("lam_prbfit")
-        args.lam_laplacian = cfg.getfloat("lam_laplacian")
+        args.lam_laplacian = cfg.getfloat("lam_laplacian", fallback=0.0)
         args.rho = get_list(cfg, "rho", float)
         args.niter = cfg.getint("niter")
         args.nchunk = cfg.getint("nchunk")

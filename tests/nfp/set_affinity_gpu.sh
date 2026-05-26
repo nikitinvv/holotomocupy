@@ -1,5 +1,4 @@
 #!/bin/bash
-
 rank="${OMPI_COMM_WORLD_RANK:-$SLURM_PROCID}"
 local_rank="${OMPI_COMM_WORLD_LOCAL_RANK:-$SLURM_LOCALID}"
 export OMP_NUM_THREADS=4

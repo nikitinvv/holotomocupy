@@ -31,6 +31,10 @@ from .mpi_functions import *
 
 
 class RecNFPDelta(RecNFP):
+    # BH loop walks all four variables; parent helpers (compute_gradient, compute_beta,
+    # apply_step, ...) iterate over this list, so no BH override needed.
+    _var_names = ("prb", "proj", "pos", "bd")
+
     def __init__(self, args):
         if args.obj_dtype != 'complex64':
             raise ValueError(
@@ -44,8 +48,8 @@ class RecNFPDelta(RecNFP):
                 f"[proj, prb, pos, bd]; got {getattr(args, 'rho', None)}"
             )
         super().__init__(args)
-        # Extend cascade with F4 (innermost). Parent gF0..gF3 already iterate
-        # via range(_, len(self.F)) thanks to the matching patch in rec_nfp_mpi.py.
+        # Extend cascade with F4 (innermost). Parent apply_F_from / gF0..gF3 walk the
+        # full self.F list, so the new level is picked up automatically.
         self.F      = [self.F0, self.F1, self.F2, self.F3, self.F4]
         self.gF     = [self.gF0, self.gF1, self.gF2, self.gF3, self.gF4]
         self.dF     = [self.dF0, self.dF1, self.dF2, self.dF3, self.dF4]
@@ -115,51 +119,7 @@ class RecNFPDelta(RecNFP):
 
         return [yprb, yproj_out, ybd_out, ypos]
 
-    # ============================================================ BH
-    def BH(self, writer=None):
-        vars  = self.vars
-        grads = self.grads
-        etas  = self.etas
-
-        self.pos_init = vars['pos'].copy()
-        self.error_debug(vars, -1)
-
-        self.time_start = time.time()
-        for i in range(self.start_iter, self.niter):
-            self.gradients(vars, grads)
-
-            for v in ["proj", "prb", "pos", "bd"]:
-                self.mulc_batch(grads[v], grads[v], self.rho_sq[v])
-
-            if i == self.start_iter:
-                for v in ["prb", "proj", "pos", "bd"]:
-                    self.mulc_batch(etas[v], grads[v], -1)
-            else:
-                top, bottom = self.allreduce2(
-                    self.hessian(vars, grads, etas),
-                    self.hessian(vars, etas,  etas),
-                )
-                beta = top / bottom
-                for v in ["prb", "proj", "pos", "bd"]:
-                    self.linear_batch(etas[v], grads[v], beta, -1)
-
-            top = -self.redot_batch(grads['pos'], etas['pos']) / self.rho_sq['pos']
-            if self.rank == 0:
-                top -= self.redot_batch(grads['prb'],  etas['prb'])  / self.rho_sq['prb']
-                top -= self.redot_batch(grads['proj'], etas['proj']) / self.rho_sq['proj']
-                top -= self.redot_batch(grads['bd'],   etas['bd'])   / self.rho_sq['bd']
-
-            bottom = self.hessian(vars, etas, etas)
-            top, bottom = self.allreduce2(top, bottom)
-            alpha = top / bottom
-
-            for v in ["prb", "proj", "pos", "bd"]:
-                self.linear_batch(vars[v], etas[v], 1, alpha)
-
-            self.error_debug(vars, i)
-            self.vis_debug(vars, i, writer)
-
-        return vars
+    # BH is inherited from RecNFP; it iterates over self._var_names = (prb, proj, pos, bd).
 
     # ============================================================ gradients (5-level cascade)
     def gradients_cascade(self, vars, grads):
@@ -171,6 +131,7 @@ class RecNFPDelta(RecNFP):
         def _gradients_cascade(self,
                                gradpos, gradprb, gradproj, gradbd,
                                d, pos, prb, proj, bd):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, bd, pos]
             y = d
             for id in range(len(self.gF)):                    # 0..4
@@ -203,6 +164,7 @@ class RecNFPDelta(RecNFP):
             x_prb, y_prb, z_prb,
             x_bd, y_bd, z_bd,
         ):
+            self.cl_shift.coeff_cache_reset()
             x = [x_prb, x_proj, x_bd, x_pos]
             y = [y_prb, y_proj, y_bd, y_pos]
             z = [z_prb, z_proj, z_bd, z_pos]
@@ -235,10 +197,9 @@ class RecNFPDelta(RecNFP):
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _min(self, out, pos, data, prb, proj, bd):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, bd, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:           # 4, 3, 2, 1
-                y = self.F[id](y)
+            y = self.apply_F_from(x, 1)
             out[:] += self.F0(y, data)
 
         _min(self, out, pos, self.data, prb, proj, bd)
@@ -248,17 +209,17 @@ class RecNFPDelta(RecNFP):
     def gen_sqrt_data(self, vars, out):
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, pos, prb, proj, bd):
+            self.cl_shift.coeff_cache_reset()
             x = [prb, proj, bd, pos]
-            y = x
-            for id in range(1, len(self.F))[::-1]:           # 4, 3, 2, 1
-                y = self.F[id](y)
+            y = self.apply_F_from(x, 1)
             out[:] = cp.abs(y)
         _gen_data(self, out, vars['pos'], vars['prb'], vars['proj'], vars['bd'])
 
     # ============================================================ error / vis
     def error_debug(self, vars, i):
-        """Like parent + log bd and 1/bd, also writes delta_beta column to csv."""
-        if not (i % self.error_step == 0 and self.error_step != -1):
+        """Like parent + log bd and 1/bd, also writes delta_beta column to csv.
+        i=-1 is the initial-state call from BH and is always logged."""
+        if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
         err = self.min(vars['prb'], vars['proj'], vars['pos'], vars['bd'])
 

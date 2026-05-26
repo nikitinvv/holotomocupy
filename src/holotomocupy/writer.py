@@ -57,7 +57,7 @@ class Writer:
             return x.get()
         return np.asarray(x)
 
-    def write_checkpoint(self, vars, i, norm_const, residual=None):
+    def write_checkpoint(self, vars, i, norm_const, residual=None, pos_init=None):
         """Save obj, prb, pos for iteration i to an HDF5 checkpoint file.
 
         Parameters
@@ -69,6 +69,11 @@ class Writer:
             Iteration number, used in the filename.
         norm_const : float
             Normalisation constant — obj is multiplied by this before saving.
+        residual : array, optional
+            If provided, written as the 'residual' dataset.
+        pos_init : array, optional
+            Initial positions; when provided, a PNG of per-(theta, dist) drift
+            is also saved under {path_out}/pos_errors/.
         """
         path = os.path.join(self.h5_dir, f"checkpoint_{i:04}.h5")
 
@@ -129,4 +134,47 @@ class Writer:
             tiff_path = os.path.join(self.tiff_dir, f"checkpoint_{i:04}_obj_re.tiff")
             tifffile.imwrite(tiff_path, slice_re)
             logger.info(f"Writer: mid-slice TIFF saved → {tiff_path}")
-        
+
+        if pos_init is not None:
+            self._save_pos_errors_plot(vars['pos'] - pos_init, i)
+
+    def _save_pos_errors_plot(self, delta_local, i):
+        """Gather per-(theta, dist) position drift across ranks; rank 0 logs stats and saves PNG."""
+        if isinstance(delta_local, cp.ndarray):
+            delta_local = delta_local.get()
+        all_deltas = self.comm.gather(delta_local, root=0)
+        if self.rank != 0:
+            return
+
+        all_delta = np.concatenate(all_deltas, axis=0)    # [ntheta, ndist, 2]
+        abs_delta = np.abs(all_delta)
+        mean_err  = abs_delta.mean(axis=0)
+        std_err   = abs_delta.std(axis=0)
+        max_err   = abs_delta.max(axis=0)
+        parts = "  ".join(
+            f"d{j}: y=({mean_err[j,0]:.4f}±{std_err[j,0]:.4f} max={max_err[j,0]:.4f})"
+            f"  x=({mean_err[j,1]:.4f}±{std_err[j,1]:.4f} max={max_err[j,1]:.4f})"
+            for j in range(self.ndist)
+        )
+        logger.warning(f"iter={i}: pos abs error [px]  {parts}")
+
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, self.ndist, figsize=(5 * self.ndist, 6))
+        if self.ndist == 1:
+            axes = axes[:, np.newaxis]
+        theta_idx = np.arange(self.ntheta)
+        for j in range(self.ndist):
+            for d, label in enumerate(['y', 'x']):
+                ax = axes[d, j]
+                ax.plot(theta_idx, all_delta[:, j, d])
+                ax.set_title(f"dist {j}, {label}")
+                ax.set_xlabel("theta index")
+                ax.set_ylabel("error [px]")
+                ax.grid(True)
+        fig.tight_layout()
+        pos_err_dir = os.path.join(self.path_out, "pos_errors")
+        os.makedirs(pos_err_dir, exist_ok=True)
+        png_path = os.path.join(pos_err_dir, f"pos_error_{i:04}.png")
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"pos error plot → {png_path}")

@@ -48,7 +48,7 @@ nchunk          = 8
 checkpoint_step = 32          # save tiff + (optional) h5 every N iters
 error_step      = 32          # log error every N iters
 rho             = [1, 2, 0.1] # gradient step-size scales for [proj, prb, pos]
-photons         = 70         # mean photons per pixel for Poisson noise; None to disable
+photons         = None         # mean photons per pixel for Poisson noise; None to disable
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()

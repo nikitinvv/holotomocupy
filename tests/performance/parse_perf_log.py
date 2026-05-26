@@ -34,7 +34,7 @@ INFO_RE = re.compile(r'\[rank=\d+\]\s+(machine|job|perf-test|BH done):\s*(.+)')
 # The 'hessian' bucket is split per-instance (hessian1, hessian2, ...) at print
 # time using split_hessians(); see the categories-rendering loop below.
 CATEGORIES = {
-    'gradient':     {'gradients_cascade', 'gF4', 'fwd_tomo'},
+    'gradient':     {'gradients_cascade', 'adj_tomo', 'fwd_tomo'},
     'hessian':      {'hessian_cascade', 'hessian_laplacian', 'hessian_prbfit'},
     'redist':       {'redist'},
     'linear_batch': {'linear_batch', 'linear_redot_batch'},

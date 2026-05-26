@@ -63,7 +63,7 @@ Reads the perf log and prints:
 
    | category   | members                                                    |
    |------------|------------------------------------------------------------|
-   | `gradient` | `gradients_cascade + gF4 + fwd_tomo`                       |
+   | `gradient` | `gradients_cascade + adj_tomo + fwd_tomo`                  |
    | `hessian1`, `hessian2`, `hessian3` | the 3 `Rec.hessian()` calls per iter (β-num, β-den, α-den), each split into `hessian_cascade + hessian_laplacian [+ hessian_prbfit]` |
    | `redist`   | both MPI `redist` calls inside the iter                    |
    | `linear_batch` | `linear_batch + linear_redot_batch`                    |

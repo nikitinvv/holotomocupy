@@ -61,7 +61,7 @@ comm.Barrier()
 logger.info(f'Generate data')
 
 cl.gen_sqrt_data(cl.vars, cl.data)
-cl.gen_sqrt_ref(cl.vars['prb'], cl.ref)
+cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 
 comm.Barrier()

@@ -4,7 +4,7 @@ Multi-distance holotomography performance benchmark on fully-synthetic data.
 
 Generates everything in-process (no Reader / h5 I/O): probe per distance,
 3-D tomographic object slab, rotation angles, positions. Forward-models
-sqrt(intensity) + sqrt(reference) via Rec.gen_sqrt_data / gen_sqrt_ref,
+sqrt(intensity) + sqrt(reference) via Rec.gen_sqrt_data / Rec.cl_prb_term.gen_sqrt_ref,
 then runs BH for `--niter` iterations and prints a timing summary.
 
 Launch with:
@@ -49,8 +49,8 @@ niter           = 2                             # short — measures steady-stat
 obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.1
-lam_prbfit      = 0.0                           # disable probe-fit regularization
-lam_laplacian   = 0.0
+lam_prbfit      = 1e-2                           # disable probe-fit regularization
+lam_laplacian   = 1e-2
 start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                            # no cost computation in hot loop
@@ -374,7 +374,7 @@ cl.vars['pos'][:] = cp.array(synth_pos(cl.st_theta, cl.end_theta, ntheta, ndist,
 # ── Forward-model synthetic data + reference ────────────────────────────────
 comm.Barrier()
 cl.gen_sqrt_data(cl.vars, cl.data)
-cl.gen_sqrt_ref(cl.vars['prb'], cl.ref)
+cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 
 # ── Initial guess: zero obj, unit prb, slightly-perturbed pos ──────────────

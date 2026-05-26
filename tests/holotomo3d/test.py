@@ -135,6 +135,7 @@ args.nchunk      = 16              # projections/slices processed per GPU pass (
 args.checkpoint_step = 16          # save checkpoint every N iterations (-1 = never)
 args.error_step      = 4           # log error every N iterations (-1 = never)
 args.start_iter  = 0               # resume from this iteration (0 = fresh start)
+args.lam_laplacian = 0
 
 # --- MPI ---
 args.comm = MPI.COMM_WORLD
@@ -165,7 +166,7 @@ cl.vars['prb'][:] = cp.array(prb)
 cl.vars['pos'][:] = cp.array(pos[cl.st_theta:cl.end_theta])
 
 cl.gen_sqrt_data(cl.vars, cl.data)
-cl.gen_sqrt_ref(cl.vars['prb'], cl.ref)
+cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 #### Reconstruction
 cl.vars['obj'][:] = 0

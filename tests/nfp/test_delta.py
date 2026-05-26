@@ -44,7 +44,7 @@ nchunk          = 8
 checkpoint_step = 32
 error_step      = 32
 rho             = [1, 2, 0.1, 0.001]   # [proj, prb, pos, bd]
-photons         = 100                  # mean photons per pixel for Poisson noise; None to disable
+photons         = None                  # mean photons per pixel for Poisson noise; None to disable
 
 # ground-truth δ/β
 delta_beta_gt = 29.0

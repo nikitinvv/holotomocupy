@@ -38,6 +38,8 @@ class Shift():
         else:
             self._plan_coeff = None
 
+        self._coeff_cache = {}
+
         self._sk      = s_kernel
         self._sfk     = sf_kernel
         self._dsk     = ds_kernel
@@ -80,6 +82,21 @@ class Shift():
         if self.obj_dtype == 'float32':
             out = out.real
         return out
+
+    def coeff_cached(self, psi):
+        """coeff(psi) memoized by id(psi). MUST be paired with explicit
+        coeff_cache_reset() at safe lifetime boundaries (e.g., per chunk):
+        id() values can be reused across distinct Python objects once an
+        earlier one is garbage-collected."""
+        key = id(psi)
+        cached = self._coeff_cache.get(key)
+        if cached is None:
+            cached = self.coeff(psi)
+            self._coeff_cache[key] = cached
+        return cached
+
+    def coeff_cache_reset(self):
+        self._coeff_cache = {}
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*

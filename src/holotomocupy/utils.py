@@ -103,6 +103,15 @@ def redot(a, b, axis=None):
     return cp.sum(reprod(a, b), axis=axis)
 
 
+def lap(a, b, c):
+    """5-stencil Laplacian on the centre slice b given its z-neighbours a, c.
+    Output shape matches b: ∇²b ≈ a + c + roll(b,±1,axis=1) + roll(b,±1,axis=2) - 6·b."""
+    return (a + c
+            + cp.roll(b, -1, axis=1) + cp.roll(b,  1, axis=1)
+            + cp.roll(b, -1, axis=2) + cp.roll(b,  1, axis=2)
+            - 6 * b)
+
+
 def write_tiff(a, name, **args):
     if isinstance(a, cp.ndarray):
         a = a.get()

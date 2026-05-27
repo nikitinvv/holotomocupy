@@ -162,16 +162,16 @@ writer = Writer(
 #### Set Ground-Truth Variables and Generate Synthetic Data
 # Each rank owns a slice of obj (obj-axis) and pos (theta-axis)
 cl.vars['obj'][:] = obj[cl.st_obj:cl.end_obj]
-cl.vars['prb'][:] = cp.array(prb)
-cl.vars['pos'][:] = cp.array(pos[cl.st_theta:cl.end_theta])
+cl.vars['prb'][:] = prb         # prb is numpy; vars['prb'] is pinned numpy
+cl.vars['pos'][:] = pos[cl.st_theta:cl.end_theta].transpose(1, 0, 2)
 
 cl.gen_sqrt_data(cl.vars, cl.data)
 cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 #### Reconstruction
 cl.vars['obj'][:] = 0
-cl.vars['prb'][:] = cp.array(1)
-cl.vars['pos'][:] = cp.array((pos + pos_err)[cl.st_theta:cl.end_theta])
+cl.vars['prb'][:] = 1
+cl.vars['pos'][:] = (pos + pos_err)[cl.st_theta:cl.end_theta].transpose(1, 0, 2)
 
 cl.BH(writer=writer)
 

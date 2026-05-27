@@ -207,16 +207,20 @@ class Reader:
         return out
 
     def read_pos(self, out=None):
-        """Read initial positions for this rank's theta-slice into out."""
+        """Read initial positions for this rank's theta-slice into out.
+
+        Out layout is [ndist, local_ntheta, 2] (dist-major) to match Rec's
+        per-dist slicing.
+        """
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            if out is None:
-                out = fid[f'/exchange/cshifts_final'][
-                    self.ids[self.st_theta:self.end_theta], :self.ndist
-                ].astype('float32')
-            else:
-                out[:] = cp.array(fid[f'/exchange/cshifts_final'][
-                    self.ids[self.st_theta:self.end_theta], :self.ndist
-                ], dtype='float32')
+            raw = fid[f'/exchange/cshifts_final'][
+                self.ids[self.st_theta:self.end_theta], :self.ndist
+            ].astype('float32')      # [local_ntheta, ndist, 2]
+        raw = np.ascontiguousarray(raw.transpose(1, 0, 2))    # [ndist, local_ntheta, 2]
+        if out is None:
+            out = raw
+        else:
+            out[:] = cp.array(raw) if isinstance(out, cp.ndarray) else raw
 
         scale = np.float32(1.0 / 2**self.bin)
         out *= scale
@@ -224,19 +228,20 @@ class Reader:
         return out
 
     def read_shrink(self, out=None):
-        """Read [local_ntheta, ndist] shrink for this rank's theta-slice from HDF5.
+        """Read [ndist, local_ntheta] shrink for this rank's theta-slice from HDF5.
 
-        Falls back to zeros if /exchange/shrink is not present (e.g. old files).
-        Writes into `out` if provided, otherwise returns a new array.
+        Stored on disk as [ntheta, ndist]; transposed on read so per-dist slices
+        are contiguous. Falls back to zeros if /exchange/shrink is not present.
         """
         local_ntheta = self.end_theta - self.st_theta
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if '/exchange/shrink' not in fid:
-                data = cp.zeros((local_ntheta, self.ndist), dtype='float32')
+                data = cp.zeros((self.ndist, local_ntheta), dtype='float32')
             else:
-                data = cp.array(fid['/exchange/shrink'][
+                raw = fid['/exchange/shrink'][
                     self.ids[self.st_theta:self.end_theta], :self.ndist
-                ].astype('float32'))
+                ].astype('float32')   # [local_ntheta, ndist]
+                data = cp.array(np.ascontiguousarray(raw.T))   # [ndist, local_ntheta]
         if out is not None:
             out[:] = data
         else:
@@ -267,13 +272,14 @@ class Reader:
     def read_data(self, out=None):
         """Read projection data for this rank's theta-slice into out.
 
-        Reads directly into out (pinned if pre-allocated) and applies sqrt in-place,
-        avoiding any intermediate allocation.
+        Out layout is [ndist, local_ntheta, nz, n] (dist-major) so that per-dist
+        slices `out[k]` are contiguous — matches how Rec consumes them in the
+        outer-distance loop.
         """
         nz, n = self.nz, self.n
         local_ntheta = self.end_theta - self.st_theta
         if out is None:
-            out = np.empty([local_ntheta, self.ndist, nz, n], dtype='float32')
+            out = np.empty([self.ndist, local_ntheta, nz, n], dtype='float32')
         # Batch reads to stay under 2^31 bytes (MPI-IO uses int for transfer sizes)
         batch = max(1, (1 << 28) // (nz * n))
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
@@ -283,8 +289,8 @@ class Reader:
                 ds = fid[f'/exchange/pdata{k}_{self.bin}']
                 for i0 in range(0, local_ntheta, batch):
                     i1 = min(i0 + batch, local_ntheta)
-                    out[i0:i1, k] = ds[self.ids[self.st_theta + i0:self.st_theta + i1], st:end]
-                np.sqrt(out[:, k], out=out[:, k])
+                    out[k, i0:i1] = ds[self.ids[self.st_theta + i0:self.st_theta + i1], st:end]
+                np.sqrt(out[k], out=out[k])
         return out
 
     def read_ref(self, out=None):
@@ -396,13 +402,14 @@ class Reader:
                 del blk
 
             # --- pos: scale pixel coordinates up ---
+            # Stored on disk as [ntheta, ndist, 2]; transposed to [ndist, local_ntheta, 2].
             pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
-        pos_up = pos * scale
+        pos_up = np.ascontiguousarray(pos.transpose(1, 0, 2)) * scale
         if out_pos is None:
             out_pos = cp.array(pos_up)
         else:
-            out_pos[:] = cp.array(pos_up, dtype='float32')
+            out_pos[:] = cp.array(pos_up, dtype='float32') if isinstance(out_pos, cp.ndarray) else pos_up
 
         # Optional scalar attribute (e.g. RecDelta's bd). Broadcast across ranks.
         bd_arr = np.zeros(1, dtype='float32')
@@ -435,12 +442,13 @@ class Reader:
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
             pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
 
-        pos_up = pos * scale
+        # Stored on disk as [ntheta, ndist, 2]; transpose to [ndist, local_ntheta, 2].
+        pos_up = np.ascontiguousarray(pos.transpose(1, 0, 2)) * scale
         pos_up[..., 1] += np.float32(0.5 * (scale - 1))
         if out is None:
             out = cp.array(pos_up)
         else:
-            out[:] = cp.array(pos_up, dtype='float32')
+            out[:] = cp.array(pos_up, dtype='float32') if isinstance(out, cp.ndarray) else pos_up
         return out
 
     def read_obj_unbin(self, out):

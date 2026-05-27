@@ -53,10 +53,10 @@ class Chunking:
 
                 for k in range(len(out)):
                     if ((isinstance(out[k], np.ndarray) or isinstance(out[k], cp.ndarray))
-                            and len(out[k].shape) > axis_out + 1
+                            and out[k].ndim > axis_out
                             and out[k].shape[axis_out] == size):
                         proper_out += 1
-                    elif isinstance(out[k], cp.ndarray):
+                    elif isinstance(out[k], (np.ndarray, cp.ndarray)):
                         nonproper_out += 1
 
                 # inp[0] when inp_pad > 0: always the padded proper input
@@ -64,11 +64,28 @@ class Chunking:
                 proper_inp   = padded_first
                 for k in range(padded_first, len(inp)):
                     if ((isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray))
-                            and len(inp[k].shape) > axis_inp + 1
+                            and inp[k].ndim > axis_inp
                             and inp[k].shape[axis_inp] == size):
                         proper_inp += 1
                     elif isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray):
                         nonproper_inp += 1
+
+                # Numpy non-proper outputs: auto-create a cupy scratch (uploaded from
+                # the current CPU value so read-modify-write patterns work), swap into
+                # out[], then D2H back after run() returns. Device-sync wraps the H2D
+                # and the post-run D2H because chunking uses non-blocking streams that
+                # don't implicitly sync with the per-thread default stream.
+                np_out_refs = []   # list of (numpy_ref, cupy_scratch) pairs
+                out = list(out)
+                for kk in range(proper_out, proper_out + nonproper_out):
+                    if isinstance(out[kk], np.ndarray):
+                        numpy_ref = out[kk]
+                        cupy_scratch = cp.empty(numpy_ref.shape, dtype=numpy_ref.dtype)
+                        cupy_scratch.set(numpy_ref)
+                        out[kk] = cupy_scratch
+                        np_out_refs.append((numpy_ref, cupy_scratch))
+                if np_out_refs:
+                    cp.cuda.Device().synchronize()   # ensure H2D done before chunking reads
 
                 # build argument lists for the single GPU
                 ginp = [x for x in inp[:proper_inp]]
@@ -84,6 +101,15 @@ class Chunking:
                          proper_inp, nonproper_inp,
                          proper_out, nonproper_out,
                          axis_out, axis_inp, func, inp_pad)
+
+                # D2H any numpy non-proper outputs back to their original pinned buffers.
+                if np_out_refs:
+                    cp.cuda.Device().synchronize()   # ensure compute streams visible to default
+                    for numpy_ref, cupy_scratch in np_out_refs:
+                        if numpy_ref.flags['C_CONTIGUOUS']:
+                            cupy_scratch.get(out=numpy_ref)
+                        else:
+                            numpy_ref[...] = cupy_scratch.get()
 
             return inner
 
@@ -164,7 +190,14 @@ class Chunking:
                     if isinstance(out[j], cp.ndarray):
                         cp.copyto(out[j][dst], out_gpu[buf_id][j][src])
                     else:
-                        out_gpu[buf_id][j][src].get(out=out[j][dst], blocking=False)
+                        # cupy's .get(out=...) needs a C-contiguous destination; if the
+                        # numpy slice is strided (e.g. data[:, k] view), fall back to a
+                        # contiguous intermediate then numpy-assign.
+                        host_dst = out[j][dst]
+                        if host_dst.flags['C_CONTIGUOUS']:
+                            out_gpu[buf_id][j][src].get(out=host_dst, blocking=False)
+                        else:
+                            host_dst[...] = out_gpu[buf_id][j][src].get()
 
         def p(buf_id, k):
             st  = k * self.chunk

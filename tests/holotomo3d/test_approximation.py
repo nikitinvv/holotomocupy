@@ -63,8 +63,8 @@ cl = Rec(args)
 # F3/dF3/d2F_dF3 read self._eff_demag_chunk, which is normally set inside the
 # batch loops in BH() / gen_sqrt_data(). Mirror that setup once here so the
 # functionals can be called standalone.
-cl.eff_demagnifications[:] = (1 + cl.shrink_nd) / cp.array(cl.norm_magnifications[None, :])
-cl._eff_demag_chunk = cl.eff_demagnifications
+cl.eff_demag[:] = (1 + cl.shrink_nd) / cp.array(cl.norm_magnifications[:, None])
+cl._eff_demag_chunk = cl.eff_demag
 
 
 # ----------------------------------------------------------------------------

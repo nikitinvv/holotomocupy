@@ -57,7 +57,7 @@ class Writer:
             return x.get()
         return np.asarray(x)
 
-    def write_checkpoint(self, vars, i, norm_const, residual=None, pos_init=None):
+    def write_checkpoint(self, vars, i, norm_const, pos_init=None):
         """Save obj, prb, pos for iteration i to an HDF5 checkpoint file.
 
         Parameters
@@ -69,8 +69,6 @@ class Writer:
             Iteration number, used in the filename.
         norm_const : float
             Normalisation constant — obj is multiplied by this before saving.
-        residual : array, optional
-            If provided, written as the 'residual' dataset.
         pos_init : array, optional
             Initial positions; when provided, a PNG of per-(theta, dist) drift
             is also saved under {path_out}/pos_errors/.
@@ -96,8 +94,6 @@ class Writer:
             prb_shape = (self.ndist, self.nz, self.n)
             ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
             ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
-            if residual is not None:
-                ds_res = f.create_dataset('residual', shape=(self.ntheta, self.ndist, self.nz, self.n), dtype='float32')
 
             # Write obj in z-batches: avoids a full [local_nzobj, nobj, nobj] copy.
             # np.multiply(src, scalar, out=slab_buf) is zero-allocation per batch.
@@ -115,9 +111,8 @@ class Writer:
                     ds_im[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
             del slab_buf
 
-            ds_pos[self.st_theta:self.end_theta] = pos
-            if residual is not None:
-                ds_res[self.st_theta:self.end_theta] = residual
+            # vars['pos'] is [ndist, local_ntheta, 2]; on-disk format is [ntheta, ndist, 2].
+            ds_pos[self.st_theta:self.end_theta] = np.ascontiguousarray(pos.transpose(1, 0, 2))
 
         # prb written by rank 0 only via serial driver after mpio block closes
         self.comm.Barrier()
@@ -142,15 +137,16 @@ class Writer:
         """Gather per-(theta, dist) position drift across ranks; rank 0 logs stats and saves PNG."""
         if isinstance(delta_local, cp.ndarray):
             delta_local = delta_local.get()
+        # delta_local is [ndist, local_ntheta, 2]; gather concatenates along the theta axis (axis=1).
         all_deltas = self.comm.gather(delta_local, root=0)
         if self.rank != 0:
             return
 
-        all_delta = np.concatenate(all_deltas, axis=0)    # [ntheta, ndist, 2]
+        all_delta = np.concatenate(all_deltas, axis=1)    # [ndist, ntheta, 2]
         abs_delta = np.abs(all_delta)
-        mean_err  = abs_delta.mean(axis=0)
-        std_err   = abs_delta.std(axis=0)
-        max_err   = abs_delta.max(axis=0)
+        mean_err  = abs_delta.mean(axis=1)                # [ndist, 2]
+        std_err   = abs_delta.std(axis=1)
+        max_err   = abs_delta.max(axis=1)
         parts = "  ".join(
             f"d{j}: y=({mean_err[j,0]:.4f}±{std_err[j,0]:.4f} max={max_err[j,0]:.4f})"
             f"  x=({mean_err[j,1]:.4f}±{std_err[j,1]:.4f} max={max_err[j,1]:.4f})"
@@ -166,7 +162,7 @@ class Writer:
         for j in range(self.ndist):
             for d, label in enumerate(['y', 'x']):
                 ax = axes[d, j]
-                ax.plot(theta_idx, all_delta[:, j, d])
+                ax.plot(theta_idx, all_delta[j, :, d])
                 ax.set_title(f"dist {j}, {label}")
                 ax.set_xlabel("theta index")
                 ax.set_ylabel("error [px]")

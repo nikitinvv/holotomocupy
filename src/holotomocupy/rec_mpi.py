@@ -34,23 +34,7 @@ class Rec:
         self.dF = [self.dF0, self.dF1, self.dF2, self.dF3]
         self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2,self.d2F_dF3]
 
-        # Worst-case chunking-pool footprint for any single gpu_batch call,
-        # double-buffered. Candidates (all proper-input/output buffers):
-        #   _hessian_cascade:                3 proj + data (+ tiny pos/eff_demag)
-        #   linear_batch on vars['obj']:     3 obj-shape  (out + x + y)
-        #   gradient_laplacian (inp_pad=4):  3 obj-shape + 4 obj-slabs from padding
-        #                                    (only sized in when lam_laplacian > 0)
-        # (linear_batch on vars['proj'] is 3 proj-shape — dominated by hessian.)
-        # Any new @gpu_batch caller with a bigger footprint must be added here.
-        obj_item   = np.dtype(self.obj_dtype).itemsize
-        obj_slab   = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
-        proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
-        obj_bytes  = self.nchunk * obj_slab
-        data_bytes = self.nchunk * self.ndist * self.nz    * self.n * 4
-        candidates = [3 * proj_bytes + data_bytes, 3 * obj_bytes]  # hessian, lin_obj
-        if self.lam_laplacian > 0:
-            candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
-        nbytes     = int(2.1 * max(candidates))                    # ×2 for double-buffering,10% extra for positions/eff_mag
+        nbytes = self._chunking_pool_bytes()
 
         ### multinode processing
         self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
@@ -114,6 +98,36 @@ class Rec:
         # save convergence results
         self.table = pd.DataFrame(columns=["iter", "err", "time"])
 
+        # apply_F_from memoization (per-chunk scope; reset in every cascade kernel)
+        self._apply_F_cache  = {}
+        self._apply_F_hits   = 0
+        self._apply_F_misses = 0
+
+    def _chunking_pool_bytes(self):
+        """Worst-case chunking-pool footprint across all gpu_batch callers.
+
+        Candidates (proper-input/output buffers per single call, double-buffered):
+          cascade kernels (outer-dist loop, single-dist per call):
+            _hess_dist:      3 proj + 1 data + tiny (3 pos + eff_demag)
+            _grad_dist:      3 proj + 1 data + tiny (2 pos + eff_demag)
+          linear_batch on vars['obj']:     3 obj-shape  (out + x + y)
+          gradient_laplacian (inp_pad=4):  3 obj-shape + 4 obj-slabs from padding
+                                           (only sized in when lam_laplacian > 0)
+        linear_batch on vars['proj'] is 3 proj-shape — dominated by cascade.
+        `data` has no ndist axis here: it's the single-dist slice self.data[k]
+        passed in by the outer loop, shape [nchunk, nz, n].
+        Any new @gpu_batch caller with a bigger footprint must be added.
+        """
+        obj_item   = np.dtype(self.obj_dtype).itemsize
+        obj_slab   = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
+        proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
+        obj_bytes  = self.nchunk * obj_slab
+        data_bytes = self.nchunk * self.nz    * self.n     * 4
+        candidates = [3 * proj_bytes + data_bytes, 3 * obj_bytes]  # cascade, lin_obj
+        if self.lam_laplacian > 0:
+            candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
+        return int(2.1 * max(candidates))   # ×2 double-buffering + 10% slack for pos/eff_demag
+
     def alloc_arrays(self):
         """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
         prb_shape = [self.ndist, self.nz, self.n]
@@ -127,16 +141,20 @@ class Rec:
             obj_buf  = make_pinned(obj_shape, dtype=self.obj_dtype); obj_buf[:]  = 0
             etas_obj = make_pinned(obj_shape, dtype=self.obj_dtype); etas_obj[:] = 0
 
-        # reconstruction variables
+        # reconstruction variables. prb / pos are pinned CPU (uploaded once per
+        # gpu_batch call by the chunking auto-cp.asarray on non-proper inputs).
+        # grads['prb'] stays on GPU because it's a non-proper output of
+        # gradients_cascade and the chunking machinery only accepts cp.ndarray
+        # for non-proper outputs.
         self.vars = {
             'obj':  obj_buf,
-            'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
-            'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
+            'pos':  make_pinned([self.ndist, self.local_ntheta, 2],         dtype='float32'),
+            'prb':  make_pinned(prb_shape,                                 dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
         }
         # measurement data; ref is owned by cl_prb_term — aliased here for back-compat
         # so external code (readers, gen_sqrt_ref out-arg) can keep using cl.ref.
-        self.data = make_pinned([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
+        self.data = make_pinned([self.ndist, self.local_ntheta, self.nz, self.n], dtype='float32')
         if hasattr(self, 'cl_prb_term'):
             self.ref = self.cl_prb_term.ref
         else:
@@ -145,14 +163,18 @@ class Rec:
         self.grads, self.etas = {}, {}
         for ge in self.grads, self.etas:
             ge["obj"]  = make_pinned(obj_shape, dtype=self.obj_dtype)
-            ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2], dtype='float32')
+            ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
-            ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
+        # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
+        # staging buffer to accumulate y[0]*rho_sq across theta chunks for one dist,
+        # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
+        self.grads["prb"] = make_pinned(prb_shape, dtype='complex64')
+        self.etas["prb"]  = make_pinned(prb_shape, dtype='complex64')
         self.etas["obj"] = etas_obj
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
-        self.shrink_nd = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
-        self.eff_demagnifications = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
+        self.shrink_nd = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
+        self.eff_demag = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
     
     def BH(self, writer=None):
         vars  = self.vars
@@ -178,7 +200,7 @@ class Rec:
     def precalc(self, vars):
         """One-time setup at the start of BH: shrinkage, obj normalization,
         pos snapshot, initial proj from fwd_tomo + redist."""
-        self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
+        self.eff_demag[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[:, None])
 
         # normalize obj to work with normal operators (restored at BH exit)
         vars["obj"] /= self.norm_const
@@ -244,6 +266,12 @@ class Rec:
             self.error_debug(vars, i)
         with nvtx.annotate(":::BH:vis_debug", color='gray'):
             self.vis_debug(vars, i, writer)
+        # Cache hit/miss for this iter (reset for next).
+        if self.rank == 0:
+            ch, cm = self.cl_shift.coeff_cache_stats(reset=True)
+            ah, am = self.apply_F_cache_stats(reset=True)
+            logger.info(f"iter={i}: coeff_cache    hits={ch} misses={cm}")
+            logger.info(f"iter={i}: apply_F_cache  hits={ah} misses={am}")
 
     def hessian(self, vars, grads, etas):
         """Hessian for the full functional, is a sum of 3 terms:
@@ -260,53 +288,40 @@ class Rec:
 
     @timer
     def hessian_cascade(self, vars, grads, etas):
-        """"Cascade computation of the hessian for the main term,
-            following the composition rule (Carlsson, 2025):
-            For f = F1 ◦ F2 the hessian is 
-                d2f = dF1 ◦ d2F2 + d2F1 ◦ dF2
-                where dF are differentials, 
-                d2F are second order terms.
-            The function implements it for f = F0 ◦ F1 ◦ F2 ◦ F3 ...
-            parameters to functions are unified as (x,y,z,w)
-        """
+        """"Cascade computation of the hessian for the main term, following the
+            composition rule (Carlsson, 2025). Outer-dist loop: per k, upload
+            vars/grads/etas['prb'][k] (auto by chunking) and run @gpu_batch over
+            theta chunks. `out` is a scalar cupy accumulator across all k."""
 
         out = cp.zeros(1, dtype="float32")
+        # Identity check on un-sliced pinned arrays (slices per-k would never be `is`-equal).
+        y_is_z = grads['prb'] is etas['prb']
 
-        @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
-        def _hessian_cascade(
-            self, out, d, eff_demag,
-            x2, y2, z2,
-            x1, y1, z1,
-            x0, y0, z0,
-        ):
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
+        def _hess_dist(self, out, d, eff_demag,
+                       x_pos, y_pos, z_pos,
+                       x_proj, y_proj, z_proj,
+                       x_prb, y_prb, z_prb):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            # Identity check must happen on the un-sliced arrays; arr[k] views
-            # are never `is`-equal even when their backing memory is identical.
-            y_is_z = y0 is z0
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [x0[k], x1, x2[:, k]]
-                y = [y0[k], y1, y2[:, k]]
-                z = y if y_is_z else [z0[k], z1, z2[:, k]]
-                w = [None, None, None]
+            self.apply_F_cache_reset()
+            x = [x_prb, x_proj, x_pos]
+            y = [y_prb, y_proj, y_pos]
+            z = y if y_is_z else [z_prb, z_proj, z_pos]
+            w = [None, None, None]
+            for id in range(1, len(self.F))[::-1]:
+                w = self.d2F_dF[id](x, y, z, w)
+                fx, y = self.dF[id](x, y)
+                z = y if y_is_z else self.dF[id](x, z, return_x=False)
+                x = fx
+            out[:] += self.d2F_dF[0](x, y, z, w, d)
 
-                for id in range(1, len(self.F))[::-1]:
-                    # d2F(dFy,dFz) + dF(d2F(y,z))
-                    w = self.d2F_dF[id](x, y, z, w)
-                    fx, y = self.dF[id](x, y)
-                    z = y if y_is_z else self.dF[id](x, z, return_x=False)
-                    x = fx
-
-                out[:] += self.d2F_dF[0](x, y, z, w, d[:, k])
-
-
-        _hessian_cascade(
-            self, out, self.data, self.eff_demagnifications,
-            vars["pos"], grads["pos"], etas["pos"],
-            vars["proj"], grads["proj"], etas["proj"],
-            vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
-        )
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _hess_dist(self, out, self.data[k], self.eff_demag[k],
+                       vars['pos'][k], grads['pos'][k], etas['pos'][k],
+                       vars['proj'], grads['proj'], etas['proj'],
+                       vars['prb'][k], grads['prb'][k], etas['prb'][k])
 
         return out[0].get()
 
@@ -328,42 +343,46 @@ class Rec:
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
             self.cl_prb_term.gradient(grads["prb"], vars["prb"], self.rho_sq['prb'])
 
-        ## copying to cpu before reduce for now
-        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
+        grads['prb'][:] = self.allreduce(grads['prb'])
         
-    @timer    
+    @timer
     def gradients_cascade(self, vars, grads):
-        """Cascade gradient for the main term
-            following the composition rule (Carlsson, 2025):
-            For f = F1 ◦ F2 the gradient is 
-                gradf = dF_2^*(\nabla F_1)),
-                where dF_2^* is the adjoint to the differential
-            The function implements it for f = F0 ◦ F1 ◦ F2 ◦ F3 ...
-            parameters to functions are unified as (x,y,z)
-        """
+        """Cascade gradient for the main term (Carlsson, 2025).
+        Outer-dist loop: per k-iter, upload vars['prb'][k] and run @gpu_batch over
+        theta chunks. grads['proj'] is passed as BOTH proper input and proper output
+        so its current value is H2D'd per chunk and added to (read-modify-write =
+        cross-k accumulation). After the k loop, an extra @gpu_batch pass applies
+        cl_shift.coeff once to the accumulated Deltapsi sum."""
 
-        # part1, parallelization over angles
-        grads['prb'][:] = 0
+        grads['proj'][:] = 0   # zero accumulator before outer-k loop
+        grads['prb'][:]  = 0   # each k overwrites its own slot
+        
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
-        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,eff_demag,proj,pos,prb):
+        def _grad_dist(self, gradproj_out, gradpos, gradprb,
+                       gradproj_in, d, proj, pos, eff_demag, prb):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            gradproj[:] = 0
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
-                y = d[:, k]
-                for id in range(len(self.gF)):
-                    y = self.gF[id](x, y)
-                gradprb[k]    += y[0] * self.rho_sq['prb']
-                gradproj      += y[1] * self.rho_sq['obj']
-                gradpos[:, k]  = y[2] * self.rho_sq['pos']
-            # gF3 returns un-coeff'd Deltapsi per dist; apply coeff once on the sum.
-            gradproj[:] = self.cl_shift.coeff(gradproj)
+            self.apply_F_cache_reset()
+            x = [prb, proj, pos]
+            y = d
+            for id in range(len(self.gF)):
+                y = self.gF[id](x, y)
 
-        _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],
-                           self.data,self.eff_demagnifications,
-                           vars["proj"],vars["pos"],vars["prb"])
+            gradprb += y[0] * self.rho_sq['prb']
+            gradpos[:] = y[2] * self.rho_sq['pos']
+            gradproj_out[:] = gradproj_in + y[1] * self.rho_sq['obj']
+            # Last dist: apply coeff to the dist-accumulated Deltapsi (parent's gF3
+            # returns un-coeff'd; folding the coeff in here avoids a separate pass).
+            if self._dist_idx == self.ndist - 1:
+                gradproj_out[:] = self.cl_shift.coeff(gradproj_out)            
+
+        for k in range(self.ndist):
+            self._dist_idx = k 
+            _grad_dist(self,
+                       grads['proj'], grads['pos'][k], grads['prb'][k], # out
+                       grads['proj'], self.data[k],
+                       vars['proj'], vars['pos'][k],
+                       self.eff_demag[k], vars['prb'][k])
 
     @timer
     def fwd_tomo(self, obj, out):
@@ -394,10 +413,35 @@ class Rec:
     def apply_F_from(self, x, from_level):
         """Apply F[from_level], F[from_level+1], ..., F[len(F)-1] inside-out, returning the
         partial cascade value at level (from_level-1). Used by gF* methods that need to
-        "fast-forward" the input x through cascade levels above their own."""
-        for k in range(from_level, len(self.F))[::-1]:
-            x = self.F[k](x)
-        return x
+        "fast-forward" the input x through cascade levels above their own.
+
+        Memoized recursively by (id(x), from_level): within one cascade pass gF0..gFN
+        share the same outer x, so without caching F3 would be re-evaluated N times and
+        F2 (N-1) times etc. MUST be paired with apply_F_cache_reset() per chunk —
+        id() can be reused across distinct objects once an earlier one is GC'd.
+        """
+        if from_level >= len(self.F):
+            return x
+        key = (id(x), from_level)
+        cached = self._apply_F_cache.get(key)
+        if cached is not None:
+            self._apply_F_hits += 1
+            return cached
+        self._apply_F_misses += 1
+        upstream = self.apply_F_from(x, from_level + 1)
+        result = self.F[from_level](upstream)
+        self._apply_F_cache[key] = result
+        return result
+
+    def apply_F_cache_reset(self):
+        self._apply_F_cache = {}
+
+    def apply_F_cache_stats(self, reset=False):
+        stats = (self._apply_F_hits, self._apply_F_misses)
+        if reset:
+            self._apply_F_hits = 0
+            self._apply_F_misses = 0
+        return stats
 
 
     ####### F0(x0) = 1/n\||x0|-d\|_2^2
@@ -583,7 +627,7 @@ class Rec:
         """In: (x31, x32, x33)  Out: (x21,x22). Per-dist; uses self._dist_idx."""
         x31, x32, x33 = x  # x32: [chunk, nzobj, nobj] dist-agnostic, x33: [chunk, 2]
         c   = self.cl_shift.coeff_cached(x32)
-        ed  = self._eff_demag_chunk[:, self._dist_idx]
+        ed  = self._eff_demag_chunk
         x22 = self.cl_shift.curlySc(c, x33, ed)
         return [x31, x22]
 
@@ -594,7 +638,7 @@ class Rec:
         y31, y32, y33 = y
         c   = self.cl_shift.coeff_cached(x32)
         c1  = self.cl_shift.coeff_cached(y32)
-        ed  = self._eff_demag_chunk[:, self._dist_idx]
+        ed  = self._eff_demag_chunk
         y22 = self.cl_shift.dcurlySc(c, x33, ed, c1, y33)
         if return_x:
             x22 = self.cl_shift.curlySc(c, x33, ed)
@@ -612,7 +656,7 @@ class Rec:
         c   = self.cl_shift.coeff_cached(x32)
         cy  = self.cl_shift.coeff_cached(y32)
         cz  = self.cl_shift.coeff_cached(z32)
-        ed  = self._eff_demag_chunk[:, self._dist_idx]
+        ed  = self._eff_demag_chunk
         y22 = self.cl_shift.d2curlySc(c, x33, ed, cy, y33, cz, z33)
 
         if w32 is not None:
@@ -632,7 +676,7 @@ class Rec:
         x = self.apply_F_from(x, 4)
         x31, x32, x33 = x
         c = self.cl_shift.coeff_cached(x32)
-        y32, y33 = self.cl_shift.dcurlySadjc(c, x33, self._eff_demag_chunk[:, self._dist_idx], y22)
+        y32, y33 = self.cl_shift.dcurlySadjc(c, x33, self._eff_demag_chunk, y22)
         return [y21, y32, y33]
 
     @timer
@@ -640,16 +684,18 @@ class Rec:
         out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
-        def _min(self, out, proj, pos, data, eff_demag, prb):
+        def _min_dist(self, out, proj, pos, data, eff_demag, prb):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
-                y = self.apply_F_from(x, 1)
-                out[:] += self.F0(y, data[:, k])
+            self.apply_F_cache_reset()
+            x = [prb, proj, pos]
+            y = self.apply_F_from(x, 1)
+            out[:] += self.F0(y, data)
 
-        _min(self, out, proj, pos, self.data, self.eff_demagnifications, prb)
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _min_dist(self, out, proj, pos[k], self.data[k],
+                      self.eff_demag[k], prb[k])
 
         out = out[0]
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -659,13 +705,10 @@ class Rec:
         return self.allreduce(np.array(out.get(),dtype='float32'))
 
     def vis_debug(self, vars, i, writer=None):
-        """Per-iter checkpoint write (residual + pos-error plot bundled in)."""
+        """Per-iter checkpoint write (pos-error plot bundled in)."""
         if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
             return
-        
-        residual = None# self.compute_residual(vars)
-        writer.write_checkpoint(vars, i, self.norm_const,
-                                residual=residual, pos_init=self.pos_init)
+        writer.write_checkpoint(vars, i, self.norm_const, pos_init=self.pos_init)
 
     def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
         """Compare the real functional along the descent direction with the
@@ -748,41 +791,31 @@ class Rec:
                 self.table.to_csv(name, index=False)
 
     def gen_sqrt_data(self, vars, out):
-        """Generate synthetic data"""
+        """Generate synthetic data. Outer loop over distances: per k-iter, upload
+        vars['prb'][k] to GPU once, then theta-chunked inner gpu_batch processes
+        only that distance. Saves the persistent GPU footprint of vars['prb'] in
+        favor of one transient [nz, n] H2D per dist per chunk pass."""
 
-        self.eff_demagnifications[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
+        self.eff_demag[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[:, None])
         vars["obj"] /= self.norm_const
-        self.fwd_tomo(vars["obj"],out = self.proj_tmp)
+        self.fwd_tomo(vars["obj"], out=self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])
 
-        @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
-        def _gen_data(self, out, proj, pos, eff_demag, prb):
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
+        def _gen_data_dist(self, out, proj, pos, eff_demag, prb):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
-                y = self.apply_F_from(x, 1)
-                out[:, k] = cp.abs(y)
+            self.apply_F_cache_reset()
+            x = [prb, proj, pos]
+            y = self.apply_F_from(x, 1)
+            out[:] = cp.abs(y)
 
-        _gen_data(self, out, vars['proj'], vars['pos'], self.eff_demagnifications, vars['prb'])
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _gen_data_dist(self, out[k], vars['proj'], vars['pos'][k],
+                           self.eff_demag[k], vars['prb'][k])
+
         vars["obj"] *= self.norm_const
-
-    def compute_residual(self, vars):
-        """Return float32 numpy array [local_ntheta, ndist, nz, n]: |F(vars)| - sqrt(data)."""
-        res = np.empty([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
-        for theta_st in range(0, self.local_ntheta, self.nchunk):
-            theta_end = min(theta_st + self.nchunk, self.local_ntheta)
-            self._eff_demag_chunk = self.eff_demagnifications[theta_st:theta_end]
-            self.cl_shift.coeff_cache_reset()
-            proj_ch = cp.array(vars['proj'][theta_st:theta_end])
-            pos_ch  = vars['pos'][theta_st:theta_end]
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [vars['prb'][k], proj_ch, pos_ch[:, k]]
-                x = self.apply_F_from(x, 1)
-                res[theta_st:theta_end, k] = cp.asnumpy(cp.abs(x)) - self.data[theta_st:theta_end, k]
-        return res
 
 
 

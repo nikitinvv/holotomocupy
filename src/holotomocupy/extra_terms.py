@@ -125,14 +125,20 @@ class PrbfitTerm:
 
     @timer
     def gradient(self, grad_prb, prb, rho_sq_prb):
-        """Add (lam / prb_size) * 2 * D^T(|D·prb| - ref) * rho_sq_prb to grad_prb in-place."""
+        """Add (lam / prb_size) * 2 * D^T(|D·prb| - ref) * rho_sq_prb to grad_prb in-place.
+        grad_prb may be pinned numpy (vars/grads/etas['prb'] are all pinned); the per-j
+        contribution is .get()'d to host before accumulating."""
         if self.lam == 0:
             return
         for j in range(self.ndist):
             tmp = self.cl_prop.D(prb[j:j+1], j)
             td  = self.ref[j:j+1] * (tmp / cp.abs(tmp))
             td  = self.lam / self.prb_size * self.cl_prop.DT(2 * (tmp - td), j)
-            grad_prb[j:j+1] += td * rho_sq_prb
+            contrib = (td * rho_sq_prb)
+            if isinstance(grad_prb, cp.ndarray):
+                grad_prb[j:j+1] += contrib
+            else:
+                grad_prb[j:j+1] += cp.asnumpy(contrib)
 
     @timer
     def hessian(self, prb, dprb1, dprb2):

@@ -181,39 +181,40 @@ class RecDelta(Rec):
         for v in ("obj", "prb", "pos", "proj", "bd"):
             self.linear_batch(vars[v], etas[v], 1, alpha)
         
-    # ============================================================ gradients (per-dist cascade)
+    # ============================================================ gradients (outer-dist cascade)
     @timer
     def gradients_cascade(self, vars, grads):
-        """Cascade gradient over the 5-level cascade. Per-dist.
-        self.gF[id] dispatches to parent's per-dist gF0..gF3 (per __init__ patch) and
-        RecDelta's gF4. Per-k coeff_cache_reset() guards against id() reuse."""
-        grads['prb'][:] = 0
+        """Cascade gradient over the 5-level cascade. Outer-dist loop:
+        per k-iter, upload vars['prb'][k] once and run @gpu_batch over theta chunks.
+        grads['proj'] is in/out for cross-k accumulation. RecDelta's gF[3] override
+        already applies coeff per-dist, so no final coeff pass is needed (vs parent)."""
         grads['bd'][:] = 0
+        grads['proj'][:] = 0   # zero accumulator before outer-k loop
+        grads['prb'][:]  = 0   # each k overwrites its own slot
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=4)
-        def _gradients_cascade(self,
-                               gradproj, gradpos, gradprb, gradbd,
-                               d, eff_demag, proj, pos, prb, bd):
+        def _grad_dist(self, gradproj_out, gradpos, gradprb, gradbd,
+                       gradproj_in, d, proj, pos, eff_demag, prb, bd):
             self._eff_demag_chunk = eff_demag
-            gradproj[:] = 0  # accumulator across dist within this chunk
-            for k in range(self.ndist):
-                self._dist_idx = k
-                self.cl_shift.coeff_cache_reset()
-                x = [prb[k], proj, bd, pos[:, k]]
-                y = d[:, k]
-                for id in range(len(self.gF)):
-                    y = self.gF[id](x, y)
-                # y is now 4-element at level 4: [yprb, yproj, ybd, ypos]
-                gradprb[k]    += y[0] * self.rho_sq['prb']
-                gradproj      += y[1] * self.rho_sq['obj']
-                gradbd        += y[2] * self.rho_sq['bd']
-                gradpos[:, k]  = y[3] * self.rho_sq['pos']
+            self.cl_shift.coeff_cache_reset()
+            self.apply_F_cache_reset()
+            x = [prb, proj, bd, pos]
+            y = d
+            for id in range(len(self.gF)):
+                y = self.gF[id](x, y)
+            # y is 4-element at level 4: [yprb, yproj, ybd, ypos]
+            gradprb += y[0] * self.rho_sq['prb']
+            gradproj_out[:] = gradproj_in + y[1] * self.rho_sq['obj']
+            gradbd += y[2] * self.rho_sq['bd']
+            gradpos[:] = y[3] * self.rho_sq['pos']
 
-        _gradients_cascade(self,
-                           grads['proj'], grads['pos'], grads['prb'], grads['bd'],
-                           self.data, self.eff_demagnifications,
-                           vars['proj'], vars['pos'],
-                           vars['prb'], vars['bd'])
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _grad_dist(self,
+                       grads['proj'], grads['pos'][k], grads['prb'][k], grads['bd'],
+                       grads['proj'], self.data[k],
+                       vars['proj'], vars['pos'][k],
+                       self.eff_demag[k], vars['prb'][k], vars['bd'])
 
     def gradients(self, vars, grads):
         """Full gradient: cascade -> proj, adj_tomo (RT) -> obj, regularization + allreduces."""
@@ -228,7 +229,7 @@ class RecDelta(Rec):
 
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
             self.cl_prb_term.gradient(grads["prb"], vars["prb"], self.rho_sq['prb'])
-        grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
+        grads['prb'][:] = self.allreduce(grads['prb'])
 
         grads['bd'][:] = cp.array(self.allreduce(grads['bd'].get()))
 
@@ -240,60 +241,58 @@ class RecDelta(Rec):
         per-iter ephemeral arrays (x_proj_complex from F4) can't return stale entries."""
         out = cp.zeros(1, dtype="float32")
 
+        y_is_z = grads['prb'] is etas['prb']
+
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
-        def _hessian_cascade(
-            self, out, d, eff_demag,
-            x_pos, y_pos, z_pos,
-            x_proj, y_proj, z_proj,
-            x_prb, y_prb, z_prb,
-            x_bd,  y_bd,  z_bd,
-        ):
+        def _hess_dist(self, out, d, eff_demag,
+                       x_pos, y_pos, z_pos,
+                       x_proj, y_proj, z_proj,
+                       x_prb, y_prb, z_prb,
+                       x_bd, y_bd, z_bd):
             self._eff_demag_chunk = eff_demag
-            # Identity check on un-sliced prb refs (arr[k] views differ in identity).
-            y_is_z = y_prb is z_prb
-            for k in range(self.ndist):
-                self._dist_idx = k
-                self.cl_shift.coeff_cache_reset()
-                x = [x_prb[k], x_proj, x_bd, x_pos[:, k]]
-                y = [y_prb[k], y_proj, y_bd, y_pos[:, k]]
-                z = y if y_is_z else [z_prb[k], z_proj, z_bd, z_pos[:, k]]
-                w = [None, None, None, None]
+            self.cl_shift.coeff_cache_reset()
+            self.apply_F_cache_reset()
+            x = [x_prb, x_proj, x_bd, x_pos]
+            y = [y_prb, y_proj, y_bd, y_pos]
+            z = y if y_is_z else [z_prb, z_proj, z_bd, z_pos]
+            w = [None, None, None, None]
+            for id in range(1, len(self.F))[::-1]:  # 4, 3, 2, 1
+                w = self.d2F_dF[id](x, y, z, w)
+                fx, y = self.dF[id](x, y)
+                z = y if y_is_z else self.dF[id](x, z, return_x=False)
+                x = fx
+            out[:] += self.d2F_dF[0](x, y, z, w, d)
 
-                for id in range(1, len(self.F))[::-1]:  # 4, 3, 2, 1
-                    w = self.d2F_dF[id](x, y, z, w)
-                    fx, y = self.dF[id](x, y)
-                    z = y if y_is_z else self.dF[id](x, z, return_x=False)
-                    x = fx
-
-                out[:] += self.d2F_dF[0](x, y, z, w, d[:, k])
-
-        _hessian_cascade(
-            self, out, self.data, self.eff_demagnifications,
-            vars['pos'], grads['pos'],  etas['pos'],
-            vars['proj'], grads['proj'], etas['proj'],
-            vars['prb'], grads['prb'], etas['prb'],
-            vars['bd'], grads['bd'], etas['bd'],
-        )
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _hess_dist(self, out, self.data[k], self.eff_demag[k],
+                       vars['pos'][k], grads['pos'][k], etas['pos'][k],
+                       vars['proj'], grads['proj'], etas['proj'],
+                       vars['prb'][k], grads['prb'][k], etas['prb'][k],
+                       vars['bd'], grads['bd'], etas['bd'])
 
         return out[0].get()
 
-    # ============================================================ min (per-dist)
+    # ============================================================ min (outer-dist loop)
     @timer
     def min(self, prb, obj, pos, proj, bd):
-        """Loss evaluation. 5-arg signature (with bd). Per-dist cascade."""
+        """Loss evaluation. 5-arg signature (with bd). Outer-dist loop:
+        per k-iter, upload prb[k] once; inner gpu_batch handles theta chunking."""
         out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
-        def _min(self, out, proj, pos, data, eff_demag, prb, bd):
+        def _min_dist(self, out, proj, pos, data, eff_demag, prb, bd):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [prb[k], proj, bd, pos[:, k]]
-                y = self.apply_F_from(x, 1)
-                out[:] += self.F0(y, data[:, k])
+            self.apply_F_cache_reset()
+            x = [prb, proj, bd, pos]
+            y = self.apply_F_from(x, 1)
+            out[:] += self.F0(y, data)
 
-        _min(self, out, proj, pos, self.data, self.eff_demagnifications, prb, bd)
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _min_dist(self, out, proj, pos[k], self.data[k],
+                      self.eff_demag[k], prb[k], bd)
         out = out[0]
 
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -303,46 +302,27 @@ class RecDelta(Rec):
 
     # ============================================================ synthetic data
     def gen_sqrt_data(self, vars, out):
-        """Generate synthetic |F(vars)| from real delta + scalar bd.
-        Per-dist cascade: F4 (RecDelta) then parent's per-dist F3/F2/F1.
-        Rec.F1/Rec.F3 are called explicitly so they bypass the multi-dist
-        overrides (which are still needed by gradients_cascade etc.)."""
-        self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
+        """Generate synthetic |F(vars)| from real delta + scalar bd. Outer-dist loop:
+        per k-iter, upload vars['prb'][k] once; inner @gpu_batch chunks over theta."""
+        self.eff_demag[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[:, None])
         vars["obj"] /= self.norm_const
         self.fwd_tomo(vars['obj'], out=self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
-        def _gen_data(self, out, proj, pos, eff_demag, prb, bd):
+        def _gen_data_dist(self, out, proj, pos, eff_demag, prb, bd):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [prb[k], proj, bd, pos[:, k]]
-                y = self.apply_F_from(x, 1)
-                out[:, k] = cp.abs(y)
+            self.apply_F_cache_reset()
+            x = [prb, proj, bd, pos]
+            y = self.apply_F_from(x, 1)
+            out[:] = cp.abs(y)
 
-        _gen_data(self, out,
-                  vars['proj'], vars['pos'], self.eff_demagnifications,
-                  vars['prb'], vars['bd'])
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _gen_data_dist(self, out[k], vars['proj'], vars['pos'][k],
+                           self.eff_demag[k], vars['prb'][k], vars['bd'])
         vars["obj"] *= self.norm_const
-
-    def compute_residual(self, vars):
-        """Return float32 numpy [local_ntheta, ndist, nz, n]: |F(vars)| - sqrt(data).
-        Per-dist cascade via Rec.F1/Rec.F3 (parent per-dist)."""
-        res = np.empty([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
-        for theta_st in range(0, self.local_ntheta, self.nchunk):
-            theta_end = min(theta_st + self.nchunk, self.local_ntheta)
-            self._eff_demag_chunk = self.eff_demagnifications[theta_st:theta_end]
-            self.cl_shift.coeff_cache_reset()
-            proj_ch = cp.array(vars['proj'][theta_st:theta_end])
-            pos_ch  = vars['pos'][theta_st:theta_end]
-            for k in range(self.ndist):
-                self._dist_idx = k
-                x = [vars['prb'][k], proj_ch, vars['bd'], pos_ch[:, k]]
-                x = self.apply_F_from(x, 1)
-                res[theta_st:theta_end, k] = cp.asnumpy(cp.abs(x)) - self.data[theta_st:theta_end, k]
-        return res
 
     # ============================================================ logging / vis
     def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
@@ -423,10 +403,3 @@ class RecDelta(Rec):
                 os.makedirs(os.path.dirname(name), exist_ok=True)
                 self.table.to_csv(name, index=False)
 
-    def vis_debug(self, vars, i, writer=None):
-        """Per-iter checkpoint write (residual + pos-error plot bundled in)."""
-        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
-            return
-        residual = self.compute_residual(vars)
-        writer.write_checkpoint(vars, i, self.norm_const,
-                                residual=residual, pos_init=self.pos_init)

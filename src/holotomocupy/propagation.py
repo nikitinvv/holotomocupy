@@ -14,21 +14,27 @@ class Propagation:
     def __init__(self, n, nz, ntheta, ndist, wavelength, voxelsize, distance):
         self.n       = n
         self.nz      = nz
-        self._ntheta = ntheta
-
-        # Fresnel kernels on the padded (2n × 2nz) grid
-        fx = cp.fft.fftfreq(2 * n,  d=voxelsize).astype("float32")
-        fy = cp.fft.fftfreq(2 * nz, d=voxelsize).astype("float32")
-        fx, fy = cp.meshgrid(fx, fy)
-        f2 = fx ** 2 + fy ** 2  # hoisted outside the distance loop
-
-        norm = float(4 * n * nz)
-        self.fker = cp.empty([ndist, 2 * nz, 2 * n], dtype="complex64")
-        for j in range(ndist):
-            self.fker[j] = cp.exp(-1j * cp.pi * wavelength * distance[j] * f2) / norm
+        self.wavelength = wavelength
+        self.voxelsize = voxelsize
+        self.distance = distance
 
         # Pre-allocated work buffer (avoid per-call allocation)
         self._buf_big = cp.empty([ntheta, 2 * nz, 2 * n], dtype="complex64")
+
+        # Separable 1-D Fresnel phasers (persistent, KB scale):
+        #   fker[j] = fker_y[j, :, None] * fker_x[j, None, :]
+        #          = exp(-i·pi·λ·z[j]·(fx²+fy²)) / norm
+        # 1/norm folded into fker_x. DT uses .conj() of these.
+        fx = cp.fft.fftfreq(2 * n,  d=voxelsize)
+        fy = cp.fft.fftfreq(2 * nz, d=voxelsize)
+        z  = cp.asarray(distance)[:, None]           # [ndist, 1]
+        norm = float(4 * n * nz)
+        self.fker_x = (cp.exp(-1j * cp.pi * wavelength * z * fx[None, :] ** 2)
+                       / norm).astype('complex64')   # [ndist, 2n]
+        self.fker_y =  cp.exp(-1j * cp.pi * wavelength * z * fy[None, :] ** 2
+                             ).astype('complex64')   # [ndist, 2nz]
+        # 2-D assembly buffer; reassembled per D/DT call via cp.multiply(out=).
+        self._fker_buf = cp.empty([2 * nz, 2 * n], dtype='complex64')
 
         # cuFFTDx handle (optional — falls back to cuPy if unavailable).
         # JIT compilation is expected to have been done already by rank 0 via
@@ -67,19 +73,24 @@ class Propagation:
 
     def D(self, psi, j):
         """Forward propagator."""
+        psi = cp.asarray(psi)            # no-op for cupy; H2D for pinned numpy
         added_dim = psi.ndim == 2
         if added_dim:
             psi = psi[cp.newaxis]
 
         ntheta = psi.shape[0]
-        self._buf_big.fill(0)
+        # No fill(0): pad_fwd_kernel writes every element of _buf_big[:ntheta, :, :],
+        # and rows ≥ ntheta are decoupled (per-theta FFT) so stale data there is harmless.
         self._fwd_pad(psi, self._buf_big[:ntheta])
+
+        cp.multiply(self.fker_y[j][:, None], self.fker_x[j][None, :], out=self._fker_buf)
+
         if self._use_cufftdx:
-            self._conv2d.run(self._buf_big, self.fker[j], self._buf_big)
+            self._conv2d.run(self._buf_big, self._fker_buf, self._buf_big)
         else:
             with self._plan_2d:
                 cufft.fft2(self._buf_big, overwrite_x=True)
-            self._buf_big *= self.fker[j]
+            self._buf_big *= self._fker_buf
             with self._plan_2d:
                 cufft.ifft2(self._buf_big, overwrite_x=True, norm="forward")
         result = self._buf_big[:ntheta, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2].copy()
@@ -88,6 +99,7 @@ class Propagation:
 
     def DT(self, big_psi, j):
         """Adjoint propagator."""
+        big_psi = cp.asarray(big_psi)    # no-op for cupy; H2D for pinned numpy
         added_dim = big_psi.ndim == 2
         if added_dim:
             big_psi = big_psi[cp.newaxis]
@@ -95,12 +107,17 @@ class Propagation:
         ntheta = big_psi.shape[0]
         self._buf_big.fill(0)
         self._buf_big[:ntheta, self.nz // 2 : -self.nz // 2, self.n // 2 : -self.n // 2] = big_psi
+
+        # Adjoint kernel = conj of forward.
+        cp.multiply(self.fker_y[j][:, None].conj(),
+                    self.fker_x[j][None, :].conj(), out=self._fker_buf)
+
         if self._use_cufftdx:
-            self._conv2d.run(self._buf_big, self.fker[j].conj(), self._buf_big)
+            self._conv2d.run(self._buf_big, self._fker_buf, self._buf_big)
         else:
             with self._plan_2d:
                 cufft.fft2(self._buf_big, overwrite_x=True)
-            self._buf_big *= self.fker[j].conj()
+            self._buf_big *= self._fker_buf
             with self._plan_2d:
                 cufft.ifft2(self._buf_big, overwrite_x=True, norm="forward")
 

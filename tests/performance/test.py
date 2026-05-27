@@ -355,20 +355,20 @@ def synth_obj(st, end, nzobj_global, nobj, ss, dtype):
     return out
 
 
-# Positions for global theta range [st:end).
+# Positions for global theta range [st:end). Dist-major layout to match Rec.
 def synth_pos(st, end, ntheta_global, ndist, ss):
     if end - st == 0:
-        return np.empty((0, ndist, 2), dtype='float32')
+        return np.empty((ndist, 0, 2), dtype='float32')
     theta_seeds = ss.spawn(ntheta_global)[st:end]
-    out = np.empty((end - st, ndist, 2), dtype='float32')
+    out = np.empty((ndist, end - st, 2), dtype='float32')
     for j, sseed in enumerate(theta_seeds):
-        out[j] = (10.0 * (np.random.default_rng(sseed).random((ndist, 2), dtype='float32') - 0.5))
+        out[:, j] = (10.0 * (np.random.default_rng(sseed).random((ndist, 2), dtype='float32') - 0.5))
     return out
 
 
-cl.vars['prb'][:] = cp.array(synth_prb(nz, n, ndist, _ss_prb))
+cl.vars['prb'][:] = synth_prb(nz, n, ndist, _ss_prb)   # vars['prb'] is pinned numpy
 cl.vars['obj'][:] = synth_obj(cl.st_obj,   cl.end_obj,   nzobj,  nobj, _ss_obj, obj_dtype)
-cl.vars['pos'][:] = cp.array(synth_pos(cl.st_theta, cl.end_theta, ntheta, ndist, _ss_pos))
+cl.vars['pos'][:] = synth_pos(cl.st_theta, cl.end_theta, ntheta, ndist, _ss_pos)
 
 
 # ── Forward-model synthetic data + reference ────────────────────────────────

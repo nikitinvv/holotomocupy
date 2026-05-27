@@ -12,6 +12,13 @@ from .cuda_kernels import (
 from .utils import redot
 
 
+def _ascontig(x):
+    """cp.ascontiguousarray that also accepts numpy/pinned input (auto-uploads).
+    Newer cupy rejects numpy inputs to ascontiguousarray; we go through cp.asarray
+    first so callers can pass pinned-numpy slices (e.g. vars['pos'][:, k]) directly."""
+    return cp.ascontiguousarray(cp.asarray(x))
+
+
 class Shift():
     """Cubic B-spline shift operator (requires coeff() prefilter, C2 smooth)."""
 
@@ -38,7 +45,9 @@ class Shift():
         else:
             self._plan_coeff = None
 
-        self._coeff_cache = {}
+        self._coeff_cache  = {}
+        self._coeff_hits   = 0
+        self._coeff_misses = 0
 
         self._sk      = s_kernel
         self._sfk     = sf_kernel
@@ -87,16 +96,29 @@ class Shift():
         """coeff(psi) memoized by id(psi). MUST be paired with explicit
         coeff_cache_reset() at safe lifetime boundaries (e.g., per chunk):
         id() values can be reused across distinct Python objects once an
-        earlier one is garbage-collected."""
+        earlier one is garbage-collected. Hit/miss counters are exposed for
+        verification; reset along with the cache."""
         key = id(psi)
         cached = self._coeff_cache.get(key)
         if cached is None:
+            self._coeff_misses += 1
             cached = self.coeff(psi)
             self._coeff_cache[key] = cached
+        else:
+            self._coeff_hits += 1
         return cached
 
     def coeff_cache_reset(self):
         self._coeff_cache = {}
+
+    def coeff_cache_stats(self, reset=False):
+        """Return (hits, misses) accumulated since the last stats reset.
+        Set reset=True to zero the counters."""
+        stats = (self._coeff_hits, self._coeff_misses)
+        if reset:
+            self._coeff_hits = 0
+            self._coeff_misses = 0
+        return stats
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*
@@ -104,10 +126,11 @@ class Shift():
 
     def S(self, c, r, m):
         ntheta = c.shape[0]
-        spsi = cp.zeros([ntheta, self.nz, self.n], dtype=self.obj_dtype)
-        c = cp.ascontiguousarray(c)
-        r = cp.ascontiguousarray(r)
-        m = cp.ascontiguousarray(m)
+        # Kernel writes every (t, k, i) — no need to zero first.
+        spsi = cp.empty([ntheta, self.nz, self.n], dtype=self.obj_dtype)
+        c = _ascontig(c)
+        r = _ascontig(r)
+        m = _ascontig(m)
         self._launch(self._sk, self._sfk, ntheta,
                      (spsi, c, r, m,
                       self.n, self.npsi, self.nz, self.nzpsi, ntheta, 0))
@@ -116,9 +139,9 @@ class Shift():
     def Sadj(self, spsi, r, m):
         ntheta = spsi.shape[0]
         c = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype=self.obj_dtype)
-        spsi = cp.ascontiguousarray(spsi)
-        r = cp.ascontiguousarray(r)
-        m = cp.ascontiguousarray(m)
+        spsi = _ascontig(spsi)
+        r = _ascontig(r)
+        m = _ascontig(m)
         self._launch(self._sk, self._sfk, ntheta,
                      (spsi, c, r, m,
                       self.n, self.npsi, self.nz, self.nzpsi, ntheta, 1))
@@ -150,10 +173,11 @@ class Shift():
     def Sback(self, c, r, m):
         """Gather-interpolate from small (n x nz) B-spline coefficients to large (npsi x nzpsi) grid."""
         ntheta = c.shape[0]
-        g    = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype='complex64')
-        c    = cp.ascontiguousarray(c)
-        r    = cp.ascontiguousarray(r)
-        m    = cp.ascontiguousarray(cp.asarray(m, dtype='float32'))
+        # Kernel writes every (t, k, i) — no zero-fill needed.
+        g    = cp.empty([ntheta, self.nzpsi, self.npsi], dtype='complex64')
+        c    = _ascontig(c)
+        r    = _ascontig(r)
+        m    = _ascontig(cp.asarray(m, dtype='float32'))
         sback_kernel(
             (math.ceil(self.npsi / 32), math.ceil(self.nzpsi / 32), ntheta),
             (32, 32, 1),
@@ -172,10 +196,10 @@ class Shift():
 
     def curlySc(self, c, r, m):
         ntheta = c.shape[0]
-        spsi = cp.zeros([ntheta, self.nz, self.n], dtype=self.obj_dtype)
-        c = cp.ascontiguousarray(c)
-        r = cp.ascontiguousarray(r)
-        m = cp.ascontiguousarray(m)
+        spsi = cp.empty([ntheta, self.nz, self.n], dtype=self.obj_dtype)
+        c = _ascontig(c)
+        r = _ascontig(r)
+        m = _ascontig(m)
         self._launch(self._sk, self._sfk, ntheta,
                      (spsi, c, r, m,
                       self.n, self.npsi, self.nz, self.nzpsi, ntheta, 0))
@@ -183,12 +207,12 @@ class Shift():
 
     def dcurlySc(self, c, r, m, c1, Deltar):
         ntheta = c.shape[0]
-        res     = cp.zeros([ntheta, self.nz, self.n], self.obj_dtype)
-        c       = cp.ascontiguousarray(c)
-        c1      = cp.ascontiguousarray(c1)
-        r       = cp.ascontiguousarray(r)
-        Deltar  = cp.ascontiguousarray(Deltar)
-        m       = cp.ascontiguousarray(m)
+        res     = cp.empty([ntheta, self.nz, self.n], self.obj_dtype)
+        c       = _ascontig(c)
+        c1      = _ascontig(c1)
+        r       = _ascontig(r)
+        Deltar  = _ascontig(Deltar)
+        m       = _ascontig(m)
 
         self._launch(self._dsk, self._dsfk, ntheta,
                      (res, c, c1, r, m, Deltar,
@@ -199,14 +223,16 @@ class Shift():
     def dcurlySadjc(self, c, r, m, Deltaphi):
         
         ntheta = c.shape[0]
-        out1 = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype=self.obj_dtype)        
-        out2  = cp.zeros(r.shape, dtype='float32')
-        dt1  = cp.zeros(Deltaphi.shape, self.obj_dtype)
-        dt2  = cp.zeros(Deltaphi.shape, self.obj_dtype)
-        c        = cp.ascontiguousarray(c)
-        r        = cp.ascontiguousarray(r)
-        Deltaphi = cp.ascontiguousarray(Deltaphi)
-        m        = cp.ascontiguousarray(m)
+        # out1 is an atomicAdd target -> MUST be zeroed. dt1/dt2 are written every
+        # position by the kernel; out2 is overwritten by the redot() lines below.
+        out1 = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype=self.obj_dtype)
+        out2  = cp.empty(r.shape, dtype='float32')
+        dt1  = cp.empty(Deltaphi.shape, self.obj_dtype)
+        dt2  = cp.empty(Deltaphi.shape, self.obj_dtype)
+        c        = _ascontig(c)
+        r        = _ascontig(r)
+        Deltaphi = _ascontig(Deltaphi)
+        m        = _ascontig(m)
 
         self._launch(self._dsadjk, self._dsadjfk, ntheta,
                      (out1, dt1, dt2, c, Deltaphi, r, m,
@@ -220,14 +246,14 @@ class Shift():
     def d2curlySc(self, c, r, m, c1, Deltar1, c2, Deltar2):
 
         ntheta = c.shape[0]
-        res     = cp.zeros([ntheta, self.nz, self.n], self.obj_dtype)
-        c       = cp.ascontiguousarray(c)
-        c1      = cp.ascontiguousarray(c1)
-        c2      = cp.ascontiguousarray(c2)
-        r       = cp.ascontiguousarray(r)
-        Deltar1 = cp.ascontiguousarray(Deltar1)
-        Deltar2 = cp.ascontiguousarray(Deltar2)
-        m       = cp.ascontiguousarray(m)
+        res     = cp.empty([ntheta, self.nz, self.n], self.obj_dtype)
+        c       = _ascontig(c)
+        c1      = _ascontig(c1)
+        c2      = _ascontig(c2)
+        r       = _ascontig(r)
+        Deltar1 = _ascontig(Deltar1)
+        Deltar2 = _ascontig(Deltar2)
+        m       = _ascontig(m)
 
         self._launch(self._d2sk, self._d2sfk, ntheta,
                      (res, c, c1, c2, r, m, Deltar1, Deltar2,

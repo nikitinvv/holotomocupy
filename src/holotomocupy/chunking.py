@@ -233,7 +233,15 @@ class Chunking:
                 s.synchronize()
 
     def alloc_double_buffers(self, arrs, axis, gpu_mem, offset, chunk):
-        """Allocate double-buffered GPU arrays from the pre-allocated pool."""
+        """Allocate double-buffered GPU arrays from the pre-allocated pool.
+
+        Each buffer's offset is rounded up to ALIGN bytes — cuFFT / kernels can
+        return CUFFT_INVALID_VALUE / misaligned-access on cupy views whose data
+        pointer isn't aligned to the element size or vector load width. Small 1-D
+        buffers (eg eff_demag [chunk] float32 at chunk=1 = 4 bytes) used to push
+        the next slot 4 bytes past a 16-byte boundary -> complex64 cuFFT failed.
+        """
+        ALIGN = 128
         gpu = [[], []]
         for j in (0, 1):
             for a in arrs:
@@ -242,6 +250,7 @@ class Chunking:
                 shape0 = tuple(shape0)
                 n       = int(np.prod(shape0))
                 nbytes  = n * np.dtype(a.dtype).itemsize
+                offset  = (offset + ALIGN - 1) & ~(ALIGN - 1)
                 try:
                     gpu[j].append(cp.ndarray(shape0, dtype=a.dtype, memptr=gpu_mem + offset))
                 except Exception as e:

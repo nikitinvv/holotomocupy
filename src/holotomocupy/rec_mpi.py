@@ -50,7 +50,7 @@ class Rec:
         candidates = [3 * proj_bytes + data_bytes, 3 * obj_bytes]  # hessian, lin_obj
         if self.lam_laplacian > 0:
             candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
-        nbytes     = 4*int(2.1 * max(candidates))                    # ×2 for double-buffering,10% extra for positions/eff_mag
+        nbytes     = int(2.1 * max(candidates))                    # ×2 for double-buffering,10% extra for positions/eff_mag
 
         ### multinode processing
         self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)

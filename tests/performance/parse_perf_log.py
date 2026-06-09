@@ -155,6 +155,8 @@ def main():
         pct      = 100 * tot / total if total else 0
         print(f"{fn:<24} {cnt:>6} {tot:>12.4f} {mean_ms:>12.3f} {pct:>6.1f}%")
     print(f"{'TOTAL (timed)':<24} {sum(c for c, _ in by_fn.values()):>6} {total:>12.4f}")
+    min_time = by_fn.get('min', (0, 0.0))[1]
+    print(f"{'TOTAL - min':<24} {'':>6} {total - min_time:>12.4f}")
 
     print(f"\n── iter {args.iter}: grouped categories ──────────────────────────")
     seen = set()

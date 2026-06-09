@@ -50,7 +50,7 @@ obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.1
 lam_prbfit      = 1e-2                           # disable probe-fit regularization
-lam_laplacian   = 1e-2
+lam_laplacian   = 0
 start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                            # no cost computation in hot loop
@@ -76,115 +76,10 @@ if rank == 0 and log_path:
 
 
 # ── Machine info (rank 0 only — written to the perf log for reproducibility) ─
-# SMBIOS Memory Type enum (subset) — used by the /sys/firmware/dmi parser.
-_MEM_TYPES = {
-    0x12: 'DDR',  0x13: 'DDR2', 0x14: 'DDR2 FB-DIMM',
-    0x18: 'DDR3', 0x1A: 'DDR4', 0x1B: 'LPDDR',  0x1C: 'LPDDR2',
-    0x1D: 'LPDDR3', 0x1E: 'LPDDR4',
-    0x20: 'HBM',  0x21: 'HBM2', 0x22: 'DDR5', 0x23: 'LPDDR5', 0x24: 'HBM3',
-}
-
-
-def _dimms_from_dmidecode_output(text):
-    """Parse the human-readable output of `dmidecode -t memory` into per-dimm dicts."""
-    out, cur = [], None
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith('Memory Device'):
-            if cur and cur.get('size_gb'):
-                out.append(cur)
-            cur = {}
-        elif cur is not None and ':' in s:
-            k, v = (p.strip() for p in s.split(':', 1))
-            if   k == 'Size' and v not in ('No Module Installed', 'Not Installed'):
-                # e.g. "32 GB" / "32768 MB"
-                parts = v.split()
-                try:
-                    val = float(parts[0]); unit = parts[1].upper()
-                    cur['size_gb'] = val if unit == 'GB' else val / 1024.0
-                except Exception:
-                    pass
-            elif k == 'Type'                    and v not in ('Unknown', '<OUT OF SPEC>'): cur['type']  = v
-            elif k == 'Speed'                   and v != 'Unknown': cur['speed'] = v
-            elif k == 'Configured Memory Speed' and v != 'Unknown': cur['cspeed'] = v
-    if cur and cur.get('size_gb'):
-        out.append(cur)
-    return out
-
-
-def _dimms_from_sysfs_dmi():
-    """Parse /sys/firmware/dmi/tables/DMI (readable as user on many kernels)."""
-    try:
-        with open('/sys/firmware/dmi/tables/DMI', 'rb') as fh:
-            blob = fh.read()
-    except (OSError, PermissionError):
-        return None
-
-    out = []
-    i = 0
-    while i + 4 <= len(blob):
-        t  = blob[i]
-        L  = blob[i + 1]
-        if L < 4 or i + L > len(blob):
-            break
-        body = blob[i:i + L]
-        # skip past body to the double-null that terminates the string list
-        j = i + L
-        while j + 1 < len(blob) and not (blob[j] == 0 and blob[j + 1] == 0):
-            j += 1
-        j += 2
-        if t == 127:                       # End-of-table
-            break
-        if t == 17 and L >= 0x17:          # Memory Device
-            size_raw = int.from_bytes(body[0x0C:0x0E], 'little')
-            mtype    = body[0x12]
-            speed    = int.from_bytes(body[0x15:0x17], 'little')
-            cspeed   = int.from_bytes(body[0x20:0x22], 'little') if L >= 0x22 else 0
-            if size_raw == 0 or size_raw == 0xFFFF:
-                size_gb = None
-            elif size_raw == 0x7FFF and L >= 0x20:
-                size_gb = int.from_bytes(body[0x1C:0x20], 'little') / 1024.0
-            elif size_raw & 0x8000:                 # value in KB
-                size_gb = (size_raw & 0x7FFF) / (1024 * 1024)
-            else:                                    # value in MB
-                size_gb = size_raw / 1024.0
-            if size_gb is not None:
-                out.append({
-                    'size_gb': size_gb,
-                    'type'   : _MEM_TYPES.get(mtype, f'Unknown(0x{mtype:02x})'),
-                    'speed'  : f"{speed} MT/s"  if speed  else None,
-                    'cspeed' : f"{cspeed} MT/s" if cspeed else None,
-                })
-        i = j
-    return out
-
-
-def _ram_summary():
-    """Return a human-readable RAM-modules summary, or None if unavailable."""
-    import subprocess
-    dimms = None
-    # 1) try `dmidecode -t memory` (may be suid or sudo-NOPASSWD on some hosts)
-    try:
-        r = subprocess.run(['dmidecode', '-t', 'memory'],
-                           capture_output=True, text=True, timeout=2)
-        if r.returncode == 0 and r.stdout:
-            dimms = _dimms_from_dmidecode_output(r.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
-        pass
-    # 2) fall back to raw /sys/firmware/dmi/tables/DMI parse
-    if not dimms:
-        dimms = _dimms_from_sysfs_dmi()
-    if not dimms:
-        return None
-    # group identical (size, type, speed) tuples
-    from collections import Counter
-    key = lambda d: (round(d.get('size_gb', 0), 1), d.get('type'), d.get('speed') or d.get('cspeed'))
-    groups = Counter(key(d) for d in dimms)
-    return ", ".join(f"{n}× {sz}GB {ty or '?'} @ {sp or '?'}" for (sz, ty, sp), n in groups.items())
 
 
 def _log_machine_info():
-    """Log CPU model, total RAM, RAM modules, GPU model + memory, and GPU count."""
+    """Log CPU model, total RAM, GPU model + memory, and GPU count."""
     # CPU model
     cpu_model = 'unknown'
     try:
@@ -220,12 +115,6 @@ def _log_machine_info():
     logger.warning(f"machine: CPU={cpu_model} ({cpu_count} logical cores)")
     if ram_gb is not None:
         logger.warning(f"machine: RAM total={ram_gb:.1f} GB")
-    ram_modules = _ram_summary()
-    if ram_modules:
-        logger.warning(f"machine: RAM modules={ram_modules}")
-    else:
-        logger.warning("machine: RAM modules=unavailable (needs root for dmidecode "
-                       "and /sys/firmware/dmi/tables/DMI not readable)")
     if gpu_name is not None:
         logger.warning(f"machine: GPU={gpu_name}  memory={gpu_mem_gb:.1f} GB  "
                        f"count_visible={gpu_count}  (this rank uses dev {dev_id})")

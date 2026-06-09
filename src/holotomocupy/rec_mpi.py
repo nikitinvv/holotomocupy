@@ -732,14 +732,16 @@ class Rec:
         if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
             
-        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])        
+        t_min = time.time()
+        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
+        min_time = time.time() - t_min
         if self.rank==0:
             if i==-1:
-                logger.warning(f"Initial {err=:1.5e} ")                        
+                logger.warning(f"Initial {err=:1.5e} ")
                 self.table.loc[len(self.table)] = [i, err, 0]
-            else:                
-                ittime = time.time()-self.time_start           
-                logger.warning(f"iter={i}: {ittime:.4f}sec {err=:1.5e} ")                        
+            else:
+                ittime = time.time()-self.time_start
+                logger.warning(f"iter={i}: {ittime:.4f}sec (-min={ittime - min_time:.4f}sec) {err=:1.5e} ")
                 self.table.loc[len(self.table)] = [i, err, ittime]
             self.time_start = time.time()
             if hasattr(self, 'path_out'):

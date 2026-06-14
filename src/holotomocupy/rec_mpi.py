@@ -9,6 +9,7 @@ import cupy.fft
 from .tomo import Tomo
 from .propagation import Propagation
 from .shift import Shift
+from .shift_fft import ShiftFFT
 from .chunking import Chunking
 from .extra_terms import LaplacianTerm, PrbfitTerm
 from .utils import *
@@ -90,7 +91,14 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+        shift_type = getattr(self, 'shift_type', 'cubic')
+        if shift_type == 'fft':
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj,
+                                     self.obj_dtype, self.nchunk)
+        elif shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+        else:
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
         if self.lam_laplacian > 0:
             self.cl_lap_term = LaplacianTerm(self.lam_laplacian, self.obj_size,
                                              self.local_nzobj, self.nobj, self.obj_dtype,

@@ -46,6 +46,7 @@ def parse_args(config_file):
         args.energy = cfg.getfloat("energy", fallback=None)
         args.method = cfg.getint("method", fallback=0)
         args.start_method = cfg.getint("start_method", fallback=1)
+        args.shift_type = cfg.get("shift_type", fallback="cubic").strip().lower()
         _pos_chk            = cfg.get("pos_checkpoint", fallback=None)
         args.pos_checkpoint = os.path.join(_path, _pos_chk) if _pos_chk else None
         _prb                = cfg.get("prb_file", fallback=None)

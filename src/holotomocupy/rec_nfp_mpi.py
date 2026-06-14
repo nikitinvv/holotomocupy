@@ -9,6 +9,7 @@ import cupy.fft
 
 from .propagation import Propagation
 from .shift import Shift
+from .shift_fft import ShiftFFT
 from .chunking import Chunking
 from .utils import *
 from .mpi_functions import *
@@ -78,7 +79,13 @@ class RecNFP:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
-        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj,self.obj_dtype)
+        shift_type = getattr(self, 'shift_type', 'cubic')
+        if shift_type == 'fft':
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
+        elif shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
+        else:
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
 
         self.alloc_arrays()
 

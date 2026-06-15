@@ -31,8 +31,6 @@ class RecNFP:
     Parallelisation: theta distributed across MPI ranks; prb/proj replicated.
     """
 
-    # Variables driven by the BH loop. Subclasses with extra variables (e.g.
-    # RecNFPDelta adds 'bd') override this and inherit BH unchanged.
     _var_names = ("prb", "proj", "pos")
 
     def __init__(self, args):
@@ -81,10 +79,10 @@ class RecNFP:
                                        np.array([distance]))
         if self.shift_type == 'fft':
             self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj,
-                                     self.obj_dtype, symmetric=self.shift_symmetric)
+                                     self.obj_dtype)
         elif self.shift_type == 'cubic':
             self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj,
-                                  self.obj_dtype, symmetric=self.shift_symmetric)
+                                  self.obj_dtype)
         else:
             raise ValueError(f"shift_type must be 'cubic' or 'fft', got {self.shift_type!r}")
 
@@ -453,12 +451,11 @@ class RecNFP:
         c = self._tiled_coeff(x32, n)
         m = cp.ones(n, dtype='float32')
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
-        # Deltapsi lives on the coefficient grid (nzpsi_eff, npsi_eff): same
-        # as (nzobj, nobj) for the default cubic and for ShiftFFT, but 2×
-        # bigger for cubic Shift(symmetric=True). Allocate the sum on that
-        # grid, then let coeff() fold-and-prefilter it down to (nzobj, nobj).
-        y32 = cp.sum(Deltapsi, axis=0)             # [nzpsi_eff, npsi_eff]
-        y32 = self.cl_shift.coeff(y32)             # → [nzobj, nobj] (shape-polymorphic)
+        # Deltapsi lives on the coefficient grid (nzobj, nobj); sum over
+        # theta, then apply coeff() (identity for ShiftFFT, FFT prefilter
+        # for cubic).
+        y32 = cp.sum(Deltapsi, axis=0)
+        y32 = self.cl_shift.coeff(y32)
         return [y21, y32, y33]
 
     @timer

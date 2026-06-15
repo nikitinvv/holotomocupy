@@ -142,10 +142,11 @@ t_cufftdx_DT = time_fn(lambda: cl.DT(psi, j))
 t_cupy_D     = time_fn(lambda: cl_cupy.D(psi, j))
 t_cupy_DT    = time_fn(lambda: cl_cupy.DT(psi, j))
 
-print(f'\n{"Method":<16}  {"cuFFTDx ms":>12}  {"cuPy ms":>10}  {"speedup":>9}')
-print('-' * 54)
-print(f'{"D":<16}  {t_cufftdx_D:>12.3f}  {t_cupy_D:>10.3f}  {t_cupy_D/t_cufftdx_D:>9.2f}x')
-print(f'{"DT":<16}  {t_cufftdx_DT:>12.3f}  {t_cupy_DT:>10.3f}  {t_cupy_DT/t_cufftdx_DT:>9.2f}x')
+primary = 'cuFFTDx' if cl._use_cufftdx else 'cuPy(fallback)'
+print(f'\n{"Method":<16}  {primary + " ms":>16}  {"cuPy ms":>10}  {"speedup":>9}')
+print('-' * 58)
+print(f'{"D":<16}  {t_cufftdx_D:>16.3f}  {t_cupy_D:>10.3f}  {t_cupy_D/t_cufftdx_D:>9.2f}x')
+print(f'{"DT":<16}  {t_cufftdx_DT:>16.3f}  {t_cupy_DT:>10.3f}  {t_cupy_DT/t_cufftdx_DT:>9.2f}x')
 
 # ── Per-step profiling: D vs D_cupy ──────────────────────────────────────────
 
@@ -217,21 +218,23 @@ steps_DT_cupy = {
 }
 
 print(f'\n{"Step":<22}  {"ms":>8}')
-print('── D (cuFFTDx) ───────────────────')
-for name, fn in steps_D.items():
-    print(f'  {name:<20}  {time_fn(fn):>8.3f}')
+if cl._use_cufftdx:
+    print('── D (cuFFTDx) ───────────────────')
+    for name, fn in steps_D.items():
+        print(f'  {name:<20}  {time_fn(fn):>8.3f}')
+    print()
 
-print()
 print('── D (cuPy) ──────────────────────')
 for name, fn in steps_D_cupy.items():
     print(f'  {name:<20}  {time_fn(fn):>8.3f}')
 
 print()
-print('── DT (cuFFTDx) ──────────────────')
-for name, fn in steps_DT.items():
-    print(f'  {name:<20}  {time_fn(fn):>8.3f}')
+if cl._use_cufftdx:
+    print('── DT (cuFFTDx) ──────────────────')
+    for name, fn in steps_DT.items():
+        print(f'  {name:<20}  {time_fn(fn):>8.3f}')
+    print()
 
-print()
 print('── DT (cuPy) ─────────────────────')
 for name, fn in steps_DT_cupy.items():
     print(f'  {name:<20}  {time_fn(fn):>8.3f}')

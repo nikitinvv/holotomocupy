@@ -1,16 +1,13 @@
-"""Visual comparison: shift a centered rectangle through all four shift modes.
+"""Visual comparison: shift a centered rectangle through the two shift modes.
 
-Compares cubic-spline and FFT shifts, each in both symmetric=False (unpadded,
-periodic BC) and symmetric=True (mirror-padded to 2× grid) flavors. The
-rectangle is a sharp-edged step function with 4 quadrant values, so internal
-discontinuities are visible too. Across columns: small / medium / large shifts.
+Compares cubic-spline and FFT shifts. The rectangle is a sharp-edged step
+function with 4 quadrant values, so internal discontinuities are visible
+too. Across columns: small / medium / large shifts.
 
 Rows:
   0: input
-  1: cubic, symmetric=False  — current default; FFT prefilter assumes periodic
-  2: cubic, symmetric=True   — mirror-pad + prefilter on 2× grid
-  3: fft,   symmetric=False  — raw FFT shift, periodic wrap-around on big shifts
-  4: fft,   symmetric=True   — current ShiftFFT default; mirror-pad to 2× grid
+  1: cubic  — FFT B-spline prefilter (periodic BC) + cubic gather
+  2: fft    — Fourier shift theorem (periodic BC)
 """
 
 import argparse
@@ -61,13 +58,10 @@ def main():
     img = make_rectangle(n, half_size=args.half_size, smooth=args.smooth)
     arr_gpu = cp.asarray(img)[cp.newaxis]   # [1, n, n]
 
-    # Four shift operators — same input, output and grid sizes, just different
-    # backends and symmetric-padding choices.
+    # Two shift operators — same input, output and grid sizes, different backends.
     methods = [
-        ('cubic, sym=False', Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=False)),
-        ('cubic, sym=True',  Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=True )),
-        ('fft,   sym=False', ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=False)),
-        ('fft,   sym=True',  ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=True )),
+        ('cubic', Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64')),
+        ('fft',   ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64')),
     ]
 
     shifts = [(2.5, -1.5), (8.7, -6.3), (28.0, -25.0)]
@@ -108,12 +102,9 @@ def main():
     print(f"Saved figure: {out_png}")
     print()
     print("Expected differences:")
-    print("  - cubic sym=False vs sym=True: tiny near-boundary differences (the")
-    print("    mirror-padded prefilter fixes wrong coefficients at the object edge).")
-    print("  - fft sym=False, large shift: visible periodic wrap-around (rectangle")
-    print("    re-appears on the opposite side). sym=True eliminates the wrap.")
-    print("  - fft (either sym): Gibbs ringing around every step edge of the")
-    print("    rectangle; cubic does not ring.")
+    print("  - fft, large shift: periodic wrap-around (rectangle re-appears on")
+    print("    the opposite side) — both modes use periodic BC now.")
+    print("  - fft: Gibbs ringing around every step edge; cubic does not ring.")
 
 
 if __name__ == '__main__':

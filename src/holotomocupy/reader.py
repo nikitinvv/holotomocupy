@@ -310,7 +310,7 @@ class Reader:
             cp.sqrt(raw, out=out)
         return out
 
-    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None, out_bd=None):
+    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None):
         """Read a checkpoint saved at a coarser resolution and upsample.
 
         Scale is inferred automatically from checkpoint n vs self.n.
@@ -404,19 +404,7 @@ class Reader:
         else:
             out_pos[:] = cp.array(pos_up, dtype='float32')
 
-        # Optional scalar attribute (e.g. RecDelta's bd). Broadcast across ranks.
-        bd_arr = np.zeros(1, dtype='float32')
-        if self.rank == 0:
-            with h5py.File(path, 'r') as f:
-                if 'bd' in f.attrs:
-                    bd_arr[0] = float(f.attrs['bd'])
-                else:
-                    bd_arr[0] = float('nan')
-        self.comm.Bcast(bd_arr, root=0)
-        if out_bd is not None and not np.isnan(bd_arr[0]):
-            out_bd[0] = float(bd_arr[0])
-
-        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos, 'bd': float(bd_arr[0])}
+        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos}
 
     def read_pos_checkpoint(self, path, out=None):
         """Read positions from a checkpoint file and upsample to current resolution.

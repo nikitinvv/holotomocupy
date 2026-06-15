@@ -84,9 +84,6 @@ class Writer:
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
             f.attrs['iter']      = i
             f.attrs['obj_dtype'] = self.obj_dtype
-            # Save scalar variables (e.g. RecDelta's bd) as HDF5 attributes if present.
-            if 'bd' in vars:
-                f.attrs['bd'] = float(vars['bd'][0])
 
             obj_shape = (self.nzobj, self.nobj, self.nobj)
             ds_re = f.create_dataset('obj_re', shape=obj_shape, dtype='float32')

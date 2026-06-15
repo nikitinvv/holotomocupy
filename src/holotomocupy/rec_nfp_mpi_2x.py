@@ -3,14 +3,16 @@
 Sibling of :mod:`rec_nfp_mpi`: same MPI parallelisation, same BH machinery,
 same cascade structure. The difference is that prb and proj live on a grid
 twice as fine as the detector (and twice as fine as the user-facing object
-grid), and a 2×2 average bin is the last operation before the loss:
+grid). A real detector integrates *intensity* over the pixel area, so the
+2×2 bin acts on |E|² and the loss is
 
-    F = F0 ∘ B ∘ F1 ∘ F2 ∘ F3
-    B(y)[i, j] = (1/4) · Σ_{a,b ∈ {0,1}} y[2i+a, 2j+b]      (forward bin)
-    B^T(z)[2i+a, 2j+b] = (1/4) · z[i, j]                     (adjoint)
+    L = (1/N) Σ_θ ‖ sqrt( B(|E_θ|²) ) − d_θ ‖²,
+    E_θ = D( P · exp(i · S_{2r_θ} ψ) )                       (dense field)
+    B(I)[i, j] = (1/4) · Σ_{a,b ∈ {0,1}} I[2i+a, 2j+b]      (intensity bin)
 
-The bin is folded into F1 (still 4 cascade levels) so the rest of the BH /
-gradient / Hessian machinery is identical to ``RecNFP``.
+i.e. *intensity-bin-then-sqrt*, not field-bin-then-magnitude. The bin
+therefore lives inside F0; F1 / F2 / F3 stay in the dense complex domain
+and the rest of the cascade is structurally identical to ``RecNFP``.
 
 Sizes (with user-facing detector dims n, nz and object dims nobj, nzobj):
     prb      : (2·nz,    2·n)        — dense
@@ -280,6 +282,10 @@ class RecNFP2x:
         )
 
     ####################### 2×2 average-bin operator ########################
+    # bin2x2 acts on real-valued intensity (Σ/4 over 2×2 blocks).
+    # upsample_2x replicates each detector-grid scalar across its 4 dense
+    # children with no scaling — used to broadcast small-grid scalars (e.g.
+    # 1 − d/A) into the dense field's pointwise multiplications.
 
     @staticmethod
     def bin2x2(y):
@@ -288,9 +294,9 @@ class RecNFP2x:
         return y.reshape(*s[:-2], s[-2] // 2, 2, s[-1] // 2, 2).mean(axis=(-3, -1))
 
     @staticmethod
-    def bin2x2_adj(z):
-        """Adjoint of bin2x2: scatter each pixel into its 2×2 dense block with weight 1/4."""
-        return cp.repeat(cp.repeat(z, 2, axis=-2), 2, axis=-1) * np.float32(0.25)
+    def upsample_2x(z):
+        """Broadcast each pixel to its 2×2 dense block (no scaling)."""
+        return cp.repeat(cp.repeat(z, 2, axis=-2), 2, axis=-1)
 
     ####################### Cascade functions #######################
 
@@ -299,60 +305,71 @@ class RecNFP2x:
             x = self.F[k](x)
         return x
 
-    ####### F0: ||x0| - d||² / data_size
-    @staticmethod
-    @cp.fuse()
-    def _F0_fused(x, d):
-        t = cp.abs(x) - d
-        return t * t
+    ####### F0: ‖ sqrt(B(|E|²)) − d ‖² / data_size  (physical detector model)
+    # E is the dense complex field (the F1 output, shape (·, 2nz, 2n));
+    # d is the detector-resolution measured amplitude (shape (·, nz, n)).
+    # Quantities used throughout (all live on the detector grid):
+    #     I = B(|E|²),   A = sqrt(I + eps),   res = 1 − d/A,   d/A = d0
+    # eps avoids 0/0 in the rare case the predicted intensity is exactly
+    # zero; in practice A > 0 strictly because |prb|·|exp(iSψ)| > 0.
+
+    _EPS = np.float32(1e-30)
 
     def F0(self, x, d):
-        return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
-
-    @staticmethod
-    @cp.fuse()
-    def _dF0_fused(x, d):
-        return x - d * (x / cp.abs(x))
+        I = self.bin2x2(reprod(x, x))
+        A = cp.sqrt(I + self._EPS)
+        diff = A - d
+        return np.float32(1 / self.data_size) * cp.sum(diff * diff)
 
     def dF0(self, x, y, d, return_x=False):
-        return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
-
-    @staticmethod
-    @cp.fuse()
-    def _d2F_dF0_fused(x, y, z, w, d):
-        absval = cp.abs(x)
-        l0 = x / absval
-        d0 = d / absval
-        v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
-        if w is not None:
-            v += reprod(x - d * l0, w)
-        return v
+        # dL/dE · y  =  (2/N) Σ_{ij} (1 − d/A) · B(reprod(E, y))[i,j]
+        I = self.bin2x2(reprod(x, x))
+        A = cp.sqrt(I + self._EPS)
+        BEV = self.bin2x2(reprod(x, y))
+        return np.float32(2 / self.data_size) * cp.sum((1 - d / A) * BEV)
 
     def d2F_dF0(self, x, y, z, w, d):
-        return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
-
-    @staticmethod
-    @cp.fuse()
-    def _gF0_fused(x, y, scale):
-        td = y * (x / cp.abs(x))
-        return scale * (x - td)
+        # d²L/dE² (y, z) + dL/dE · w, all reduced through B to the small grid.
+        # Per detector pixel:
+        #   v = (1 − d/A)·B(reprod(y,z))
+        #     + (d/A)   · (B(reprod(E,y))/A) · (B(reprod(E,z))/A)
+        #     + [w]      (1 − d/A) · B(reprod(E, w))
+        I = self.bin2x2(reprod(x, x))
+        A = cp.sqrt(I + self._EPS)
+        BEV = self.bin2x2(reprod(x, y))
+        BEW = self.bin2x2(reprod(x, z))
+        BVW = self.bin2x2(reprod(y, z))
+        d0  = d / A
+        ll0 = 1 - d0
+        v = ll0 * BVW + d0 * (BEV / A) * (BEW / A)
+        if w is not None:
+            BEw = self.bin2x2(reprod(x, w))
+            v = v + ll0 * BEw
+        return np.float32(2 / self.data_size) * cp.sum(v)
 
     def gF0(self, x, y):
-        x = self.apply_F_from(x, 1)
-        return self._gF0_fused(x, y, np.float32(2 / self.data_size))
+        # Codebase convention: gradient = 2 ∂L/∂Ē.
+        # gF0 = (1/(2N)) · E · upsample_2x(1 − d/A).
+        E = self.apply_F_from(x, 1)
+        I = self.bin2x2(reprod(E, E))
+        A = cp.sqrt(I + self._EPS)
+        res_dense = self.upsample_2x(1 - y / A)
+        return np.float32(1 / (2 * self.data_size)) * E * res_dense
 
-    ####### F1: (prb, exp_proj) → B(D(prb · exp_proj))
-    #            (bin 2×2 of the propagated dense field → detector grid)
+    ####### F1: (prb, exp_proj) → D(prb · exp_proj)   (dense complex wave)
+    # The bin lives in F0; F1 / F2 / F3 are identical to RecNFP modulo the
+    # fact that everything here is on the dense grid.
+
     def F1(self, x):
         x11, x12 = x
-        return self.bin2x2(self.cl_prop.D(x11 * x12, 0))
+        return self.cl_prop.D(x11 * x12, 0)
 
     def dF1(self, x, y, return_x=True):
         x11, x12 = x
         y11, y12 = y
-        y0 = self.bin2x2(self.cl_prop.D(y11 * x12 + x11 * y12, 0))
+        y0 = self.cl_prop.D(y11 * x12 + x11 * y12, 0)
         if return_x:
-            return self.bin2x2(self.cl_prop.D(x11 * x12, 0)), y0
+            return self.cl_prop.D(x11 * x12, 0), y0
         return y0
 
     def d2F_dF1(self, x, y, z, w):
@@ -368,15 +385,13 @@ class RecNFP2x:
             y0 = y0 + w11 * x12
         if w12 is not None:
             y0 = y0 + x11 * w12
-        return self.bin2x2(self.cl_prop.D(y0, 0))
+        return self.cl_prop.D(y0, 0)
 
     def gF1(self, x, y):
-        # y arrives at detector resolution (after gF0). Lift to dense grid via
-        # B^T before propagating backward; then proceed exactly as in RecNFP.
-        y0 = self.bin2x2_adj(y)
+        # y arrives on the dense grid (gF0 returns dense); no B^T lifting.
         x = self.apply_F_from(x, 2)
         x11, x12 = x
-        y12 = self.cl_prop.DT(y0, 0)
+        y12 = self.cl_prop.DT(y, 0)
         y11 = cp.sum(y12 * cp.conj(x12), axis=0)
         y12 = y12 * cp.conj(x11)
         return y11, y12
@@ -559,10 +574,12 @@ class RecNFP2x:
                 self.table.to_csv(name, index=False)
 
     def gen_sqrt_data(self, vars, out):
+        # Synthetic detector amplitudes are sqrt of the binned dense intensity,
+        # matching the F0 forward model.
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, pos, prb, proj):
             self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
-            y = self.apply_F_from(x, 1)
-            out[:] = cp.abs(y)
+            E = self.apply_F_from(x, 1)
+            out[:] = cp.sqrt(self.bin2x2(reprod(E, E)) + self._EPS)
         _gen_data(self, out, vars['pos'], vars['prb'], vars['proj'])

@@ -79,13 +79,14 @@ class RecNFP:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
-        shift_type = getattr(self, 'shift_type', 'cubic')
-        if shift_type == 'fft':
-            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
-        elif shift_type == 'cubic':
-            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype)
+        if self.shift_type == 'fft':
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj,
+                                     self.obj_dtype, symmetric=self.shift_symmetric)
+        elif self.shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj,
+                                  self.obj_dtype, symmetric=self.shift_symmetric)
         else:
-            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {self.shift_type!r}")
 
         self.alloc_arrays()
 
@@ -452,9 +453,12 @@ class RecNFP:
         c = self._tiled_coeff(x32, n)
         m = cp.ones(n, dtype='float32')
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
-        y32 = cp.zeros([self.nzobj, self.nobj], dtype=self.obj_dtype)
-        y32[:] = cp.sum(Deltapsi, axis=0)
-        y32[:] = self.cl_shift.coeff(y32)
+        # Deltapsi lives on the coefficient grid (nzpsi_eff, npsi_eff): same
+        # as (nzobj, nobj) for the default cubic and for ShiftFFT, but 2×
+        # bigger for cubic Shift(symmetric=True). Allocate the sum on that
+        # grid, then let coeff() fold-and-prefilter it down to (nzobj, nobj).
+        y32 = cp.sum(Deltapsi, axis=0)             # [nzpsi_eff, npsi_eff]
+        y32 = self.cl_shift.coeff(y32)             # → [nzobj, nobj] (shape-polymorphic)
         return [y21, y32, y33]
 
     @timer

@@ -91,14 +91,16 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        shift_type = getattr(self, 'shift_type', 'cubic')
-        if shift_type == 'fft':
+        if self.shift_type == 'fft':
             self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj,
-                                     self.obj_dtype, self.nchunk)
-        elif shift_type == 'cubic':
-            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+                                     self.obj_dtype, self.nchunk,
+                                     symmetric=self.shift_symmetric)
+        elif self.shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj,
+                                  self.obj_dtype, self.nchunk,
+                                  symmetric=self.shift_symmetric)
         else:
-            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {self.shift_type!r}")
         if self.lam_laplacian > 0:
             self.cl_lap_term = LaplacianTerm(self.lam_laplacian, self.obj_size,
                                              self.local_nzobj, self.nobj, self.obj_dtype,
@@ -356,7 +358,18 @@ class Rec:
         def _gradients_cascade(self,gradproj,gradpos,gradprb,d,eff_demag,proj,pos,prb):
             self._eff_demag_chunk = eff_demag
             self.cl_shift.coeff_cache_reset()
-            gradproj[:] = 0
+            # dcurlySadjc produces gradients on the coefficient grid, which may
+            # be larger than gradproj (e.g. cl_shift.symmetric=True for cubic
+            # Shift makes the coeff grid 2× nzobj/nobj). Accumulate on that
+            # grid, then let coeff() fold-and-prefilter back to gradproj shape
+            # (coeff is shape-polymorphic when symmetric, identity for ShiftFFT).
+            acc_shape = (gradproj.shape[0],
+                         self.cl_shift.nzpsi_eff, self.cl_shift.npsi_eff)
+            if acc_shape == gradproj.shape:
+                gradproj[:] = 0
+                acc = gradproj
+            else:
+                acc = cp.zeros(acc_shape, dtype=self.obj_dtype)
             for k in range(self.ndist):
                 self._dist_idx = k
                 x = [prb[k], proj, pos[:, k]]
@@ -364,10 +377,11 @@ class Rec:
                 for id in range(len(self.gF)):
                     y = self.gF[id](x, y)
                 gradprb[k]    += y[0] * self.rho_sq['prb']
-                gradproj      += y[1] * self.rho_sq['obj']
+                acc           += y[1] * self.rho_sq['obj']
                 gradpos[:, k]  = y[2] * self.rho_sq['pos']
             # gF3 returns un-coeff'd Deltapsi per dist; apply coeff once on the sum.
-            gradproj[:] = self.cl_shift.coeff(gradproj)
+            # In symmetric mode this also folds the big-grid acc back to gradproj's shape.
+            gradproj[:] = self.cl_shift.coeff(acc)
 
         _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],
                            self.data,self.eff_demagnifications,

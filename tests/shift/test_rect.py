@@ -1,10 +1,16 @@
-"""Visual comparison: shift a centered rectangle via cubic-spline vs FFT.
+"""Visual comparison: shift a centered rectangle through all four shift modes.
 
-The rectangle is a sharp-edged step function — band-unlimited content that
-exposes the difference between local cubic interpolation (cubic.Shift) and
-band-limited sinc interpolation (ShiftFFT, mirror-padded to 2× grid). The
-FFT method exhibits Gibbs ringing around the sharp edges; cubic does not.
-Rows: input, cubic, fft, |fft − cubic|. Columns: increasing shift magnitudes.
+Compares cubic-spline and FFT shifts, each in both symmetric=False (unpadded,
+periodic BC) and symmetric=True (mirror-padded to 2× grid) flavors. The
+rectangle is a sharp-edged step function with 4 quadrant values, so internal
+discontinuities are visible too. Across columns: small / medium / large shifts.
+
+Rows:
+  0: input
+  1: cubic, symmetric=False  — current default; FFT prefilter assumes periodic
+  2: cubic, symmetric=True   — mirror-pad + prefilter on 2× grid
+  3: fft,   symmetric=False  — raw FFT shift, periodic wrap-around on big shifts
+  4: fft,   symmetric=True   — current ShiftFFT default; mirror-pad to 2× grid
 """
 
 import argparse
@@ -26,13 +32,11 @@ def make_rectangle(n, half_size=12, smooth=0.0):
     yy, xx = np.mgrid[0:n, 0:n]
     cy = cx = n // 2
     img = np.zeros((n, n), dtype='float32')
-    # 4 quadrants of the rectangle, each (half_size × half_size)
     quadrants = [
-        # (y_slice, x_slice, value)
-        (slice(cy - half_size, cy            ), slice(cx - half_size, cx            ), 0.25),  # top-left
-        (slice(cy - half_size, cy            ), slice(cx,             cx + half_size), 0.50),  # top-right
-        (slice(cy,             cy + half_size), slice(cx - half_size, cx            ), 0.75),  # bottom-left
-        (slice(cy,             cy + half_size), slice(cx,             cx + half_size), 1.00),  # bottom-right
+        (slice(cy - half_size, cy            ), slice(cx - half_size, cx            ), 0.25),
+        (slice(cy - half_size, cy            ), slice(cx,             cx + half_size), 0.50),
+        (slice(cy,             cy + half_size), slice(cx - half_size, cx            ), 0.75),
+        (slice(cy,             cy + half_size), slice(cx,             cx + half_size), 1.00),
     ]
     for ys, xs, v in quadrants:
         img[ys, xs] = v
@@ -45,8 +49,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smooth', type=float, default=0.0,
                         help='Gaussian-blur sigma applied to rectangle edges '
-                             '(0 = sharp). Try values like 1.0, 2.0, 4.0 to see '
-                             'FFT Gibbs ringing fade as the input becomes band-limited.')
+                             '(0 = sharp). Try 1.0, 2.0, 4.0 to see FFT Gibbs '
+                             'ringing fade as the input becomes band-limited.')
     parser.add_argument('--half-size', type=int, default=14,
                         help='Half side length of the rectangle.')
     parser.add_argument('--n', type=int, default=96,
@@ -57,43 +61,45 @@ def main():
     img = make_rectangle(n, half_size=args.half_size, smooth=args.smooth)
     arr_gpu = cp.asarray(img)[cp.newaxis]   # [1, n, n]
 
-    cubic = Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64')
-    fft_  = ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64')
+    # Four shift operators — same input, output and grid sizes, just different
+    # backends and symmetric-padding choices.
+    methods = [
+        ('cubic, sym=False', Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=False)),
+        ('cubic, sym=True',  Shift   (n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=True )),
+        ('fft,   sym=False', ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=False)),
+        ('fft,   sym=True',  ShiftFFT(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64', symmetric=True )),
+    ]
 
     shifts = [(2.5, -1.5), (8.7, -6.3), (28.0, -25.0)]
     m = cp.ones(1, dtype='float32')
 
-    nrows, ncols = 4, len(shifts)
+    nrows = 1 + len(methods)              # input + one row per method
+    ncols = len(shifts)
     fig, axs = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows))
     if ncols == 1:
         axs = axs[:, None]
 
+    vmin, vmax = -0.2, 1.2
     for col, (ry, rx) in enumerate(shifts):
         r = cp.asarray([[ry, rx]], dtype='float32')
-        cub = cubic.curlyS(arr_gpu, r, m)[0].get()
-        ff  = fft_ .curlyS(arr_gpu, r, m)[0].get()
 
-        vmin, vmax = -0.2, 1.2
-        for row, (title, data) in enumerate([
-            (f'input',                                  img.real),
-            (f'cubic   (ry={ry}, rx={rx})',             cub.real),
-            (f'fft',                                    ff.real),
-        ]):
-            ax = axs[row, col]
-            im = ax.imshow(data, cmap='gray', vmin=vmin, vmax=vmax)
-            ax.set_title(title, fontsize=10)
-            ax.set_xticks([]); ax.set_yticks([])
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
-        # difference: |fft - cubic|
-        diff = np.abs(ff.real - cub.real)
-        ax = axs[3, col]
-        im = ax.imshow(diff, cmap='hot', vmin=0, vmax=0.5)
-        ax.set_title(f'|fft − cubic|  max={diff.max():.2f}', fontsize=10)
+        # Row 0: input (same in every column — repeated for context next to its shift).
+        ax = axs[0, col]
+        im = ax.imshow(img.real, cmap='gray', vmin=vmin, vmax=vmax)
+        ax.set_title(f'input  (ry={ry}, rx={rx})', fontsize=10)
         ax.set_xticks([]); ax.set_yticks([])
         fig.colorbar(im, ax=ax, fraction=0.046)
 
-    plt.suptitle(f'rectangle shift  (half_size={args.half_size}, smooth={args.smooth})',
+        # Rows 1..4: one per method.
+        for row, (label, op) in enumerate(methods, start=1):
+            out = op.curlyS(arr_gpu, r, m)[0].get().real
+            ax = axs[row, col]
+            im = ax.imshow(out, cmap='gray', vmin=vmin, vmax=vmax)
+            ax.set_title(label, fontsize=10)
+            ax.set_xticks([]); ax.set_yticks([])
+            fig.colorbar(im, ax=ax, fraction=0.046)
+
+    plt.suptitle(f'rectangle shift  (n={n}, half_size={args.half_size}, smooth={args.smooth})',
                  fontsize=12, y=1.0)
     plt.tight_layout()
     suffix = f'_smooth{args.smooth:g}' if args.smooth > 0 else '_sharp'
@@ -101,9 +107,13 @@ def main():
     plt.savefig(out_png, dpi=110)
     print(f"Saved figure: {out_png}")
     print()
-    print("Expected:")
-    print("  - cubic: clean edges (mirror BC, whole-sample symmetric).")
-    print("  - fft: Gibbs ringing around every step edge; no wrap-around (mirror-pad to 2× grid).")
+    print("Expected differences:")
+    print("  - cubic sym=False vs sym=True: tiny near-boundary differences (the")
+    print("    mirror-padded prefilter fixes wrong coefficients at the object edge).")
+    print("  - fft sym=False, large shift: visible periodic wrap-around (rectangle")
+    print("    re-appears on the opposite side). sym=True eliminates the wrap.")
+    print("  - fft (either sym): Gibbs ringing around every step edge of the")
+    print("    rectangle; cubic does not ring.")
 
 
 if __name__ == '__main__':

@@ -47,6 +47,19 @@ def parse_args(config_file):
         args.method = cfg.getint("method", fallback=0)
         args.start_method = cfg.getint("start_method", fallback=1)
         args.shift_type = cfg.get("shift_type", fallback="cubic").strip().lower()
+        # shift_symmetric: explicit True/False, or absent → defaults per
+        # shift_type (ShiftFFT padded, cubic Shift unpadded). Always resolved
+        # to a bool here so call sites can pass symmetric=args.shift_symmetric
+        # without any None-handling.
+        _sym = cfg.get("shift_symmetric", fallback="").strip().lower()
+        if _sym == "":
+            args.shift_symmetric = (args.shift_type == "fft")
+        elif _sym in ("true", "1", "yes", "on"):
+            args.shift_symmetric = True
+        elif _sym in ("false", "0", "no", "off"):
+            args.shift_symmetric = False
+        else:
+            raise ValueError(f"shift_symmetric must be true/false (or empty), got {_sym!r}")
         _pos_chk            = cfg.get("pos_checkpoint", fallback=None)
         args.pos_checkpoint = os.path.join(_path, _pos_chk) if _pos_chk else None
         _prb                = cfg.get("prb_file", fallback=None)

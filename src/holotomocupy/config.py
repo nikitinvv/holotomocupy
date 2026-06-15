@@ -94,6 +94,8 @@ def parse_args_step0(config_file):
         args.error_step      = cfg.getint("error_step",      fallback=32)
         args.rho         = [float(x.strip()) for x in cfg.get("rho").split(",") if x.strip()]
         args.log_level   = cfg.get("log_level",   fallback="INFO")
+        args.shift_type  = cfg.get("shift_type", fallback="cubic").strip().lower()
+        args.shift_symmetric = cfg.getboolean("shift_symmetric", fallback=False)
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
 
@@ -120,6 +122,8 @@ def parse_args_step0_nx(config_file):
         args.error_step      = cfg.getint("error_step",      fallback=32)
         args.rho      = [float(x.strip()) for x in cfg.get("rho").split(",") if x.strip()]
         args.log_level = cfg.get("log_level", fallback="INFO")
+        args.shift_type = cfg.get("shift_type", fallback="cubic").strip().lower()
+        args.shift_symmetric = cfg.getboolean("shift_symmetric", fallback=False)
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
 

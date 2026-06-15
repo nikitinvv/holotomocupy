@@ -3,16 +3,19 @@
 Sibling of :mod:`rec_nfp_mpi`: same MPI parallelisation, same BH machinery,
 same cascade structure. The difference is that prb and proj live on a grid
 twice as fine as the detector (and twice as fine as the user-facing object
-grid). A real detector integrates *intensity* over the pixel area, so the
-2×2 bin acts on |E|² and the loss is
+grid), and the loss compares *intensities* directly (no sqrt) at detector
+resolution:
 
-    L = (1/N) Σ_θ ‖ sqrt( B(|E_θ|²) ) − d_θ ‖²,
+    L = (1/N) Σ_θ ‖ B(|E_θ|²) − I_θ ‖²,
     E_θ = D( P · exp(i · S_{2r_θ} ψ) )                       (dense field)
-    B(I)[i, j] = (1/4) · Σ_{a,b ∈ {0,1}} I[2i+a, 2j+b]      (intensity bin)
+    B(J)[i, j] = (1/4) · Σ_{a,b ∈ {0,1}} J[2i+a, 2j+b]      (intensity bin)
 
-i.e. *intensity-bin-then-sqrt*, not field-bin-then-magnitude. The bin
-therefore lives inside F0; F1 / F2 / F3 stay in the dense complex domain
-and the rest of the cascade is structurally identical to ``RecNFP``.
+That is, the 2×2 bin acts on |E|² (incoherent intensity averaging within a
+detector cell), and the residual is taken in intensity space. Convention:
+``vars['data']`` (a.k.a. ``self.data``) holds the measured *intensity*
+I_θ — caller must NOT take a sqrt before assigning it. The bin lives
+inside F0; F1 / F2 / F3 stay in the dense complex domain and are
+structurally identical to ``RecNFP``.
 
 Sizes (with user-facing detector dims n, nz and object dims nobj, nzobj):
     prb      : (2·nz,    2·n)        — dense
@@ -305,56 +308,46 @@ class RecNFP2x:
             x = self.F[k](x)
         return x
 
-    ####### F0: ‖ sqrt(B(|E|²)) − d ‖² / data_size  (physical detector model)
+    ####### F0: ‖ B(|E|²) − I ‖² / data_size   (intensity-space residual)
     # E is the dense complex field (the F1 output, shape (·, 2nz, 2n));
-    # d is the detector-resolution measured amplitude (shape (·, nz, n)).
+    # the second argument is the measured INTENSITY I (shape (·, nz, n)) —
+    # callers must NOT take sqrt before filling self.data.
     # Quantities used throughout (all live on the detector grid):
-    #     I = B(|E|²),   A = sqrt(I + eps),   res = 1 − d/A,   d/A = d0
-    # eps avoids 0/0 in the rare case the predicted intensity is exactly
-    # zero; in practice A > 0 strictly because |prb|·|exp(iSψ)| > 0.
-
-    _EPS = np.float32(1e-30)
+    #     I_pred = B(|E|²),    r = I_pred − I        (residual)
+    #     BEV    = B(reprod(E, V)),   BVW = B(reprod(V, W))
 
     def F0(self, x, d):
-        I = self.bin2x2(reprod(x, x))
-        A = cp.sqrt(I + self._EPS)
-        diff = A - d
-        return np.float32(1 / self.data_size) * cp.sum(diff * diff)
+        r = self.bin2x2(reprod(x, x)) - d
+        return np.float32(1 / self.data_size) * cp.sum(r * r)
 
     def dF0(self, x, y, d, return_x=False):
-        # dL/dE · y  =  (2/N) Σ_{ij} (1 − d/A) · B(reprod(E, y))[i,j]
-        I = self.bin2x2(reprod(x, x))
-        A = cp.sqrt(I + self._EPS)
+        # dL/dE · y  =  (4/N) Σ_{ij} r · B(reprod(E, y))
+        r   = self.bin2x2(reprod(x, x)) - d
         BEV = self.bin2x2(reprod(x, y))
-        return np.float32(2 / self.data_size) * cp.sum((1 - d / A) * BEV)
+        return np.float32(4 / self.data_size) * cp.sum(r * BEV)
 
     def d2F_dF0(self, x, y, z, w, d):
         # d²L/dE² (y, z) + dL/dE · w, all reduced through B to the small grid.
         # Per detector pixel:
-        #   v = (1 − d/A)·B(reprod(y,z))
-        #     + (d/A)   · (B(reprod(E,y))/A) · (B(reprod(E,z))/A)
-        #     + [w]      (1 − d/A) · B(reprod(E, w))
-        I = self.bin2x2(reprod(x, x))
-        A = cp.sqrt(I + self._EPS)
+        #   v = 2·B(⟨E,y⟩)·B(⟨E,z⟩) + r·B(⟨y,z⟩)
+        #     + [w]   r·B(⟨E, w⟩)
+        # then ⟶ (4/N) Σ v.
+        r   = self.bin2x2(reprod(x, x)) - d
         BEV = self.bin2x2(reprod(x, y))
         BEW = self.bin2x2(reprod(x, z))
         BVW = self.bin2x2(reprod(y, z))
-        d0  = d / A
-        ll0 = 1 - d0
-        v = ll0 * BVW + d0 * (BEV / A) * (BEW / A)
+        v = 2 * BEV * BEW + r * BVW
         if w is not None:
             BEw = self.bin2x2(reprod(x, w))
-            v = v + ll0 * BEw
-        return np.float32(2 / self.data_size) * cp.sum(v)
+            v = v + r * BEw
+        return np.float32(4 / self.data_size) * cp.sum(v)
 
     def gF0(self, x, y):
         # Codebase convention: gradient = 2 ∂L/∂Ē.
-        # gF0 = (1/(2N)) · E · upsample_2x(1 − d/A).
+        # gF0 = (1/N) · E · upsample_2x(I_pred − I).
         E = self.apply_F_from(x, 1)
-        I = self.bin2x2(reprod(E, E))
-        A = cp.sqrt(I + self._EPS)
-        res_dense = self.upsample_2x(1 - y / A)
-        return np.float32(1 / (2 * self.data_size)) * E * res_dense
+        r_dense = self.upsample_2x(self.bin2x2(reprod(E, E)) - y)
+        return np.float32(1 / self.data_size) * E * r_dense
 
     ####### F1: (prb, exp_proj) → D(prb · exp_proj)   (dense complex wave)
     # The bin lives in F0; F1 / F2 / F3 are identical to RecNFP modulo the
@@ -573,13 +566,14 @@ class RecNFP2x:
                 os.makedirs(os.path.dirname(name), exist_ok=True)
                 self.table.to_csv(name, index=False)
 
-    def gen_sqrt_data(self, vars, out):
-        # Synthetic detector amplitudes are sqrt of the binned dense intensity,
-        # matching the F0 forward model.
+    def gen_data(self, vars, out):
+        # Synthetic measured INTENSITY = B(|E|²), matching the F0 model.
+        # Named gen_data (not gen_sqrt_data) so the semantic difference vs.
+        # the amplitude-residual sibling modules is impossible to miss.
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, pos, prb, proj):
             self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
             E = self.apply_F_from(x, 1)
-            out[:] = cp.sqrt(self.bin2x2(reprod(E, E)) + self._EPS)
+            out[:] = self.bin2x2(reprod(E, E))
         _gen_data(self, out, vars['pos'], vars['prb'], vars['proj'])

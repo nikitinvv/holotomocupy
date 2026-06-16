@@ -53,7 +53,8 @@ _EPT_FPB: dict = {
     1024: (16, 8),
     2048: (16, 8),
     4096: (32, 4),
-    8192: (64, 2),
+    8192: (32, 1),
+    16384: (32, 1),
 }
 _WARP     = 32
 _MAX_SMEM = cp.cuda.Device(0).attributes['MaxSharedMemoryPerBlockOptin']

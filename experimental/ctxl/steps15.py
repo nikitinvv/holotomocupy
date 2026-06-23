@@ -182,8 +182,7 @@ stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
 # Auto-detect number of flat / dark frames per batch.
 #   refs are named  refNNNN_IIII.edf   (NNNN = angle index where the batch was
 #                   taken, IIII = image-within-batch index; the first batch is
-#                   at angle 0000 → count its images for the per-batch size)
-#   darks are named darkIIII.edf
+#                   at angle 0000 → count its ima``
 nref  = len(glob.glob(f'{dname0}/ref0000_[0-9]*.edf'))
 ndark = len(glob.glob(f'{dname0}/dark[0-9]*.edf'))
 

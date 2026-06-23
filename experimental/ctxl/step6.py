@@ -17,7 +17,7 @@ import sys
 import h5py
 from mpi4py import MPI
 from holotomocupy.rec_mpi import Rec
-from holotomocupy.config import parse_args, read_nx_geometry
+from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.reader import Reader, find_latest_checkpoint
 from holotomocupy.writer import Writer
@@ -51,33 +51,14 @@ writer = Writer(
     args.ndist, args.nz, args.n, args.obj_dtype,
 )
 
-# Physics parameters. Default source is the converted /exchange/* HDF5 archive
-# (via Reader). When `nx_file` is set in the config the geometry is overridden
-# from the NXtomo file instead, which is the source of truth for ID16A data.
-if getattr(args, 'nx_file', None):
-    nx_geom = read_nx_geometry(args.nx_file)
-    args.energy                  = nx_geom['energy']
-    args.focustodetectordistance = nx_geom['focustodetectordistance']
-    args.z1                      = nx_geom['z1_all']
-    # NX stores the physical detector pixel (already at hardware binning).
-    # When the run requests additional software binning (args.bin > 0), scale
-    # by 2**bin to match Reader.__init__'s convention.
-    args.detector_pixelsize      = nx_geom['detector_pixelsize'] * (2 ** args.bin)
-    # theta from NX rotation_angle, evenly subsampled to args.ntheta and
-    # signed to match the Reader convention (-deg * pi/180).
-    rot_deg     = nx_geom['rotation_angle_deg']
-    nframes     = rot_deg.size
-    step        = nframes / args.ntheta
-    sub_ids     = np.arange(args.start_theta, nframes, step)[:args.ntheta].astype('int')
-    args.theta  = (-rot_deg[sub_ids] / 180.0 * np.pi).astype('float64')
-    if comm.Get_rank() == 0:
-        logger.info(f'geometry from NX        = {args.nx_file}  (×2**{args.bin} bin on detector_pixelsize)')
-else:
-    args.energy                  = args.energy if args.energy is not None else reader.energy
-    args.focustodetectordistance = reader.focustodetectordistance
-    args.z1                      = reader.z1
-    args.detector_pixelsize      = reader.detector_pixelsize
-    args.theta                   = reader.theta
+# Physics parameters come from the converted /exchange/* HDF5 archive (via
+# Reader). steps15.py is the single source of truth — it bakes binning and any
+# preprocessing into what it writes, so reconstruction never re-reads NX.
+args.energy                  = args.energy if args.energy is not None else reader.energy
+args.focustodetectordistance = reader.focustodetectordistance
+args.z1                      = reader.z1
+args.detector_pixelsize      = reader.detector_pixelsize
+args.theta                   = reader.theta
 
 # --- Print run summary (rank 0 only) ------------------------------------
 if comm.Get_rank() == 0:

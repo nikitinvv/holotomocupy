@@ -114,15 +114,12 @@ def find_angle(fname):
 path_out = args.path_out if args.path_out else path.rstrip('/') + '_rec'
 file_out = f'{pfile}.h5'
 
-# Auto-detect ntheta from ref filenames
 dname0 = f'{path}/{pfile}_1_'
-ntheta = max(int(f.split('_')[-1].split('.')[0])
-             for f in glob.glob(f'{dname0}/ref0000_*.edf'))
 
 # Auto-extract geometry. With `nx_file` set in the config, all of energy / z1 /
-# focustodetectordistance / detector_pixelsize come from one NXtomo file (the
-# `nxtomomill_edf2nx` output). Otherwise fall back to reading one HDF5 scan
-# file per distance directory.
+# focustodetectordistance / detector_pixelsize / ntheta / theta come from one
+# NXtomo file (the `nxtomomill_edf2nx` output). Otherwise fall back to reading
+# one HDF5 scan file per distance directory + ref0000_* glob + find_angle.
 if args.nx_file:
     nx_geom = read_nx_geometry(args.nx_file)
     energy                  = nx_geom['energy']
@@ -131,9 +128,23 @@ if args.nx_file:
     focustodetectordistance = nx_geom['focustodetectordistance']
     sx0                     = None   # NX exposes z1 directly; sx0 is not needed
     ndist                   = int(z1.size)
+
+    # Drop the trailing return-to-start frame if the scan ends at the same
+    # angle it began with (ID16A nxtomomill_edf2nx writes one such frame).
+    nx_theta_deg = nx_geom['rotation_angle_deg']
+    if nx_theta_deg.size > 1 and abs(nx_theta_deg[-1] - nx_theta_deg[0]) < 0.05:
+        nx_theta_deg = nx_theta_deg[:-1]
+    ntheta = int(nx_theta_deg.size)
+
     if rank == 0:
         logger.info(f'geometry from NX        = {args.nx_file}')
 else:
+    nx_theta_deg = None
+
+    # Auto-detect ntheta from ref0000 filenames (legacy convention).
+    ntheta = max(int(f.split('_')[-1].split('.')[0])
+                 for f in glob.glob(f'{dname0}/ref0000_*.edf'))
+
     dirs    = sorted(glob.glob(f'{path}/{pfile}_[0-9]_/'))
     h5files = [sorted(glob.glob(f'{d}/*.h5'))[0] for d in dirs]
     ndist   = len(h5files)
@@ -162,9 +173,13 @@ n = args.n if args.n is not None else n0
 sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
 stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
 
-# Auto-detect number of flat / dark frames by counting files at angle 0
-nref  = len(glob.glob(f'{dname0}/ref*_0000.*'))
-ndark = len(glob.glob(f'{dname0}/darkend*.*'))
+# Auto-detect number of flat / dark frames per batch.
+#   refs are named  refNNNN_IIII.edf   (NNNN = angle index where the batch was
+#                   taken, IIII = image-within-batch index; the first batch is
+#                   at angle 0000 → count its images for the per-batch size)
+#   darks are named darkIIII.edf
+nref  = len(glob.glob(f'{dname0}/ref0000_[0-9]*.edf'))
+ndark = len(glob.glob(f'{dname0}/dark[0-9]*.edf'))
 
 # Stitched object size (same at all steps that use it: 4, 5), overrideable via --nobj
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
@@ -207,14 +222,17 @@ if start_step > 1:
 else:
     logger.info('Step 1: converting EDF files to HDF5...')
 
-    # Angles: each rank reads its own subset in parallel, then rank 0 gathers
-    local_fnames = [f'{dname0}/{pfile}_1_{id:04}.edf' for id in local_ids]
-    with ThreadPoolExecutor() as pool:
-        local_theta = np.array(list(pool.map(find_angle, local_fnames)), dtype='float32')
-
-    all_theta_parts = comm.gather(local_theta, root=0)
-    if rank == 0:
-        theta_vals = np.concatenate(all_theta_parts)
+    # Angles: either copy from NX, or parse each EDF header in parallel.
+    if nx_theta_deg is not None:
+        if rank == 0:
+            theta_vals = nx_theta_deg[:ntheta].astype('float32')
+    else:
+        local_fnames = [f'{dname0}/{pfile}_1_{id:04}.edf' for id in local_ids]
+        with ThreadPoolExecutor() as pool:
+            local_theta = np.array(list(pool.map(find_angle, local_fnames)), dtype='float32')
+        all_theta_parts = comm.gather(local_theta, root=0)
+        if rank == 0:
+            theta_vals = np.concatenate(all_theta_parts)
 
     with h5py.File(fpath, 'w', driver='mpio', comm=comm) as fid:
 
@@ -249,11 +267,15 @@ else:
             attrs_ds[local_start:local_end,  k] = attrs_all[local_start:local_end]
 
             if rank == 0:
+                # ID16A naming: refNNNN_IIII.edf where NNNN = angle index of the
+                # batch (0000 = before scan, {ntheta:04} = after scan) and
+                # IIII = image index within the batch (0..nref-1).
+                # Darks are named darkIIII.edf.
                 for id in range(nref):
-                    white0_ds[k][id] = fabio.open(f'{dname}/ref{id:04}_0000.edf').data[sty:endy, stx:endx]
-                    white1_ds[k][id] = fabio.open(f'{dname}/ref{id:04}_{ntheta:04}.edf').data[sty:endy, stx:endx]
+                    white0_ds[k][id] = fabio.open(f'{dname}/ref0000_{id:04}.edf').data[sty:endy, stx:endx]
+                    white1_ds[k][id] = fabio.open(f'{dname}/ref{ntheta:04}_{id:04}.edf').data[sty:endy, stx:endx]
                 for id in range(ndark):
-                    dark_ds[k][id]   = fabio.open(f'{dname}/darkend{id:04}.edf').data[sty:endy, stx:endx]
+                    dark_ds[k][id]   = fabio.open(f'{dname}/dark{id:04}.edf').data[sty:endy, stx:endx]
 
             norms = np.empty(len(local_ids), dtype='float64')
             for ii, id in enumerate(local_ids):

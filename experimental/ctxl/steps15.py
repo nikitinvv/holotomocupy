@@ -262,9 +262,13 @@ else:
             dname = f'{path}/{pfile}_{k + 1}_'
 
             shifts_all = np.loadtxt(f'{dname}/correct.txt',    dtype='float32')[:ntheta]
-            attrs_all  = np.loadtxt(f'{dname}/attributes.txt', dtype='float32')[:ntheta, :3]
             shifts_ds[local_start:local_end, k] = shifts_all[local_start:local_end]
-            attrs_ds[local_start:local_end,  k] = attrs_all[local_start:local_end]
+            # attributes.txt is optional — not used downstream; the /exchange/attrs
+            # dataset is left zero-initialised when the file is absent.
+            attrs_path = f'{dname}/attributes.txt'
+            if os.path.exists(attrs_path):
+                attrs_all = np.loadtxt(attrs_path, dtype='float32')[:ntheta, :3]
+                attrs_ds[local_start:local_end, k] = attrs_all[local_start:local_end]
 
             if rank == 0:
                 # ID16A naming: refNNNN_IIII.edf where NNNN = angle index of the

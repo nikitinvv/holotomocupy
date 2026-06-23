@@ -41,14 +41,21 @@ class Rec:
         #   linear_batch on vars['obj']:     3 obj-shape  (out + x + y)
         #   gradient_laplacian (inp_pad=4):  3 obj-shape + 4 obj-slabs from padding
         #                                    (only sized in when lam_laplacian > 0)
+        #   fwd_tomo / adj_tomo:             1 proj-tomo buffer + 1 obj-slab buffer
+        #                                    (proj-tomo is sliced along axis 1, so
+        #                                    the FULL ntheta axis sits in the buffer;
+        #                                    this dominates whenever ntheta is large)
         # (linear_batch on vars['proj'] is 3 proj-shape — dominated by hessian.)
         # Any new @gpu_batch caller with a bigger footprint must be added here.
-        obj_item   = np.dtype(self.obj_dtype).itemsize
-        obj_slab   = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
-        proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
-        obj_bytes  = self.nchunk * obj_slab
-        data_bytes = self.nchunk * self.ndist * self.nz    * self.n * 4
-        candidates = [3 * proj_bytes + data_bytes, 3 * obj_bytes]  # hessian, lin_obj
+        obj_item    = np.dtype(self.obj_dtype).itemsize
+        obj_slab    = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
+        proj_bytes  = self.nchunk * self.nzobj * self.nobj  * obj_item
+        obj_bytes   = self.nchunk * obj_slab
+        data_bytes  = self.nchunk * self.ndist * self.nz    * self.n * 4
+        # tomo: gradproj is (ntheta, local_nzobj, nobj) sliced on axis 1 → buffer
+        # holds the full ntheta axis per chunk. obj-slab buffer is the other half.
+        tomo_bytes  = self.ntheta * self.nchunk * self.nobj * obj_item + obj_bytes
+        candidates  = [3 * proj_bytes + data_bytes, 3 * obj_bytes, tomo_bytes]
         if self.lam_laplacian > 0:
             candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
         nbytes     = int(2.1 * max(candidates))                    # ×2 for double-buffering,10% extra for positions/eff_mag

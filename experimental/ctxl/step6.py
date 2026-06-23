@@ -59,7 +59,10 @@ if getattr(args, 'nx_file', None):
     args.energy                  = nx_geom['energy']
     args.focustodetectordistance = nx_geom['focustodetectordistance']
     args.z1                      = nx_geom['z1_all']
-    args.detector_pixelsize      = nx_geom['detector_pixelsize']
+    # NX stores the physical detector pixel (already at hardware binning).
+    # When the run requests additional software binning (args.bin > 0), scale
+    # by 2**bin to match Reader.__init__'s convention.
+    args.detector_pixelsize      = nx_geom['detector_pixelsize'] * (2 ** args.bin)
     # theta from NX rotation_angle, evenly subsampled to args.ntheta and
     # signed to match the Reader convention (-deg * pi/180).
     rot_deg     = nx_geom['rotation_angle_deg']
@@ -68,7 +71,7 @@ if getattr(args, 'nx_file', None):
     sub_ids     = np.arange(args.start_theta, nframes, step)[:args.ntheta].astype('int')
     args.theta  = (-rot_deg[sub_ids] / 180.0 * np.pi).astype('float64')
     if comm.Get_rank() == 0:
-        logger.info(f'geometry from NX        = {args.nx_file}')
+        logger.info(f'geometry from NX        = {args.nx_file}  (×2**{args.bin} bin on detector_pixelsize)')
 else:
     args.energy                  = args.energy if args.energy is not None else reader.energy
     args.focustodetectordistance = reader.focustodetectordistance

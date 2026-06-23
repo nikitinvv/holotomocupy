@@ -58,6 +58,12 @@ cp.cuda.Device(rank % ngpus).use()
 # Helpers — read geometry from HDF5 scan files
 # ---------------------------------------------------------------------------
 
+def extra_bin(data):
+    """2x2 binning of a 2D array (averages each 2x2 block)."""
+    h, w = data.shape
+    return data.reshape(h // 2, 2, w // 2, 2).astype('float32').mean(axis=(1, 3)).astype(data.dtype)
+
+
 def _read_h5_field(h5path, suffix):
     """Return the value of the first dataset whose path ends with `suffix`."""
     result = {}
@@ -168,7 +174,7 @@ shrink = shrink_nd[0]  # first-angle cumulative values, used for module-level ef
 eff_magnifications = norm_magnifications / (1 + shrink)
 
 # n from actual EDF file size (images are n×n), overrideable via --n
-n0, n1 = fabio.open(f'{dname0}/ref0000_0000.edf').data.shape
+n0, n1 = extra_bin(fabio.open(f'{dname0}/ref0000_0000.edf').data).shape
 n = args.n if args.n is not None else n0
 sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
 stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
@@ -276,15 +282,15 @@ else:
                 # IIII = image index within the batch (0..nref-1).
                 # Darks are named darkIIII.edf.
                 for id in range(nref):
-                    white0_ds[k][id] = fabio.open(f'{dname}/ref0000_{id:04}.edf').data[sty:endy, stx:endx]
-                    white1_ds[k][id] = fabio.open(f'{dname}/ref{ntheta:04}_{id:04}.edf').data[sty:endy, stx:endx]
+                    white0_ds[k][id] = extra_bin(fabio.open(f'{dname}/ref0000_{id:04}.edf').data)[sty:endy, stx:endx]
+                    white1_ds[k][id] = extra_bin(fabio.open(f'{dname}/ref{ntheta:04}_{id:04}.edf').data)[sty:endy, stx:endx]
                 for id in range(ndark):
-                    dark_ds[k][id]   = fabio.open(f'{dname}/dark{id:04}.edf').data[sty:endy, stx:endx]
+                    dark_ds[k][id]   = extra_bin(fabio.open(f'{dname}/dark{id:04}.edf').data)[sty:endy, stx:endx]
 
             norms = np.empty(len(local_ids), dtype='float64')
             for ii, id in enumerate(local_ids):
                 fname = f'{dname}/{pfile}_{k + 1}_{id:04}.edf'
-                frame = fabio.open(fname).data[sty:endy, stx:endx]
+                frame = extra_bin(fabio.open(fname).data)[sty:endy, stx:endx]
                 data_ds[k][id] = frame
                 norms[ii] = np.linalg.norm(frame)
                 if ii%100==0:

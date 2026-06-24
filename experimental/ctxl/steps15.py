@@ -247,8 +247,6 @@ else:
         white1_ds = [fid.create_dataset(f'/exchange/data_white_end{k}',   shape=(nref,  n, n),  dtype='uint16') for k in range(ndist)]
         dark_ds   = [fid.create_dataset(f'/exchange/data_dark{k}',        shape=(ndark, n, n),  dtype='uint16') for k in range(ndist)]
         theta_ds  = fid.create_dataset('/exchange/theta',  shape=(ntheta, ndist), dtype='float32')
-        shifts_ds = fid.create_dataset('/exchange/shifts', shape=(ntheta, ndist, 2), dtype='float32')
-        attrs_ds  = fid.create_dataset('/exchange/attrs',  shape=(ntheta, ndist, 3), dtype='float32')
         vs_ds     = fid.create_dataset('/exchange/voxelsize',             shape=voxelsizes.shape, dtype='float32')
         z1_ds     = fid.create_dataset('/exchange/z1',                    shape=z1.shape,         dtype='float32')
         dpx_ds    = fid.create_dataset('/exchange/detector_pixelsize',    shape=(1,),             dtype='float32')
@@ -265,15 +263,6 @@ else:
 
         for k in range(ndist):
             dname = f'{path}/{pfile}_{k + 1}_'
-
-            shifts_all = np.loadtxt(f'{dname}/correct.txt',    dtype='float32')[:ntheta]
-            shifts_ds[local_start:local_end, k] = shifts_all[local_start:local_end]
-            # attributes.txt is optional — not used downstream; the /exchange/attrs
-            # dataset is left zero-initialised when the file is absent.
-            attrs_path = f'{dname}/attributes.txt'
-            if os.path.exists(attrs_path):
-                attrs_all = np.loadtxt(attrs_path, dtype='float32')[:ntheta, :3]
-                attrs_ds[local_start:local_end, k] = attrs_all[local_start:local_end]
 
             if rank == 0:
                 # ID16A naming: refNNNN_IIII.edf where NNNN = angle index of the
@@ -454,9 +443,13 @@ if rank == 0:
     else:
         logger.info('Step 3: combining shifts...')
 
-        logger.info(f'Step 3: reading shifts      from {fpath}  [/exchange/shifts]')
-        with h5py.File(fpath) as fid:
-            shifts = fid['/exchange/shifts'][:]   # [ntheta, ndist, 2]
+        # Read per-distance encoder displacements directly from the raw scan
+        # dirs (one correct.txt per distance, shape [ntheta, 2]).
+        shifts = np.empty([ntheta, ndist, 2], dtype='float32')
+        for k in range(ndist):
+            dname = f'{path}/{pfile}_{k + 1}_'
+            logger.info(f'Step 3: reading shifts      from {dname}/correct.txt')
+            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta]
 
         # --- Encoder (random) shifts → object-plane pixels ---
         # axis 2 is (y, x) in detector pixels; swap to (row, col) and convert

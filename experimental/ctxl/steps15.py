@@ -825,17 +825,22 @@ else:
             logger.info(f'step5 bin={bin}: mm={mm_fixed:.6f}  global_bg={global_bg:.6f}')
 
         pad8 = nobj_bin // 8
+        n_srdata_save = min(20, ntheta)
+        # Layout: distance-major, then angle. For ndist=6 and n_srdata_save=20
+        # the dataset holds 120 frames in order
+        #   [d0_a0..d0_a19, d1_a0..d1_a19, ..., d5_a0..d5_a19].
         with h5py.File(fpath_srdata, 'a', driver='mpio', comm=comm) as fid_srdata:
             srdata_ds = fid_srdata.create_dataset(
                 f'/exchange/srdata_bin{bin}',
-                shape=(ndist, nobj_bin, nobj_bin),
+                shape=(ndist * n_srdata_save, nobj_bin, nobj_bin),
                 dtype='float32',
             )
             with h5py.File(fpath) as fid:
                 for i, j in enumerate(local_ids):
                     _stitch(fid, srdata, j)
-                    if j == 0:
-                        srdata_ds[:] = srdata.get()
+                    if j < n_srdata_save:
+                        for k in range(ndist):
+                            srdata_ds[k * n_srdata_save + j] = srdata[k].get()
                     pj  = cp.array(srdata)
                     pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
                     phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)

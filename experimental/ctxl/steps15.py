@@ -200,7 +200,8 @@ if rank == 0:
                 (f'{sx0} m' if sx0 is not None else '(not read; NX gives z1 directly)'))
     logger.info(f'z1                      = {z1} m')
     logger.info(f'ndist={ndist}  n={n}  nobj={nobj}  nref={nref}  ndark={ndark}')
-    logger.info(f'shrink cumulative       = {[round(float(v), 6) for v in shrink]}')
+    logger.info(f'shrink_v cumulative     = {[round(float(s), 6) for s in shrink[:, 0]]}')
+    logger.info(f'shrink_h cumulative     = {[round(float(s), 6) for s in shrink[:, 1]]}')
     logger.debug(f'wavelength              = {wavelength} m')
     logger.debug(f'magnifications          = {magnifications}')
     logger.debug(f'voxelsizes              = {voxelsizes} m')
@@ -449,7 +450,7 @@ if rank == 0:
         for k in range(ndist):
             dname = f'{path}/{pfile}_{k + 1}_'
             logger.info(f'Step 3: reading shifts      from {dname}/correct.txt')
-            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta]
+            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta]/2.0
 
         # --- Encoder (random) shifts → object-plane pixels ---
         # axis 2 is (y, x) in detector pixels; swap to (row, col) and convert
@@ -482,7 +483,7 @@ if rank == 0:
             motion_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
         else:
             logger.info(f'Step 3: reading motion      from {_motion_path}')
-            raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
+            raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')/2.0
             motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
             motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 

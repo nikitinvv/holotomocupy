@@ -166,8 +166,11 @@ class Rec:
         self.etas["obj"] = etas_obj
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
-        self.shrink_nd = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
-        self.eff_demagnifications = cp.zeros((self.local_ntheta, self.ndist), dtype='float32')
+        # shrink_nd carries per-axis values along the last axis (0=y, 1=x).
+        # eff_demagnifications inherits the same shape; broadcast division
+        # against norm_magnifications happens in precalc/.
+        self.shrink_nd            = cp.zeros((self.local_ntheta, self.ndist, 2), dtype='float32')
+        self.eff_demagnifications = cp.zeros((self.local_ntheta, self.ndist, 2), dtype='float32')
     
     def BH(self, writer=None):
         vars  = self.vars
@@ -193,7 +196,9 @@ class Rec:
     def precalc(self, vars):
         """One-time setup at the start of BH: shrinkage, obj normalization,
         pos snapshot, initial proj from fwd_tomo + redist."""
-        self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
+        # shrink_nd: (local_ntheta, ndist, 2)  ;  norm_magnifications: (ndist,)
+        # eff_demag: (local_ntheta, ndist, 2)  — broadcast norm_mag over axes 0,2.
+        self.eff_demagnifications[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :, None])
 
         # normalize obj to work with normal operators (restored at BH exit)
         vars["obj"] /= self.norm_const
@@ -769,7 +774,7 @@ class Rec:
     def gen_sqrt_data(self, vars, out):
         """Generate synthetic data"""
 
-        self.eff_demagnifications[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :])
+        self.eff_demagnifications[:]  = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[None, :, None])
         vars["obj"] /= self.norm_const
         self.fwd_tomo(vars["obj"],out = self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])

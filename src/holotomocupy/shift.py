@@ -177,7 +177,7 @@ class Shift():
         g    = cp.empty([ntheta, self.nzpsi, self.npsi], dtype='complex64')
         c    = ascontig(c)
         r    = ascontig(r)
-        m    = ascontig(cp.asarray(m, dtype='float32'))
+        m    = ascontig(m)
         sback_kernel(
             (math.ceil(self.npsi / 32), math.ceil(self.nzpsi / 32), ntheta),
             (32, 32, 1),

@@ -43,24 +43,34 @@ def load_octave_text_mat(fpath, varname):
 
 
 def load_shrink_from_mats(path, pfile, ndist, ntheta):
-    """Build [ntheta, ndist] shrink array from per-distance shrink_list.mat files.
+    """Build [ntheta, ndist, 2] shrink array from per-distance shrink_list.mat files.
 
-    Each shrink_list.mat contains a (3,2) matrix; row 0 gives [h, v] incremental
-    shrink from the previous distance plane. The per-angle shrink for distance k at
-    angle j is linearly interpolated: cumulative[k] + increments[k] * j / ntheta.
+    Each shrink_list.mat contains a (3,2) matrix; row 0 gives the incremental
+    shrink from the previous distance plane as [h, v] (horizontal, vertical).
+    Returned axis 2 follows the (y, x) convention used elsewhere for r/m:
+        shrink_nd[..., 0] = vertical   (y, row) = shrink_list[0, 1]
+        shrink_nd[..., 1] = horizontal (x, col) = shrink_list[0, 0]
+
+    Per-angle ramp: shrink linearly grows from cumulative[k] at angle 0 to
+    cumulative[k] + increment[k] at angle ntheta — same as before, but applied
+    per axis independently.
+
     Returns a zero array if any mat file is missing.
     """
-    increments = []
+    inc_v = []  # vertical (y) — col 2 of MATLAB (col 1 zero-indexed)
+    inc_h = []  # horizontal (x) — col 1 of MATLAB (col 0 zero-indexed)
     for k in range(ndist):
         mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
         if not os.path.exists(mat_path):
             logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
-            return np.zeros((ntheta, ndist), dtype='float32')
+            return np.zeros((ntheta, ndist, 2), dtype='float32')
         sl = load_octave_text_mat(mat_path, 'shrink_list')
-        increments.append(float(sl[0, 0] + sl[0, 1]) / 2)
-    cumulative = np.concatenate([[0.0], np.cumsum(increments)])[:ndist]
-    j_frac = np.arange(ntheta) / ntheta
-    shrink_nd = cumulative[None, :] + np.array(increments)[None, :] * j_frac[:, None]
+        inc_h.append(float(sl[0, 0]))
+        inc_v.append(float(sl[0, 1]))
+    inc = np.stack([inc_v, inc_h], axis=-1)                                   # (ndist, 2)
+    cum = np.concatenate([np.zeros((1, 2)), np.cumsum(inc, axis=0)])[:ndist]  # (ndist, 2)
+    j_frac = (np.arange(ntheta) / ntheta).astype('float32')                    # (ntheta,)
+    shrink_nd = cum[None, :, :] + inc[None, :, :] * j_frac[:, None, None]      # (ntheta, ndist, 2)
     return shrink_nd.astype('float32')
 
 
@@ -224,19 +234,25 @@ class Reader:
         return out
 
     def read_shrink(self, out=None):
-        """Read [local_ntheta, ndist] shrink for this rank's theta-slice from HDF5.
+        """Read [local_ntheta, ndist, 2] shrink for this rank's theta-slice from HDF5.
 
-        Falls back to zeros if /exchange/shrink is not present (e.g. old files).
-        Writes into `out` if provided, otherwise returns a new array.
+        Axis 2 is (y, x) per the convention shared with r/m. Falls back to zeros
+        if /exchange/shrink is not present, OR upgrades a legacy 2D dataset by
+        broadcasting it to both axes.
         """
         local_ntheta = self.end_theta - self.st_theta
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if '/exchange/shrink' not in fid:
-                data = cp.zeros((local_ntheta, self.ndist), dtype='float32')
+                data = cp.zeros((local_ntheta, self.ndist, 2), dtype='float32')
             else:
-                data = cp.array(fid['/exchange/shrink'][
-                    self.ids[self.st_theta:self.end_theta], :self.ndist
-                ].astype('float32'))
+                raw = fid['/exchange/shrink']
+                sl = self.ids[self.st_theta:self.end_theta]
+                if raw.ndim == 3:
+                    data = cp.array(raw[sl, :self.ndist, :2].astype('float32'))
+                else:
+                    # Legacy file with single scalar shrink per (j, k); broadcast.
+                    flat = cp.array(raw[sl, :self.ndist].astype('float32'))
+                    data = cp.broadcast_to(flat[..., None], (local_ntheta, self.ndist, 2)).copy()
         if out is not None:
             out[:] = data
         else:

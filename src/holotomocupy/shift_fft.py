@@ -1,20 +1,34 @@
-"""FFT-based shift operator (assumes magnification m = 1).
+"""FFT-based shift operator with chirp-z (Bluestein) magnification.
 
 Drop-in alternative for `holotomocupy.shift.Shift`: same public API
 (`coeff`, `S`, `Sadj`, `curlyS`, `curlySc`, `dcurlySc`, `dcurlySadjc`,
 `d2curlySc`, plus the `coeff_cached`/`_reset`/`_stats` triad), but every
-shift is implemented via the Fourier shift theorem instead of cubic
-B-spline interpolation.
+shift is implemented via the Fourier shift theorem (m=1) or a separable
+chirp-z transform (arbitrary per-projection m).
 
-Runs the shift directly on the input (nzpsi × npsi) grid — periodic BC, so
-the input should vanish near the boundary or shifts should stay well inside
-the grid; otherwise the periodic wrap shows up in the result.
+When all `m[t] == 1`, `S` / `Sadj` take the fast path: a single batched
+2-D FFT pair on the input grid with a separable linear-phase multiply.
+When any `m[t] != 1`, the chirp-z path runs per axis — one Bluestein
+correlation each, evaluating the Fourier interpolant at the m-scaled,
+r-shifted output positions. The chirp-z path matches the `s_kernel`
+convention `x_in = m·(tx - (n-1)/2) - r_x + (npsi-1)/2`.
 
-The pad-offset convention `x_in = tx - rx + (npsi - n)/2` of the cubic
-kernel is folded into the per-theta phase, so the output is the top-left
-`[:nz, :n]` slice of the inverse FFT — no extra cropping arithmetic.
+The Bluestein convolution length L is the next power of two of
+`N_in + N_out - 1`, so chirp-z costs ≈ 3 batched FFTs of length L per
+axis (vs 1 of length N for the m=1 fast path).
+
+Runs the shift directly on the input (nzpsi × npsi) grid — periodic BC,
+so the input should vanish near the boundary or shifts should stay well
+inside the grid; otherwise the periodic wrap shows up in the result.
 
 `coeff(psi)` is the identity: FFT shifts need no B-spline prefilter.
+The derivative methods (`dcurlySc`, `dcurlySadjc`, `d2curlySc`) also
+dispatch automatically: at `m=1` they use the existing fast-path
+algebra; at `m≠1` they exploit the linearity of `S` in its input —
+e.g. `dcurlySc = S(c1 + Δry·∂c/∂y + Δrx·∂c/∂x, r, m)` with the
+spatial derivatives computed via FFT differentiation — then call
+the same `S`/`Sadj` chirp-z path used by the forward operator.
+
 `Sback`/`curlySback`/`coeff_back` (used for the Paganin initial guess in
 `rec_mpi`) are intentionally omitted; callers needing them should hold a
 `Shift` instance alongside.
@@ -22,6 +36,7 @@ kernel is folded into the per-theta phase, so the output is the top-left
 
 import cupy as cp
 import cupyx.scipy.fft as cufft
+from .utils import redot
 
 
 def ascontig(x):
@@ -109,10 +124,46 @@ class ShiftFFT():
         self.eff_dx = (npsi  - n ) * 0.5
         self.inv_N = cp.float32(1.0 / (nzpsi * npsi))
 
+        # ---- Chirp-z (Bluestein) precomputations -----------------------
+        # Used when any m[t] != 1. Per axis:
+        #   κ        — signed fftfreq integer    (length N_in)
+        #   κ²       — for the pre-chirp
+        #   ty²      — for the post-chirp        (length N_out)
+        #   (j-N//2)² — for the kernel h         (length N_in + N_out - 1)
+        # L is the Bluestein FFT length, next power of two of N_in+N_out-1.
+        self.L_x = self._next_pow2(npsi + n  - 1)
+        self.L_y = self._next_pow2(nzpsi + nz - 1)
+        self.k_signed_x = (cp.fft.fftfreq(npsi ) * cp.float32(npsi )).astype('float32')
+        self.k_signed_y = (cp.fft.fftfreq(nzpsi) * cp.float32(nzpsi)).astype('float32')
+        self.k_sq_x  = (self.k_signed_x ** 2).astype('float32')
+        self.k_sq_y  = (self.k_signed_y ** 2).astype('float32')
+        self.ty_sq_x = (cp.arange(n , dtype='float32') ** 2).astype('float32')
+        self.ty_sq_y = (cp.arange(nz, dtype='float32') ** 2).astype('float32')
+        self.j_sq_x  = ((cp.arange(npsi  + n  - 1, dtype='float32') - npsi  // 2) ** 2).astype('float32')
+        self.j_sq_y  = ((cp.arange(nzpsi + nz - 1, dtype='float32') - nzpsi // 2) ** 2).astype('float32')
+
         # Match Shift's coeff cache surface so this class is drop-in.
         self.coeff_cache  = {}
         self.coeff_hits   = 0
         self.coeff_misses = 0
+
+    @staticmethod
+    def _next_pow2(n):
+        p = 1
+        while p < n:
+            p <<= 1
+        return p
+
+    @staticmethod
+    def _is_unit_mag(m):
+        """All entries of m equal to 1 → fast (FFT-shift) path; else chirp-z.
+
+        m is shape (ntheta, 2) — axis 1 is (my, mx).
+        """
+        m_arr = cp.asarray(m)
+        # Tolerant comparison so float32 1.0 hits the fast path even if the
+        # caller built m as numpy float64.
+        return bool(cp.all(cp.abs(m_arr - 1) < 1e-7))
 
     # ------------------------------------------------------------------
     # FFT helpers
@@ -174,6 +225,163 @@ class ShiftFFT():
               + self.negi_fx[cp.newaxis, cp.newaxis, :] * Dx[:, cp.newaxis, cp.newaxis])
 
     # ------------------------------------------------------------------
+    # Chirp-z (Bluestein) magnification — separable per axis
+    # ------------------------------------------------------------------
+    # All four helpers below evaluate / adjoint-evaluate the band-limited
+    # Fourier interpolant of the input grid at the m-scaled, r-shifted
+    # sample positions
+    #
+    #     y_{t,ty} = m[t] · ty + b[t],     ty = 0 … N_out − 1
+    #
+    # which, after folding the s_kernel center convention into b[t],
+    # equals  m[t]·(ty − (N_out−1)/2) − r[t] + (N_in−1)/2.
+    #
+    # Math:
+    #   g[t,ty] = (1/N_in) Σ_κ C[t,κ] · exp(2πi κ (m·ty + b)/N_in)
+    #   Identity 2κ·ty = (κ+ty)² − κ² − ty² gives, with β = m/N_in:
+    #     g[t,ty] = (1/N_in) e^(−iπ β ty²) · Σ_κ [C[t,κ] · e^(2πi κ b/N_in)
+    #                                              · e^(−iπ β κ²)] · e^(iπ β (κ+ty)²)
+    #
+    # The inner sum is a cross-correlation with the chirp kernel
+    # h[j] = exp(iπ β j²), j = (κ+ty), evaluated via FFT-convolution of
+    # length L = next_pow2(N_in + N_out − 1).
+
+    def _chirpz_lastaxis(self, X, m, b, axis_xy, adjoint):
+        """Chirp-z transform along the last axis.
+
+        X:        complex64 array, shape [B, K, N_in] for adjoint=False
+                  or [B, K, N_out] for adjoint=True (B = ntheta, K may be 1).
+        m:        [B] float32 — per-projection magnification.
+        b:        [B] float32 — per-projection linear shift offset
+                  (= (N_in−1)/2 − r − m·(N_out−1)/2).
+        axis_xy:  'x' or 'y' — picks which precomputed index arrays to use.
+        adjoint:  True for the L²-adjoint of the forward chirp-z.
+
+        Returns [B, K, N_out] (forward) or [B, K, N_in] (adjoint).
+        """
+        if axis_xy == 'x':
+            N_in, N_out, L = self.npsi,  self.n,  self.L_x
+            k_signed = self.k_signed_x
+            k_sq, ty_sq, j_sq = self.k_sq_x, self.ty_sq_x, self.j_sq_x
+        else:
+            N_in, N_out, L = self.nzpsi, self.nz, self.L_y
+            k_signed = self.k_signed_y
+            k_sq, ty_sq, j_sq = self.k_sq_y, self.ty_sq_y, self.j_sq_y
+
+        B = X.shape[0]
+        K = X.shape[1]
+        beta = (cp.asarray(m).astype('float32') / cp.float32(N_in))   # [B]
+        b    = cp.asarray(b).astype('float32')                        # [B]
+
+        # Pre-twist (fftfreq order):
+        #   pre[t,k] = exp(2πi κ b/N_in − iπ β κ²)
+        # combined into one elementwise exp.
+        phase_pre = ((2.0 * cp.pi / N_in) * b[:, None] * k_signed[None, :]
+                     - cp.pi * beta[:, None] * k_sq[None, :]).astype('float32')   # [B, N_in]
+        pre_twist = cp.exp(1j * phase_pre).astype('complex64')                    # [B, N_in]
+
+        # Post-chirp at output sample positions ty = 0 … N_out − 1:
+        #   post[t,ty] = exp(−iπ β ty²)
+        post = cp.exp(-1j * cp.pi * beta[:, None] * ty_sq[None, :]).astype('complex64')  # [B, N_out]
+
+        # Bluestein kernel h on physical index j_phys = idx − N_in//2:
+        #   h[t,idx] = exp(+iπ β j_phys²),  idx = 0 … N_in+N_out−2
+        # zero-padded to length L for circular FFT-correlation.
+        h = cp.exp(1j * cp.pi * beta[:, None] * j_sq[None, :]).astype('complex64')   # [B, J]
+        h_pad = cp.zeros((B, L), dtype='complex64')
+        h_pad[:, : N_in + N_out - 1] = h
+        H_hat = cp.fft.fft(h_pad, axis=-1)                                            # [B, L]
+
+        if not adjoint:
+            # Forward: X[B,K,N_in] → g[B,K,N_out]
+            # 1) FFT along last axis.
+            C = cp.fft.fft(X, axis=-1)                                                # [B, K, N_in]
+            # 2) Pre-twist (shift phase + pre-chirp).
+            a = C * pre_twist[:, None, :]
+            # 3) fftshift along last axis so κ = idx − N_in//2 in centered storage.
+            a = cp.fft.fftshift(a, axes=-1)
+            # 4) Zero-pad to L.
+            a_pad = cp.zeros((B, K, L), dtype='complex64')
+            a_pad[:, :, :N_in] = a
+            # 5) Compute Σ_n a_pad[n] · h_pad[n+ty] for ty=0..L−1 via FFT.
+            #    Derivation (with ω = exp(2πi/L)):
+            #      h[m] = (1/L) Σ_j H_hat[j] ω^(jm)  ⇒
+            #      Σ_n a_pad[n] · h[n+ty]
+            #         = (1/L) Σ_j H_hat[j] · ω^(jty) · Σ_n a_pad[n] ω^(jn)
+            #         = ifft( H_hat · A_pos )[ty],  A_pos[j] = Σ_n a_pad[n] ω^(jn).
+            #    A_pos is cupy's IFFT with norm='forward' (no 1/L, +sign).
+            #    NOTE: the apparent "ifft(conj(FFT(a))·FFT(h))" identity is
+            #    only correct for REAL a — for complex a the conj sticks on
+            #    the data instead of doing nothing.
+            A_pos = cp.fft.ifft(a_pad, axis=-1, norm='forward')
+            corr  = cp.fft.ifft(A_pos * H_hat[:, None, :], axis=-1)                   # [B, K, L]
+            # 6) Extract first N_out, post-multiply, scale by 1/N_in.
+            g = corr[:, :, :N_out] * post[:, None, :] * cp.float32(1.0 / N_in)
+            return g
+
+        # Adjoint: g[B,K,N_out] → X[B,K,N_in]
+        # Apply the L²-adjoint of each forward step in reverse order.
+        # cupy adjoints (sum-of-conj·· inner product):
+        #     (fft)*    = ifft(·, norm='forward'),
+        #     (ifft)*   = fft(·,  norm='forward'),
+        #     (ifft_fwd)* = fft(·)  (since ifft_fwd = N·ifft, adjoint cancels N).
+        g = X
+        # 8*) g · conj(post) · (1/N_in)
+        scaled = g * cp.conj(post)[:, None, :] * cp.float32(1.0 / N_in)               # [B, K, N_out]
+        # 7*) Zero-pad to length L (place at the front).
+        corr_adj = cp.zeros((B, K, L), dtype='complex64')
+        corr_adj[:, :, :N_out] = scaled
+        # 6*) Adjoint of  corr = ifft(A_pos · H_hat) :
+        #     A_pos_adj = conj(H_hat) · fft(corr_adj, norm='forward')
+        A_pos_adj = (cp.conj(H_hat)[:, None, :]
+                     * cp.fft.fft(corr_adj, axis=-1, norm='forward'))
+        # 5*) Adjoint of  A_pos = ifft(a_pad, norm='forward'):
+        a_pad_adj = cp.fft.fft(A_pos_adj, axis=-1)
+        # 4*) Adjoint of zero-pad: truncate to N_in.
+        a_centered_adj = a_pad_adj[:, :, :N_in]                                       # [B, K, N_in]
+        # 3*) ifftshift (adjoint of fftshift).
+        a_adj = cp.fft.ifftshift(a_centered_adj, axes=-1)
+        # 2*) Adjoint of multiply by twist: multiply by conj(twist).
+        C_adj = a_adj * cp.conj(pre_twist)[:, None, :]
+        # 1*) Adjoint of FFT = ifft with norm='forward'.
+        X_adj = cp.fft.ifft(C_adj, axis=-1, norm='forward')
+        return X_adj
+
+    def _chirpz_2d(self, X, m, ry, rx, adjoint):
+        """Separable 2-D chirp-z. Calls the last-axis helper twice — once
+        along x, once along y — with appropriate axis swapping to keep
+        FFTs on the contiguous last axis.
+
+        m is (ntheta, 2) — axis 1 is (my, mx). Each axis's chirp-z receives
+        its own magnification.
+        """
+        m  = cp.asarray(m).astype('float32')
+        my = cp.ascontiguousarray(m[:, 0])
+        mx = cp.ascontiguousarray(m[:, 1])
+        ry = cp.asarray(ry).astype('float32')
+        rx = cp.asarray(rx).astype('float32')
+        b_x = (cp.float32((self.npsi  - 1) * 0.5) - rx - mx * cp.float32((self.n  - 1) * 0.5))
+        b_y = (cp.float32((self.nzpsi - 1) * 0.5) - ry - my * cp.float32((self.nz - 1) * 0.5))
+
+        if not adjoint:
+            # Forward order: x first (last axis), then y (last axis after swap).
+            X = self.to_complex(ascontig(X))                       # [B, nzpsi, npsi]
+            Y = self._chirpz_lastaxis(X, mx, b_x, 'x', adjoint=False)   # [B, nzpsi, n]
+            Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))            # [B, n, nzpsi]
+            Y = self._chirpz_lastaxis(Y, my, b_y, 'y', adjoint=False)   # [B, n, nz]
+            Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))            # [B, nz, n]
+            return Y
+
+        # Adjoint: reverse the order — y_adj first (on a swapped view),
+        # then x_adj.
+        X = self.to_complex(ascontig(X))                                # [B, nz, n]
+        Y = cp.ascontiguousarray(cp.swapaxes(X, -2, -1))                # [B, n, nz]
+        Y = self._chirpz_lastaxis(Y, my, b_y, 'y', adjoint=True)         # [B, n, nzpsi]
+        Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))                # [B, nzpsi, n]
+        Y = self._chirpz_lastaxis(Y, mx, b_x, 'x', adjoint=True)         # [B, nzpsi, npsi]
+        return Y
+
+    # ------------------------------------------------------------------
     # Coefficient-space cache (identity coeff, but API-compatible)
     # ------------------------------------------------------------------
 
@@ -207,6 +415,11 @@ class ShiftFFT():
     # ------------------------------------------------------------------
 
     def S(self, c, r, m):
+        if not self._is_unit_mag(m):
+            # Chirp-z magnification path.
+            r = cp.asarray(r)
+            out = self._chirpz_2d(c, m, r[:, 0], r[:, 1], adjoint=False)
+            return self.from_complex(out)
         py, px = self.phase_separable(r)
         C = self.fft2(self.to_complex(ascontig(c)))
         # Fused: C = C · py · px (single elementwise kernel, in-place).
@@ -216,6 +429,11 @@ class ShiftFFT():
         return self.from_complex(s[:, :self.nz, :self.n])
 
     def Sadj(self, spsi, r, m):
+        if not self._is_unit_mag(m):
+            # Chirp-z magnification path (adjoint).
+            r = cp.asarray(r)
+            out = self._chirpz_2d(spsi, m, r[:, 0], r[:, 1], adjoint=True)
+            return self.from_complex(out)
         py, px = self.phase_separable(r)
         S = self.fft2(self.pad_output(spsi))
         # Fused: S = S · conj(py) · conj(px), in-place.
@@ -235,6 +453,19 @@ class ShiftFFT():
 
     def dcurlySc(self, c, r, m, c1, Deltar):
         """∂S(c,r)/∂c · c1 + ∂S(c,r)/∂r · Δr."""
+        if not self._is_unit_mag(m):
+            # Chirp-z magnification path. By linearity of S in its input,
+            #   dcurlySc = S(c1 + Δry·∂c/∂y + Δrx·∂c/∂x, r, m)
+            # and the spatial derivatives ∂c/∂(y,x) are computed via FFT
+            # differentiation:  ∂c/∂y = ifft2(fft2(c) · −i·fy), and the same
+            # for x. Both directional contributions fuse into one ifft2 by
+            # using the existing `deriv_factor` (Δry·−i·fy + Δrx·−i·fx).
+            c  = self.to_complex(ascontig(c))
+            c1 = self.to_complex(ascontig(c1))
+            D  = self.deriv_factor(Deltar)
+            combined = c1 + self.ifft2(self.fft2(c) * D)
+            return self.S(combined, r, m)
+
         py, px = self.phase_separable(r)
         C  = self.fft2(self.to_complex(ascontig(c)))
         C1 = self.fft2(self.to_complex(ascontig(c1)))
@@ -251,6 +482,27 @@ class ShiftFFT():
         """Adjoint of (c1, Δr) → dcurlySc(c, r, m, c1, Δr) applied to Δφ.
         Returns [out1, out2] where out1 = Sadj(Δφ) and
         out2[t, 0/1] = redot(Δφ, ∂S/∂(ry/rx)·c)."""
+        if not self._is_unit_mag(m):
+            # Chirp-z magnification path.
+            #   out1 = Sadj(Δφ).
+            #   out2[t,i] = redot(Δφ, S(∂c/∂rᵢ, r, m))  with the spatial
+            # derivatives ∂c/∂y, ∂c/∂x computed by FFT differentiation.
+            ntheta_loc = c.shape[0]
+            Deltaphi_c = self.to_complex(ascontig(Deltaphi))
+            out1 = self.Sadj(Deltaphi_c, r, m)
+
+            C = self.fft2(self.to_complex(ascontig(c)))
+            d_y_c = self.ifft2(C * self.negi_fy[None, :, None])
+            d_x_c = self.ifft2(C * self.negi_fx[None, None, :])
+            del C
+            dy = self.S(d_y_c, r, m)
+            dx = self.S(d_x_c, r, m)
+
+            out2 = cp.empty([ntheta_loc, 2], dtype='float32')
+            out2[:, 0] = redot(Deltaphi_c, dy, axis=(1, 2))
+            out2[:, 1] = redot(Deltaphi_c, dx, axis=(1, 2))
+            return [out1, out2]
+
         ntheta = c.shape[0]
         py, px = self.phase_separable(r)
         py_b = py[:, :, cp.newaxis]
@@ -292,6 +544,20 @@ class ShiftFFT():
         """∂²S · ((c1, Δ1), (c2, Δ2)) =
             ∂²S/∂c²·(c1,c2) + ∂²S/∂c∂r·(c1,Δ2) + ∂²S/∂r∂c·(Δ1,c2) + ∂²S/∂r²·(Δ1,Δ2)
           = Crop(ifft((C·D1·D2 + C1·D2 + C2·D1)·P))    (∂²S/∂c² = 0)"""
+        if not self._is_unit_mag(m):
+            # Chirp-z magnification path. By linearity of S, the same algebra
+            # as the m=1 spectral combiner holds, applied to a single
+            # spatial "combined input":
+            #   d2curlySc = S(ifft2(C·D1·D2 + C1·D2 + C2·D1), r, m).
+            C  = self.fft2(self.to_complex(ascontig(c )))
+            C1 = self.fft2(self.to_complex(ascontig(c1)))
+            C2 = self.fft2(self.to_complex(ascontig(c2)))
+            D1 = self.deriv_factor(Deltar1)
+            D2 = self.deriv_factor(Deltar2)
+            combined = self.ifft2(C * D1 * D2 + C1 * D2 + C2 * D1)
+            del C, C1, C2, D1, D2
+            return self.S(combined, r, m)
+
         py, px = self.phase_separable(r)
         D1 = self.deriv_factor(Deltar1)
         D2 = self.deriv_factor(Deltar2)

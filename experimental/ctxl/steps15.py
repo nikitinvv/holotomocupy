@@ -169,9 +169,9 @@ distances           = (z1 * z2) / focustodetectordistance * norm_magnifications*
 voxelsizes          = np.abs(detector_pixelsize / magnifications)
 voxelsize           = voxelsizes[0]
 
-shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist]
-shrink = shrink_nd[0]  # first-angle cumulative values, used for module-level eff_magnifications
-eff_magnifications = norm_magnifications / (1 + shrink)
+shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist, 2]  axis 2 = (y, x)
+shrink = shrink_nd[0]                                          # [ndist, 2]
+eff_magnifications = norm_magnifications[:, None] / (1 + shrink)  # [ndist, 2]
 
 # n from actual EDF file size (images are n×n), overrideable via --n
 n0, n1 = extra_bin(fabio.open(f'{dname0}/ref0000_0000.edf').data).shape
@@ -483,7 +483,7 @@ if rank == 0:
         else:
             logger.info(f'Step 3: reading motion      from {_motion_path}')
             raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-            motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
+            motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
             motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
@@ -590,9 +590,9 @@ else:
             rdata = data_smooth / (cref_chunk_smooth + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
-                shrink_jk  = float(shrink_nd[j, k])
-                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
-                mag = cp.array(1.0 / eff_mag_jk)
+                shrink_jk  = shrink_nd[j, k]                                    # (2,)  (y, x)
+                eff_mag_jk = norm_magnifications[k] / (1 + shrink_jk)            # (2,)  (y, x)
+                mag = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]          # (1, 2)
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
                     cp.log(tmp[None]).astype('complex64'),
@@ -600,10 +600,10 @@ else:
                 )[0].real
                 tmp = cp.exp(tmp)
 
-                padx0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj - n / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj - n / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj - n / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj - n / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj, max(0, padx0)) + 5
                 pady0 = min(nobj, max(0, pady0)) + 5
                 padx1 = min(nobj, max(0, padx1)) + 5
@@ -756,18 +756,18 @@ else:
             rdata = data_j_smooth / (cref_smooth + 1e-5)
             srdata.fill(0)
             for k in range(ndist - 1, -1, -1):
-                shrink_jk  = float(shrink_nd[j, k])
-                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
-                mag = cp.array(1.0 / eff_mag_jk)
+                shrink_jk  = shrink_nd[j, k]                                    # (2,)  (y, x)
+                eff_mag_jk = norm_magnifications[k] / (1 + shrink_jk)            # (2,)  (y, x)
+                mag = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]          # (1, 2)
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
                     cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
                 )[0].real
                 tmp = cp.exp(tmp)
-                padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj_bin, max(0, padx0)) + 5
                 pady0 = min(nobj_bin, max(0, pady0)) + 5
                 padx1 = min(nobj_bin, max(0, padx1)) + 5
@@ -816,7 +816,7 @@ else:
             calib[0]  = float(pj0[:, :32 * n_bin // 512, :32 * n_bin // 512].mean())
             pad8      = nobj_bin // 8
             pj0       = cp.pad(pj0, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-            ph0       = multiPaganin(pj0, distances * (1 + shrink_nd[0, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
+            ph0       = multiPaganin(pj0, distances * (1 + shrink_nd[0, :].mean(axis=-1))**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
             ph0_crop  = ph0[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin]
             calib[1]  = float(cp.median(ph0_crop[:16 * n_bin // 512, :16 * n_bin // 512]))
         comm.Bcast(calib, root=0)
@@ -843,7 +843,7 @@ else:
                             srdata_ds[k * n_srdata_save + j] = srdata[k].get()
                     pj  = cp.array(srdata)
                     pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-                    phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
+                    phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :].mean(axis=-1))**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
                     local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
 
                     if i % 100 == 0:

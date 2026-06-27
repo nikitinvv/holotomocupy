@@ -42,7 +42,7 @@ def load_octave_text_mat(fpath, varname):
     raise KeyError(f'{varname!r} not found in {fpath}')
 
 
-def load_shrink_from_mats(path, pfile, ndist, ntheta):
+def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
     """Build [ntheta, ndist, 2] shrink array from per-distance shrink_list.mat files.
 
     Each shrink_list.mat contains a (3,2) matrix; row 0 gives the incremental
@@ -51,9 +51,12 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta):
         shrink_nd[..., 0] = vertical   (y, row) = shrink_list[0, 1]
         shrink_nd[..., 1] = horizontal (x, col) = shrink_list[0, 0]
 
-    Per-angle ramp: shrink linearly grows from cumulative[k] at angle 0 to
-    cumulative[k] + increment[k] at angle ntheta — same as before, but applied
-    per axis independently.
+    angle_ramp=False (default, Peter's convention): constant per distance, equal
+    to the mid-scan cumulative value (cum[k] + inc[k]/2). Matches the value
+    Peter feeds to his Fresnel-number correction.
+
+    angle_ramp=True: linear ramp over angles, growing from cum[k] at angle 0
+    to cum[k] + inc[k] at angle ntheta. Angle-mean equals Peter's value.
 
     Returns a zero array if any mat file is missing.
     """
@@ -69,8 +72,12 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta):
         inc_v.append(float(sl[0, 1]))
     inc = np.stack([inc_v, inc_h], axis=-1)                                   # (ndist, 2)
     cum = np.concatenate([np.zeros((1, 2)), np.cumsum(inc, axis=0)])[:ndist]  # (ndist, 2)
-    j_frac = (np.arange(ntheta) / ntheta).astype('float32')                    # (ntheta,)
-    shrink_nd = cum[None, :, :] + inc[None, :, :] * j_frac[:, None, None]      # (ntheta, ndist, 2)
+    if angle_ramp:
+        j_frac = (np.arange(ntheta) / ntheta).astype('float32')                # (ntheta,)
+        shrink_nd = cum[None, :, :] + inc[None, :, :] * j_frac[:, None, None]  # (ntheta, ndist, 2)
+    else:
+        peter_val = cum + 0.5 * inc                                            # (ndist, 2)
+        shrink_nd = np.broadcast_to(peter_val[None, :, :], (ntheta, ndist, 2)).copy()
     return shrink_nd.astype('float32')
 
 

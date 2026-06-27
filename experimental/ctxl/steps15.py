@@ -169,7 +169,8 @@ distances           = (z1 * z2) / focustodetectordistance * norm_magnifications*
 voxelsizes          = np.abs(detector_pixelsize / magnifications)
 voxelsize           = voxelsizes[0]
 
-shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist, 2]  axis 2 = (y, x)
+shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta,
+                                  angle_ramp=args.shrink_angle_ramp)  # [ntheta, ndist, 2]  axis 2 = (y, x)
 shrink = shrink_nd[0]                                          # [ndist, 2]
 eff_magnifications = norm_magnifications[:, None] / (1 + shrink)  # [ndist, 2]
 

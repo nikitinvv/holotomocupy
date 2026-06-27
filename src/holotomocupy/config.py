@@ -363,6 +363,10 @@ def parse_args_steps15(config_file):
         args.paganin  = cfg.getfloat("paganin", fallback=120.0)
         args.nchunk   = cfg.getint("nchunk",   fallback=16)
         args.ref_dist = cfg.getint("ref_dist", fallback=0)
+        # Shrinkage angle behavior. False (default) = Peter's convention
+        # (constant per distance = cum[k] + inc[k]/2). True = linear ramp
+        # over angles from cum[k] at angle 0 to cum[k] + inc[k] at angle ntheta.
+        args.shrink_angle_ramp = cfg.getboolean("shrink_angle_ramp", fallback=False)
         _n            = cfg.getint("n",    fallback=0)
         _nobj         = cfg.getint("nobj", fallback=0)
         args.n        = _n    if _n    > 0 else None

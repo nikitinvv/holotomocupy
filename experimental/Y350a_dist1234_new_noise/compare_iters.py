@@ -525,22 +525,41 @@ def main():
     print(f'  saved {out_png}')
 
     print()
-    print('Per-stage:  ||iter2 - iter1||  /  ||iter1||  (no phase alignment)')
-    print(f'  {"stage":18s}  {"||diff||":>12s}  {"||iter1||":>12s}  {"||diff||/||iter1||":>20s}')
+    print('Per-stage  ||iter2 - iter1|| / ||iter1||  (no phase alignment)')
+    cols = [f'k={k}' for k in range(ndist)] + ['all']
+    hdr  = f'  {"stage":18s}  ' + '  '.join(f'{c:>13s}' for c in cols)
+    print(hdr)
+
+    def rel_per_dist(a, d):
+        """Return list of len ndist+1 with ||d||/||a|| for each k and overall."""
+        out = []
+        for k in range(ndist):
+            ak = a[:, k] if a.ndim == 4 else a            # radon: no dist axis
+            dk = d[:, k] if d.ndim == 4 else d
+            nd_, na_ = float(np.linalg.norm(dk)), float(np.linalg.norm(ak))
+            out.append(nd_ / na_ if na_ > 0 else float('nan'))
+            if a.ndim != 4:
+                # radon: same value for every "k" column — just copy once and
+                # break out so it's printed only once aligned under 'all'
+                return [float('nan')] * ndist + [out[0]]
+        nd_, na_ = float(np.linalg.norm(d)), float(np.linalg.norm(a))
+        out.append(nd_ / na_ if na_ > 0 else float('nan'))
+        return out
+
     for key, name in stages:
-        a    = f1[key].astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
-        d    = (f2[key] - f1[key]).astype(a.dtype)
-        nd   = float(np.linalg.norm(d))
-        na   = float(np.linalg.norm(a))
-        rel  = nd / na if na > 0 else float('nan')
-        print(f'  {name:18s}  {nd:12.4e}  {na:12.4e}  {rel:20.4e}')
+        a   = f1[key].astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
+        d   = (f2[key] - f1[key]).astype(a.dtype)
+        row = rel_per_dist(a, d)
+        cells = '  '.join('     —       ' if (isinstance(v, float) and np.isnan(v))
+                          else f'{v:13.4e}' for v in row)
+        print(f'  {name:18s}  {cells}')
+
     res1 = (amp1 - sqd).astype(np.float64)
     res2 = (amp2 - sqd).astype(np.float64)
     d    = res2 - res1
-    nd   = float(np.linalg.norm(d))
-    na   = float(np.linalg.norm(res1))
-    rel  = nd / na if na > 0 else float('nan')
-    print(f'  {"6_data_residual":18s}  {nd:12.4e}  {na:12.4e}  {rel:20.4e}')
+    row  = rel_per_dist(res1, d)                          # (n_pick, ndist, n, n)
+    cells = '  '.join(f'{v:13.4e}' for v in row)
+    print(f'  {"6_data_residual":18s}  {cells}')
 
 
 if __name__ == '__main__':

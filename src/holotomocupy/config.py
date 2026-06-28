@@ -17,9 +17,14 @@ def parse_args(config_file):
         args = SimpleNamespace()
         args.pfile    = cfg.get("pfile",    fallback=None)
         args.path_out = cfg.get("path_out").rstrip('/')
-        _path         = cfg.get("path", fallback=args.path_out).rstrip('/')
+        # `path` points to the input directory (where the step1–5 HDF5 lives
+        # along with auxiliary inputs like probe files). Defaults to
+        # `path_out` for backward compatibility with configs that kept
+        # input and output in the same directory.
+        args.path     = cfg.get("path", fallback=args.path_out).rstrip('/')
+        _path         = args.path
         if args.pfile:
-            args.in_file = f"{args.path_out}/{args.pfile}.h5"
+            args.in_file = f"{args.path}/{args.pfile}.h5"
         else:
             args.in_file = os.path.join(_path, cfg.get("in_file"))
         args.ntheta = cfg.getint("ntheta")
@@ -50,7 +55,7 @@ def parse_args(config_file):
         _pos_chk            = cfg.get("pos_checkpoint", fallback=None)
         args.pos_checkpoint = os.path.join(_path, _pos_chk) if _pos_chk else None
         _prb                = cfg.get("prb_file", fallback=None)
-        args.prb_file       = os.path.join(args.path_out, _prb) if _prb else None
+        args.prb_file       = os.path.join(args.path, _prb) if _prb else None
         _init_vol           = cfg.get("init_vol",        fallback=None)
         args.init_vol       = _init_vol.strip() if _init_vol and _init_vol.strip() else None
         args.init_vol_scale = cfg.getfloat("init_vol_scale", fallback=1.0)

@@ -193,6 +193,70 @@ def run_forward_per_angle(obj_d, prb_d, pos_full, j_ids, theta, eff_demag,
     return out
 
 
+def plot_probe_compare(prb1, prb2, out_dir, i1, i2):
+    """Compare two complex probes per-distance, four figures: real, imag, abs, phase.
+
+    Each figure: ndist rows × 3 cols (iter1, iter2, diff). iter2 is phase-aligned
+    to iter1 per-distance via phi = angle(sum(conj(prb1[k]) * prb2[k])),
+    prb2_aligned[k] = prb2[k] * exp(-i*phi). Diff = iter2_aligned - iter1.
+    """
+    ndist = prb1.shape[0]
+    prb2_aln = prb2.copy()
+    phis = np.empty(ndist, dtype='float32')
+    for k in range(ndist):
+        phi = float(np.angle((np.conj(prb1[k]) * prb2[k]).sum()))
+        phis[k] = phi
+        prb2_aln[k] = prb2[k] * np.exp(-1j * phi)
+    diff = prb2_aln - prb1
+
+    components = [
+        ('real',  lambda x: x.real,                       'gray',   False),
+        ('imag',  lambda x: x.imag,                       'gray',   False),
+        ('abs',   lambda x: np.abs(x),                    'gray',   False),
+        ('phase', lambda x: np.angle(x),                  'twilight', True),  # wrap-aware cmap
+    ]
+    for comp_name, fn, cmap, is_phase in components:
+        x1 = fn(prb1)         # (ndist, nz, n)
+        x2 = fn(prb2_aln)
+        if comp_name == 'phase':
+            dd = np.angle(np.exp(1j * (x2 - x1)))  # wrap diff to (-pi, pi]
+        else:
+            dd = x2 - x1
+
+        nrows, ncols = ndist, 3
+        fig, axes = plt.subplots(nrows, ncols, figsize=(11, 3.5 * nrows),
+                                 constrained_layout=True, squeeze=False)
+        if comp_name == 'phase':
+            vmin, vmax = -np.pi, np.pi
+            vlim = np.pi
+        else:
+            vmin = float(np.percentile(np.stack([x1, x2]), 1))
+            vmax = float(np.percentile(np.stack([x1, x2]), 99))
+            vlim = float(np.percentile(np.abs(dd), 99))
+
+        for k in range(ndist):
+            im0 = axes[k, 0].imshow(x1[k], cmap=cmap, vmin=vmin, vmax=vmax)
+            im1 = axes[k, 1].imshow(x2[k], cmap=cmap, vmin=vmin, vmax=vmax)
+            im2 = axes[k, 2].imshow(dd[k], cmap='RdBu_r', vmin=-vlim, vmax=+vlim)
+            for c, im in zip(range(3), [im0, im1, im2]):
+                axes[k, c].set_xticks([]); axes[k, c].set_yticks([])
+                fig.colorbar(im, ax=axes[k, c], shrink=0.85)
+            axes[k, 0].set_ylabel(f'dist k={k}', fontsize=10)
+        axes[0, 0].set_title('iter 1', fontsize=11)
+        axes[0, 1].set_title('iter 2 (phase-aligned)', fontsize=11)
+        diff_title = ('diff (wrapped to ±π)' if comp_name == 'phase'
+                      else 'diff (iter2 − iter1)')
+        axes[0, 2].set_title(diff_title, fontsize=11)
+        phi_str = ', '.join(f'{p:+.3f}' for p in phis)
+        fig.suptitle(f'probe — {comp_name}   [per-dist phi applied to iter2: {phi_str}]',
+                     fontsize=11)
+        out_png = os.path.join(out_dir,
+                               f'probe_{comp_name}_iter{i2:04d}_minus_{i1:04d}.png')
+        plt.savefig(out_png, dpi=110)
+        plt.close(fig)
+        print(f'  saved {out_png}')
+
+
 def panel_grid(arrs_iter1, arrs_iter2, j_ids, k_show, stage_name,
                out_png, complex_part='abs', align_phase=False):
     """3-col grid: iter1 / iter2 / diff for each angle (one distance).
@@ -218,22 +282,32 @@ def panel_grid(arrs_iter1, arrs_iter2, j_ids, k_show, stage_name,
 
     def part(x):
         if not np.iscomplexobj(x): return x
-        if   complex_part == 'abs':  return np.abs(x)
-        elif complex_part == 'real': return x.real
-        else: return x.imag
+        if   complex_part == 'abs':   return np.abs(x)
+        elif complex_part == 'real':  return x.real
+        elif complex_part == 'imag':  return x.imag
+        elif complex_part == 'phase': return np.angle(x)
+        else: raise ValueError(complex_part)
 
     x1 = part(a_c)
     x2 = part(b_c)
-    dd = x2 - x1
+    if complex_part == 'phase':
+        dd = np.angle(np.exp(1j * (x2 - x1)))   # wrap diff into (-pi, pi]
+    else:
+        dd = x2 - x1
 
     fig, axes = plt.subplots(n_pick, 3, figsize=(11, 3.5 * n_pick),
                              constrained_layout=True, squeeze=False)
-    vmin = float(np.percentile(np.stack([x1, x2]), 1))
-    vmax = float(np.percentile(np.stack([x1, x2]), 99))
-    vlim = float(np.percentile(np.abs(dd), 99))
+    if complex_part == 'phase':
+        vmin, vmax, vlim = -np.pi, np.pi, np.pi
+        cmap_img = 'twilight'
+    else:
+        vmin = float(np.percentile(np.stack([x1, x2]), 1))
+        vmax = float(np.percentile(np.stack([x1, x2]), 99))
+        vlim = float(np.percentile(np.abs(dd), 99))
+        cmap_img = 'gray'
     for i, j in enumerate(j_ids):
-        im0 = axes[i, 0].imshow(x1[i], cmap='gray', vmin=vmin, vmax=vmax)
-        im1 = axes[i, 1].imshow(x2[i], cmap='gray', vmin=vmin, vmax=vmax)
+        im0 = axes[i, 0].imshow(x1[i], cmap=cmap_img, vmin=vmin, vmax=vmax)
+        im1 = axes[i, 1].imshow(x2[i], cmap=cmap_img, vmin=vmin, vmax=vmax)
         im2 = axes[i, 2].imshow(dd[i], cmap='RdBu_r', vmin=-vlim, vmax=+vlim)
         for c, im in zip(range(3), [im0, im1, im2]):
             axes[i, c].set_xticks([]); axes[i, c].set_yticks([])
@@ -334,6 +408,10 @@ def main():
     print(f'obj diff h5  → {obj_h5}')
     print(f'obj diff png → {obj_png}')
 
+    # ---- probe comparison: real, imag, abs, phase ----------------------------
+    print('plotting probe comparisons (real, imag, abs, phase)')
+    plot_probe_compare(prb1, prb2, out_dir, args.i1, args.i2)
+
     # ---- build operators -----------------------------------------------------
     print(f'building operators (n={n}, nobj={nobj}, ndist={ndist}, ntheta={ntheta})')
     if cfg.shift_type == 'fft':
@@ -408,12 +486,17 @@ def main():
     # ---- one PNG per stage ----------------------------------------------------
     print(f'plotting per-stage figures (distance k={args.k})')
     for key, name in stages:
-        # Complex stages → two figures (real & imag); real-valued stages → one.
-        # Stages 3 (probe) and 4 (prop): per-angle global phase alignment of iter2
-        # to iter1 before extracting real/imag, so a pure-phase ambiguity is
-        # absorbed instead of showing up as a fake diff.
+        # Stages 3 (probe) and 4 (prop): four figures (real, imag, abs, phase),
+        # per-angle global phase alignment so the abs/phase split is meaningful.
+        # Other complex stages: real + imag, no alignment.
+        # Real-valued stages: single magnitude figure.
         align = key in ('probe', 'prop')
-        parts = ['real', 'imag'] if np.iscomplexobj(f1[key]) else ['abs']
+        if not np.iscomplexobj(f1[key]):
+            parts = ['abs']
+        elif align:
+            parts = ['real', 'imag', 'abs', 'phase']
+        else:
+            parts = ['real', 'imag']
         for part in parts:
             suffix = f'_{part}' if len(parts) > 1 else ''
             out_png = os.path.join(

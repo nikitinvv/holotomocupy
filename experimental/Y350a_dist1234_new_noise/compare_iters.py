@@ -462,6 +462,36 @@ def main():
                 ds = f[f'/exchange/pdata{k}_{bin_}']
                 sqd[i, k] = np.sqrt(np.clip(ds[j_full, :n, :n].astype('float32'), 0, None))
 
+    # ---- functional values, including swapped probes -------------------------
+    # F = (1/N) * sum (|amp| - sqd)^2  over (selected angles, ndist, nz, n)
+    def functional(amp):
+        return float(np.mean((amp - sqd) ** 2))
+
+    def amp_with_other_probe(shift_arr, other_prb):
+        """Recompute |D(other_prb · exp(i · shift))| per (selected angle, distance)."""
+        n_pick = shift_arr.shape[0]
+        nz_d, n_d = shift_arr.shape[2], shift_arr.shape[3]
+        amp = np.empty((n_pick, ndist, nz_d, n_d), dtype='float32')
+        other_prb_d = cp.asarray(other_prb)
+        for i in range(n_pick):
+            for k in range(ndist):
+                shifted = cp.asarray(shift_arr[i, k])
+                wave    = other_prb_d[k] * cp.exp(1j * shifted)
+                prop    = cl_prop.D(wave, k)
+                amp[i, k] = cp.abs(prop).get()
+        del other_prb_d
+        cp.get_default_memory_pool().free_all_blocks()
+        return amp
+
+    print('computing functional values (and swapped-probe variants)')
+    amp_o1p2 = amp_with_other_probe(f1['shift'], prb2)   # F(obj1, prb2, pos1)
+    amp_o2p1 = amp_with_other_probe(f2['shift'], prb1)   # F(obj2, prb1, pos2)
+
+    F11 = functional(f1['amp'])    # baseline iter1: F(obj1, prb1, pos1)
+    F22 = functional(f2['amp'])    # baseline iter2: F(obj2, prb2, pos2)
+    F12 = functional(amp_o1p2)     # swapped: obj/pos from iter1, probe from iter2
+    F21 = functional(amp_o2p1)     # swapped: obj/pos from iter2, probe from iter1
+
     # ---- save per-stage diffs to one h5 + one png each -----------------------
     stages = [
         ('radon', '1_radon'),
@@ -477,6 +507,10 @@ def main():
         f.attrs['iter1'] = args.i1; f.attrs['iter2'] = args.i2
         f.attrs['j_list']      = np.array(j_list, dtype='int32')
         f.attrs['source_path'] = cfg.path_out
+        f.attrs['F_obj1_prb1']  = F11
+        f.attrs['F_obj2_prb2']  = F22
+        f.attrs['F_obj1_prb2']  = F12   # iter1 obj/pos with iter2 probe
+        f.attrs['F_obj2_prb1']  = F21   # iter2 obj/pos with iter1 probe
         for key, name in stages:
             a1, a2 = f1[key], f2[key]
             diff = (a2 - a1)
@@ -523,6 +557,16 @@ def main():
     panel_grid(amp1 - sqd, amp2 - sqd, j_list, args.k,
                '6_data_residual (|prop| − sqrt(data))', out_png, complex_part='abs')
     print(f'  saved {out_png}')
+
+    # ---- functional summary (selected angles only) ----------------------------
+    print()
+    print('Functional  F(obj, prb, pos) = mean((|amp| - sqrt(data))^2)  over selected angles:')
+    print(f'  F(obj1, prb1, pos1)  baseline iter1       = {F11:.6e}')
+    print(f'  F(obj2, prb2, pos2)  baseline iter2       = {F22:.6e}')
+    print(f'  F(obj1, prb2, pos1)  iter1 obj + iter2 prb = {F12:.6e}   '
+          f'rel to F11: {F12/F11:.4f}')
+    print(f'  F(obj2, prb1, pos2)  iter2 obj + iter1 prb = {F21:.6e}   '
+          f'rel to F22: {F21/F22:.4f}')
 
     print()
     print('Per-stage  ||iter2 - iter1|| / ||iter1||  (no phase alignment)')

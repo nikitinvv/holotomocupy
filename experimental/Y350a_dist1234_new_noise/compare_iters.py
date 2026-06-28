@@ -242,11 +242,12 @@ def plot_probe_compare(prb1, prb2, out_dir, i1, i2):
                 axes[k, c].set_xticks([]); axes[k, c].set_yticks([])
                 fig.colorbar(im, ax=axes[k, c], shrink=0.85)
             axes[k, 0].set_ylabel(f'dist k={k}', fontsize=10)
+        rel = float(np.linalg.norm(dd) / np.linalg.norm(x1)) if np.linalg.norm(x1) > 0 else float('nan')
         axes[0, 0].set_title('iter 1', fontsize=11)
         axes[0, 1].set_title('iter 2 (phase-aligned)', fontsize=11)
         diff_title = ('diff (wrapped to ±π)' if comp_name == 'phase'
                       else 'diff (iter2 − iter1)')
-        axes[0, 2].set_title(diff_title, fontsize=11)
+        axes[0, 2].set_title(f'{diff_title}   ||diff||/||iter1|| = {rel:.3e}', fontsize=11)
         phi_str = ', '.join(f'{p:+.3f}' for p in phis)
         fig.suptitle(f'probe — {comp_name}   [per-dist phi applied to iter2: {phi_str}]',
                      fontsize=11)
@@ -313,9 +314,17 @@ def panel_grid(arrs_iter1, arrs_iter2, j_ids, k_show, stage_name,
             axes[i, c].set_xticks([]); axes[i, c].set_yticks([])
             fig.colorbar(im, ax=axes[i, c], shrink=0.85)
         axes[i, 0].set_ylabel(f'angle j={j}', fontsize=10)
+    # Relative error: ||iter2 − iter1|| / ||iter1||  (on the plotted component)
+    a64 = x1.astype(np.float64)
+    d64 = dd.astype(np.float64)
+    norm_d = float(np.linalg.norm(d64))
+    norm_a = float(np.linalg.norm(a64))
+    rel    = norm_d / norm_a if norm_a > 0 else float('nan')
+
     axes[0, 0].set_title('iter 1', fontsize=11)
     axes[0, 1].set_title('iter 2' + (' (phase-aligned)' if phis is not None else ''), fontsize=11)
-    axes[0, 2].set_title('diff (iter2 − iter1)', fontsize=11)
+    axes[0, 2].set_title(f'diff (iter2 − iter1)   ||diff||/||iter1|| = {rel:.3e}',
+                         fontsize=11)
     suffix = '' if not np.iscomplexobj(arrs_iter1) else f'  ({complex_part})'
     if phis is not None:
         suffix += f'  [phi per angle = {[f"{p:.3f}" for p in phis]}]'
@@ -516,13 +525,22 @@ def main():
     print(f'  saved {out_png}')
 
     print()
-    print('Per-stage diff RMS:')
+    print('Per-stage:  ||iter2 - iter1||  /  ||iter1||  (no phase alignment)')
+    print(f'  {"stage":18s}  {"||diff||":>12s}  {"||iter1||":>12s}  {"||diff||/||iter1||":>20s}')
     for key, name in stages:
-        d = (f2[key] - f1[key]).astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
-        rms = float(np.sqrt(np.mean(np.abs(d) ** 2)))
-        print(f'  {name:18s} rms = {rms:.4e}')
-    rms_res = float(np.sqrt(np.mean(((amp2 - sqd) - (amp1 - sqd)) ** 2)))
-    print(f'  6_data_residual    rms = {rms_res:.4e}')
+        a    = f1[key].astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
+        d    = (f2[key] - f1[key]).astype(a.dtype)
+        nd   = float(np.linalg.norm(d))
+        na   = float(np.linalg.norm(a))
+        rel  = nd / na if na > 0 else float('nan')
+        print(f'  {name:18s}  {nd:12.4e}  {na:12.4e}  {rel:20.4e}')
+    res1 = (amp1 - sqd).astype(np.float64)
+    res2 = (amp2 - sqd).astype(np.float64)
+    d    = res2 - res1
+    nd   = float(np.linalg.norm(d))
+    na   = float(np.linalg.norm(res1))
+    rel  = nd / na if na > 0 else float('nan')
+    print(f'  {"6_data_residual":18s}  {nd:12.4e}  {na:12.4e}  {rel:20.4e}')
 
 
 if __name__ == '__main__':

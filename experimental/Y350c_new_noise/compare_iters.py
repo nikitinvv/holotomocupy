@@ -32,6 +32,19 @@ from holotomocupy.tomo import Tomo
 from holotomocupy.propagation import Propagation
 from holotomocupy.config import parse_args
 
+# Single-rank guard: this script reads checkpoints + runs the forward chain on
+# one GPU. If launched under mpiexec (e.g. from polaris_run.sh) we let only
+# rank 0 do the work — the other ranks immediately exit so they don't race on
+# HDF5 writes or duplicate every figure.
+try:
+    from mpi4py import MPI
+    _comm = MPI.COMM_WORLD
+    _rank = _comm.Get_rank()
+    if _rank != 0:
+        sys.exit(0)
+except ImportError:
+    pass
+
 
 # ============================================================ checkpoint I/O
 
@@ -253,17 +266,14 @@ def main():
     p1 = os.path.join(ckpt_dir, f'checkpoint_{args.i1:04d}.h5')
     p2 = os.path.join(ckpt_dir, f'checkpoint_{args.i2:04d}.h5')
     print(f'loading {p1}')
-    obj1, prb1, pos1_full = load_checkpoint(p1)
+    obj1, prb1, pos1 = load_checkpoint(p1)
     print(f'loading {p2}')
-    obj2, prb2, pos2_full = load_checkpoint(p2)
-    # Each checkpoint stores pos at full ntheta — slice to the subsampled IDs
-    pos1 = pos1_full[ids]
-    pos2 = pos2_full[ids]
-    # Apply the same rotation_center_shift as step6 does (reader doesn't store it)
-    # Note: pos saved in checkpoint already includes rotation_center_shift? Check reader logic.
-    # Reader subtracts rotation_center_shift on read; here we re-add it for forward use.
-    pos1[..., 1] += cfg.rotation_center_shift * scale + 0.5 * (scale - 1)
-    pos2[..., 1] += cfg.rotation_center_shift * scale + 0.5 * (scale - 1)
+    obj2, prb2, pos2 = load_checkpoint(p2)
+    # Checkpoint pos is already at the subsampled cfg.ntheta size AND already
+    # contains rotation_center_shift baked in (reader.read_pos applies it before
+    # BH starts; writer stores vars['pos'] as-is afterwards).
+    assert pos1.shape[0] == ntheta, \
+        f"unexpected pos shape {pos1.shape}: expected first axis = ntheta={ntheta}"
 
     # ---- obj diff h5 + figure ------------------------------------------------
     re1, im1 = obj1.real, obj1.imag
@@ -289,7 +299,8 @@ def main():
         cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cl_prop = Propagation(n, n, 1, ndist, wavelength, voxelsize,
                           cp.asarray(distances, dtype='float32'))
-    cl_tomo = Tomo(nobj, n, theta, mask_r=cfg.mask if cfg.mask > 0 else 1.0)
+    # Tomo's `nz` arg is the z-batch size for R(obj); obj has shape (nzobj, nobj, nobj).
+    cl_tomo = Tomo(nobj, cfg.nzobj, theta, mask_r=cfg.mask if cfg.mask > 0 else 1.0)
 
     # ---- forward chain per checkpoint ----------------------------------------
     print(f'running forward chain for iter {args.i1}')

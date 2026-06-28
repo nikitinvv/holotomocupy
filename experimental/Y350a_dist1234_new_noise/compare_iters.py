@@ -135,42 +135,61 @@ def plot_obj_compare(re1, im1, re2, im2, diff_re, diff_im,
 # ============================================================ forward stages
 
 def run_forward_per_angle(obj_d, prb_d, pos_full, j_ids, theta, eff_demag,
-                          cl_tomo, cl_shift, cl_prop, ndist):
+                          cl_tomo, cl_shift, cl_prop, ndist, nchunk_z):
     """For each j in j_ids run the forward chain once, return dict of stage arrays.
 
-    Returns dict with keys 'radon', 'shift', 'probe', 'prop', 'amp'
-    each shape (len(j_ids), ndist, nz, n) — except 'radon' which is (len(j_ids), nzobj, nobj).
+    Radon is computed in z-slabs of size nchunk_z to bound GPU memory —
+    cl_tomo MUST be built with nz==nchunk_z so its internal buffers match.
     """
-    # Radon on full volume gives all-theta sinogram: (ntheta_full, nzobj, nobj).
-    # Run once and pick the selected j-indices to keep memory bounded.
-    proj_all = cl_tomo.R(obj_d)        # (ntheta, nzobj, nobj) complex
-    n_pick   = len(j_ids)
-    out = {
-        'radon': np.empty((n_pick, proj_all.shape[1], proj_all.shape[2]), dtype='complex64'),
-        'shift': np.empty((n_pick, ndist, prb_d.shape[1], prb_d.shape[2]), dtype='complex64'),
-        'probe': np.empty((n_pick, ndist, prb_d.shape[1], prb_d.shape[2]), dtype='complex64'),
-        'prop':  np.empty((n_pick, ndist, prb_d.shape[1], prb_d.shape[2]), dtype='complex64'),
-        'amp':   np.empty((n_pick, ndist, prb_d.shape[1], prb_d.shape[2]), dtype='float32'),
-    }
-    for i, j in enumerate(j_ids):
-        proj_j = proj_all[j:j+1]                                   # (1, nzobj, nobj)
-        out['radon'][i] = proj_j[0].get()
+    nzobj  = obj_d.shape[0]
+    nobj   = obj_d.shape[2]
+    nz_det = prb_d.shape[1]
+    n_det  = prb_d.shape[2]
+    n_pick = len(j_ids)
+    j_arr  = np.asarray(j_ids, dtype='int32')
 
+    # Stash only selected angles on CPU, full nzobj per angle.
+    proj_per_angle = np.empty((n_pick, nzobj, nobj), dtype='complex64')
+
+    for z0 in range(0, nzobj, nchunk_z):
+        z1   = min(z0 + nchunk_z, nzobj)
+        actual = z1 - z0
+        if actual == nchunk_z:
+            slab = obj_d[z0:z1]
+        else:
+            # pad the trailing z-slab so Tomo's pre-allocated buffer fits
+            slab = cp.zeros((nchunk_z, nobj, nobj), dtype=obj_d.dtype)
+            slab[:actual] = obj_d[z0:z1]
+        proj_slab = cl_tomo.R(slab)                       # (ntheta, nchunk_z, nobj)
+        sel = cp.asnumpy(proj_slab[j_arr, :actual, :])    # (n_pick, actual, nobj)
+        proj_per_angle[:, z0:z1, :] = sel
+        del slab, proj_slab, sel
+    cp.get_default_memory_pool().free_all_blocks()
+
+    out = {
+        'radon': proj_per_angle,                                                       # (n_pick, nzobj, nobj)
+        'shift': np.empty((n_pick, ndist, nz_det, n_det), dtype='complex64'),
+        'probe': np.empty((n_pick, ndist, nz_det, n_det), dtype='complex64'),
+        'prop':  np.empty((n_pick, ndist, nz_det, n_det), dtype='complex64'),
+        'amp':   np.empty((n_pick, ndist, nz_det, n_det), dtype='float32'),
+    }
+
+    for i, j in enumerate(j_ids):
+        proj_j_d = cp.asarray(proj_per_angle[i:i+1])                # (1, nzobj, nobj)
         for k in range(ndist):
-            r_jk = pos_full[j:j+1, k]                              # (1, 2)
-            m_jk = (1.0 / eff_demag[j, k])[None].astype('float32') # (1, 2) — passes as (1, 2)
-            # curlyS expects coefficient input; use the wrapper that includes coeff prefilter
-            shifted = cl_shift.curlyS(proj_j, cp.asarray(r_jk), cp.asarray(m_jk))[0]  # (nz, n)
+            r_jk = pos_full[j:j+1, k]                               # (1, 2)
+            m_jk = (1.0 / eff_demag[j, k])[None].astype('float32')  # (1, 2)
+            shifted = cl_shift.curlyS(proj_j_d, cp.asarray(r_jk), cp.asarray(m_jk))[0]
             out['shift'][i, k] = shifted.get()
 
-            # phase exponential + probe multiply (the same combined step as F2∘F1's prb·x12)
-            wave   = prb_d[k] * cp.exp(1j * shifted)
+            wave = prb_d[k] * cp.exp(1j * shifted)
             out['probe'][i, k] = wave.get()
 
-            propagated = cl_prop.D(wave, k)                        # (nz, n)
+            propagated = cl_prop.D(wave, k)
             out['prop'][i, k] = propagated.get()
             out['amp'][i, k]  = cp.abs(propagated).get()
-
+        del proj_j_d
+    cp.get_default_memory_pool().free_all_blocks()
     return out
 
 
@@ -299,8 +318,9 @@ def main():
         cl_shift = Shift(n, nobj, n, nobj, 'complex64')
     cl_prop = Propagation(n, n, 1, ndist, wavelength, voxelsize,
                           cp.asarray(distances, dtype='float32'))
-    # Tomo's `nz` arg is the z-batch size for R(obj); obj has shape (nzobj, nobj, nobj).
-    cl_tomo = Tomo(nobj, cfg.nzobj, theta, mask_r=cfg.mask if cfg.mask > 0 else 1.0)
+    # Tomo's `nz` arg sets the z-slab size for R(obj); use cfg.nchunk to bound
+    # GPU memory. run_forward_per_angle below loops over z in nchunk-sized slabs.
+    cl_tomo = Tomo(nobj, cfg.nchunk, theta, mask_r=cfg.mask if cfg.mask > 0 else 1.0)
 
     # ---- forward chain per checkpoint ----------------------------------------
     print(f'running forward chain for iter {args.i1}')
@@ -308,7 +328,7 @@ def main():
     p1_d = cp.asarray(prb1)
     f1   = run_forward_per_angle(o1_d, p1_d, cp.asarray(pos1),
                                  j_list, theta, eff_demag,
-                                 cl_tomo, cl_shift, cl_prop, ndist)
+                                 cl_tomo, cl_shift, cl_prop, ndist, cfg.nchunk)
     del o1_d, p1_d
     cp.get_default_memory_pool().free_all_blocks()
 
@@ -317,7 +337,7 @@ def main():
     p2_d = cp.asarray(prb2)
     f2   = run_forward_per_angle(o2_d, p2_d, cp.asarray(pos2),
                                  j_list, theta, eff_demag,
-                                 cl_tomo, cl_shift, cl_prop, ndist)
+                                 cl_tomo, cl_shift, cl_prop, ndist, cfg.nchunk)
     del o2_d, p2_d
     cp.get_default_memory_pool().free_all_blocks()
 

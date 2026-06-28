@@ -129,7 +129,7 @@ dname0 = f'{path}/{pfile}_1_'
 if args.nx_file:
     nx_geom = read_nx_geometry(args.nx_file)
     energy                  = nx_geom['energy']
-    z1                      = nx_geom['z1_all']
+    z1                      = nx_geom['z1']
     detector_pixelsize      = nx_geom['detector_pixelsize']
     focustodetectordistance = nx_geom['focustodetectordistance']
     sx0                     = None   # NX exposes z1 directly; sx0 is not needed

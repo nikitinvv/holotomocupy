@@ -546,6 +546,13 @@ def main():
         out.append(nd_ / na_ if na_ > 0 else float('nan'))
         return out
 
+    # 0_obj: full complex volume diff (no distance axis)
+    nd_obj = float(np.linalg.norm(obj2 - obj1))
+    na_obj = float(np.linalg.norm(obj1))
+    rel_obj = nd_obj / na_obj if na_obj > 0 else float('nan')
+    cells_obj = '  '.join('     —       ' for _ in range(ndist)) + f'  {rel_obj:13.4e}'
+    print(f'  {"0_obj":18s}  {cells_obj}')
+
     for key, name in stages:
         a   = f1[key].astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
         d   = (f2[key] - f1[key]).astype(a.dtype)

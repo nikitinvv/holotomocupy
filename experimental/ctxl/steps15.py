@@ -232,7 +232,7 @@ else:
     # Angles: either copy from NX, or parse each EDF header in parallel.
     if nx_theta_deg is not None:
         if rank == 0:
-            theta_vals = nx_theta_deg[:ntheta].astype('float32')
+            theta_vals = -nx_theta_deg[:ntheta].astype('float32') # use - for now...
     else:
         local_fnames = [f'{dname0}/{pfile}_1_{id:04}.edf' for id in local_ids]
         with ThreadPoolExecutor() as pool:

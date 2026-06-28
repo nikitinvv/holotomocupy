@@ -220,3 +220,5 @@ report*
 .nfs*
 
 tests/test_results/
+*scripts*
+*.o*

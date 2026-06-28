@@ -553,6 +553,18 @@ def main():
     cells_obj = '  '.join('     —       ' for _ in range(ndist)) + f'  {rel_obj:13.4e}'
     print(f'  {"0_obj":18s}  {cells_obj}')
 
+    # probe: per-distance complex probe diff (prb shape: (ndist, nz, n))
+    cells_prb = []
+    for k in range(ndist):
+        nd_ = float(np.linalg.norm(prb2[k] - prb1[k]))
+        na_ = float(np.linalg.norm(prb1[k]))
+        cells_prb.append(nd_ / na_ if na_ > 0 else float('nan'))
+    nd_all = float(np.linalg.norm(prb2 - prb1))
+    na_all = float(np.linalg.norm(prb1))
+    cells_prb.append(nd_all / na_all if na_all > 0 else float('nan'))
+    cells_prb_str = '  '.join(f'{v:13.4e}' for v in cells_prb)
+    print(f'  {"0_probe":18s}  {cells_prb_str}')
+
     for key, name in stages:
         a   = f1[key].astype(np.complex128 if np.iscomplexobj(f1[key]) else np.float64)
         d   = (f2[key] - f1[key]).astype(a.dtype)

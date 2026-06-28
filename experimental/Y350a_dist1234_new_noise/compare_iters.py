@@ -294,11 +294,17 @@ def main():
     assert pos1.shape[0] == ntheta, \
         f"unexpected pos shape {pos1.shape}: expected first axis = ntheta={ntheta}"
 
+    # ---- single output folder for ALL h5 + png from this comparison ----------
+    out_dir = os.path.join(cfg.path_out,
+                           f'compare_iter{args.i1:04d}_vs_{args.i2:04d}')
+    os.makedirs(out_dir, exist_ok=True)
+    print(f'output folder → {out_dir}')
+
     # ---- obj diff h5 + figure ------------------------------------------------
     re1, im1 = obj1.real, obj1.imag
     re2, im2 = obj2.real, obj2.imag
     diff_re, diff_im = re2 - re1, im2 - im1
-    obj_h5  = os.path.join(cfg.path_out, f'diff_iter{args.i2:04d}_minus_{args.i1:04d}.h5')
+    obj_h5  = os.path.join(out_dir, f'diff_iter{args.i2:04d}_minus_{args.i1:04d}.h5')
     obj_png = obj_h5.replace('.h5', '.png')
     with h5py.File(obj_h5, 'w') as f:
         f.create_dataset('/obj_re', data=diff_re)
@@ -359,7 +365,7 @@ def main():
         ('prop',  '4_propagate'),
         ('amp',   '5_amp'),
     ]
-    fwd_h5 = os.path.join(cfg.path_out,
+    fwd_h5 = os.path.join(out_dir,
                           f'forward_diff_iter{args.i2:04d}_minus_{args.i1:04d}.h5')
     print(f'writing forward diffs → {fwd_h5}')
     with h5py.File(fwd_h5, 'w') as f:
@@ -384,17 +390,21 @@ def main():
     # ---- one PNG per stage ----------------------------------------------------
     print(f'plotting per-stage figures (distance k={args.k})')
     for key, name in stages:
-        out_png = os.path.join(
-            cfg.path_out,
-            f'forward_stage_{name}_iter{args.i2:04d}_minus_{args.i1:04d}.png')
-        complex_part = 'abs' if np.iscomplexobj(f1[key]) else 'abs'
-        panel_grid(f1[key], f2[key], j_list, args.k, name,
-                   out_png, complex_part=complex_part)
-        print(f'  saved {out_png}')
+        # Stage 4 (propagated wavefield): emit two figures, real and imag parts.
+        # All other stages: single magnitude figure.
+        parts = ['real', 'imag'] if key == 'prop' else ['abs']
+        for part in parts:
+            suffix = f'_{part}' if key == 'prop' else ''
+            out_png = os.path.join(
+                out_dir,
+                f'forward_stage_{name}{suffix}_iter{args.i2:04d}_minus_{args.i1:04d}.png')
+            panel_grid(f1[key], f2[key], j_list, args.k, f'{name}  ({part})' if key == 'prop' else name,
+                       out_png, complex_part=part)
+            print(f'  saved {out_png}')
 
     # residual figure
     out_png = os.path.join(
-        cfg.path_out,
+        out_dir,
         f'forward_stage_6_data_residual_iter{args.i2:04d}_minus_{args.i1:04d}.png')
     panel_grid(amp1 - sqd, amp2 - sqd, j_list, args.k,
                '6_data_residual (|prop| − sqrt(data))', out_png, complex_part='abs')

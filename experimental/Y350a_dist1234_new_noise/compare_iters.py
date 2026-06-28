@@ -390,15 +390,15 @@ def main():
     # ---- one PNG per stage ----------------------------------------------------
     print(f'plotting per-stage figures (distance k={args.k})')
     for key, name in stages:
-        # Stage 4 (propagated wavefield): emit two figures, real and imag parts.
-        # All other stages: single magnitude figure.
-        parts = ['real', 'imag'] if key == 'prop' else ['abs']
+        # Complex stages → two figures (real & imag); real-valued stages → one.
+        parts = ['real', 'imag'] if np.iscomplexobj(f1[key]) else ['abs']
         for part in parts:
-            suffix = f'_{part}' if key == 'prop' else ''
+            suffix = f'_{part}' if len(parts) > 1 else ''
             out_png = os.path.join(
                 out_dir,
                 f'forward_stage_{name}{suffix}_iter{args.i2:04d}_minus_{args.i1:04d}.png')
-            panel_grid(f1[key], f2[key], j_list, args.k, f'{name}  ({part})' if key == 'prop' else name,
+            title   = f'{name}  ({part})' if len(parts) > 1 else name
+            panel_grid(f1[key], f2[key], j_list, args.k, title,
                        out_png, complex_part=part)
             print(f'  saved {out_png}')
 

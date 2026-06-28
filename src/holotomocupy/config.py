@@ -77,18 +77,22 @@ def read_nx_geometry(nx_path):
       /entry/instrument/beam/incident_energy   : energy in keV
       /entry/instrument/detector/data          : (nframes, ny, nx) float32
       /entry/instrument/detector/x_pixel_size  : sample-plane pixel size, metres
-      /entry/instrument/detector/distance      : focus-to-sample distance z1, metres
+      /entry/instrument/detector/distance      : Fresnel propagation distance
+                                                 D = z1*z2/(z1+z2), metres
+                                                 (NOT the geometric z1)
       /entry/instrument/detector/image_key     : 0=data, 1=flat, 2=dark
       /entry/sample/rotation_angle             : per-frame angle in degrees
       /entry/sample/{x,y,z}_translation        : per-frame stage position
-      /entry/instrument/positioners/0/distancesh (optional, when present): all
-                                                 focus-to-sample distances for the scan
+      /entry/instrument/positioners/0/z1h        (optional, when present): all
+                                                 focus-to-sample distances z1
+                                                 (matches .info SourceDistance)
+      /entry/instrument/positioners/0/distancesh : Fresnel D per distance, NOT z1
       /entry/instrument/positioners/0/Mh         (optional): per-distance
                                                  magnifications M = Z / z1
 
     Returns a dict with:
       entry, energy (keV), sample_pixelsize (m, at the sample plane for distance 0),
-      z1 (m, scalar — first distance), z1_all (m, ndarray — all distances when known),
+      z1 (m, ndarray — focus-to-sample distance per plane; length 1 if NX only had a scalar),
       magnifications (ndarray, M = Z/z1 per distance; NaN if the NX file lacks Mh),
       detector_pixelsize (m, sample_pixelsize * M[0]; NaN if M unknown),
       focustodetectordistance (m, M[0] * z1[0]; NaN if M unknown),
@@ -103,7 +107,6 @@ def read_nx_geometry(nx_path):
 
         energy           = float(g['instrument/beam/incident_energy'][()])
         sample_pixelsize = float(g['instrument/detector/x_pixel_size'][()])
-        z1               = float(g['instrument/detector/distance'][()])
 
         image_key = g['instrument/detector/image_key'][:]
         data_ids  = np.where(image_key == 0)[0]
@@ -116,47 +119,62 @@ def read_nx_geometry(nx_path):
         rot_data = rot_all[data_ids]
 
         # Optional: ID16A "positioners/0" blob holds per-distance lists.
-        z1_all = np.array([z1], dtype='float64')
+        # Prefer z1h (geometric focus-to-sample distance, matches .info
+        # SourceDistance) over detector/distance — the latter actually holds
+        # the Fresnel propagation distance z1*z2/(z1+z2), not z1 itself.
+        z1 = None
         magnifications = np.array([np.nan], dtype='float64')
         try:
-            raw = g['instrument/positioners/0/distancesh'][()]
+            raw = g['instrument/positioners/0/z1h'][()]
             if isinstance(raw, bytes):
-                z1_all = np.array([float(x) for x in raw.split()], dtype='float64')
+                z1 = np.array([float(x) for x in raw.split()], dtype='float64')
         except KeyError:
             pass
+        if z1 is None:
+            z1 = np.array([float(g['instrument/detector/distance'][()])], dtype='float64')
         try:
             raw = g['instrument/positioners/0/Mh'][()]
             if isinstance(raw, bytes):
                 magnifications = np.array([float(x) for x in raw.split()], dtype='float64')
         except KeyError:
             pass
-        if magnifications.size != z1_all.size:
-            magnifications = np.full(z1_all.shape, np.nan)
+        if magnifications.size != z1.size:
+            magnifications = np.full(z1.shape, np.nan)
+
+        # Detector pixel size: read directly from NX when available
+        # (positioners/0/pixelsize_detector is Peter's stored value, in metres).
+        detector_pixelsize = None
+        try:
+            raw = g['instrument/positioners/0/pixelsize_detector'][()]
+            if isinstance(raw, bytes):
+                detector_pixelsize = float(raw.decode().strip())
+        except KeyError:
+            pass
 
     # Derived quantities (use ID16A convention M = Z / z1, NOT z2 / z1):
     #   focustodetectordistance Z = M[0] * z1[0]
-    #   detector_pixelsize        = sample_pixelsize * M[0]
-    # The sample-plane pixel for distance k is detector_pixelsize / M[k].
+    # Fall back to sample_pixelsize * M[0] only if pixelsize_detector wasn't
+    # stored in NX.
     if not np.isnan(magnifications[0]):
-        focustodetectordistance = float(magnifications[0] * z1_all[0])
-        detector_pixelsize      = float(sample_pixelsize * magnifications[0])
+        focustodetectordistance = float(magnifications[0] * z1[0])
+        if detector_pixelsize is None:
+            detector_pixelsize = float(sample_pixelsize * magnifications[0])
     else:
         focustodetectordistance = float('nan')
-        detector_pixelsize      = float('nan')
+        if detector_pixelsize is None:
+            detector_pixelsize = float('nan')
 
     return dict(
         entry=entry,
         energy=energy,
         sample_pixelsize=sample_pixelsize,
-        z1=z1, z1_all=z1_all,
+        z1=z1,
         magnifications=magnifications,
         detector_pixelsize=detector_pixelsize,
         focustodetectordistance=focustodetectordistance,
         ny=int(ny), nx=int(nx),
         data_ids=data_ids, flat_ids=flat_ids, dark_ids=dark_ids,
         rotation_angle_deg=rot_data,
-        # Back-compat alias for callers that already used `pixel_size`:
-        pixel_size=sample_pixelsize,
     )
 
 
@@ -227,11 +245,11 @@ def parse_args_nx(config_file):
         # ndist + per-distance z1/magnifications:
         #   - single NX file with multiple distances in positioners/0  → use those
         #   - one NX file per distance                                  → assemble
-        if len(metas) == 1 and m0["z1_all"].size > 1:
-            args.z1 = m0["z1_all"]
+        if len(metas) == 1 and m0["z1"].size > 1:
+            args.z1 = m0["z1"]
             args.magnifications = m0["magnifications"]
         else:
-            args.z1 = np.array([m["z1"] for m in metas], dtype="float64")
+            args.z1 = np.array([m["z1"][0] for m in metas], dtype="float64")
             args.magnifications = np.array(
                 [m["magnifications"][0] for m in metas], dtype="float64")
         args.ndist = int(args.z1.size)

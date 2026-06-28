@@ -194,20 +194,36 @@ def run_forward_per_angle(obj_d, prb_d, pos_full, j_ids, theta, eff_demag,
 
 
 def panel_grid(arrs_iter1, arrs_iter2, j_ids, k_show, stage_name,
-               out_png, complex_part='abs'):
-    """3-col grid: iter1 / iter2 / diff for each angle (one distance)."""
+               out_png, complex_part='abs', align_phase=False):
+    """3-col grid: iter1 / iter2 / diff for each angle (one distance).
+
+    align_phase=True (complex inputs only) removes a per-angle constant phase
+    from iter2 before extracting real/imag: phi = angle(sum(conj(a)*b)),
+    b_aligned = b * exp(-i*phi). Minimises ||a - b_aligned||^2 per panel.
+    """
     n_pick = len(j_ids)
 
-    def take(a):
-        x = a[:, k_show] if a.ndim == 4 else a       # (n_pick, nz, n) or (n_pick, nzobj, nobj)
-        if np.iscomplexobj(x):
-            if   complex_part == 'abs':  return np.abs(x)
-            elif complex_part == 'real': return x.real
-            else: return x.imag
-        return x
+    # Slice distance axis if present, keep complex for now
+    a_c = arrs_iter1[:, k_show] if arrs_iter1.ndim == 4 else arrs_iter1
+    b_c = arrs_iter2[:, k_show] if arrs_iter2.ndim == 4 else arrs_iter2
 
-    x1 = take(arrs_iter1)
-    x2 = take(arrs_iter2)
+    phis = None
+    if align_phase and np.iscomplexobj(a_c):
+        b_c = b_c.copy()
+        phis = np.empty(n_pick, dtype='float32')
+        for i in range(n_pick):
+            phi = float(np.angle((np.conj(a_c[i]) * b_c[i]).sum()))
+            phis[i] = phi
+            b_c[i] = b_c[i] * np.exp(-1j * phi)
+
+    def part(x):
+        if not np.iscomplexobj(x): return x
+        if   complex_part == 'abs':  return np.abs(x)
+        elif complex_part == 'real': return x.real
+        else: return x.imag
+
+    x1 = part(a_c)
+    x2 = part(b_c)
     dd = x2 - x1
 
     fig, axes = plt.subplots(n_pick, 3, figsize=(11, 3.5 * n_pick),
@@ -224,10 +240,12 @@ def panel_grid(arrs_iter1, arrs_iter2, j_ids, k_show, stage_name,
             fig.colorbar(im, ax=axes[i, c], shrink=0.85)
         axes[i, 0].set_ylabel(f'angle j={j}', fontsize=10)
     axes[0, 0].set_title('iter 1', fontsize=11)
-    axes[0, 1].set_title('iter 2', fontsize=11)
+    axes[0, 1].set_title('iter 2' + (' (phase-aligned)' if phis is not None else ''), fontsize=11)
     axes[0, 2].set_title('diff (iter2 − iter1)', fontsize=11)
     suffix = '' if not np.iscomplexobj(arrs_iter1) else f'  ({complex_part})'
-    fig.suptitle(f'{stage_name}  —  distance k={k_show}{suffix}', fontsize=12)
+    if phis is not None:
+        suffix += f'  [phi per angle = {[f"{p:.3f}" for p in phis]}]'
+    fig.suptitle(f'{stage_name}  —  distance k={k_show}{suffix}', fontsize=11)
     plt.savefig(out_png, dpi=110)
     plt.close(fig)
 
@@ -391,6 +409,10 @@ def main():
     print(f'plotting per-stage figures (distance k={args.k})')
     for key, name in stages:
         # Complex stages → two figures (real & imag); real-valued stages → one.
+        # Stages 3 (probe) and 4 (prop): per-angle global phase alignment of iter2
+        # to iter1 before extracting real/imag, so a pure-phase ambiguity is
+        # absorbed instead of showing up as a fake diff.
+        align = key in ('probe', 'prop')
         parts = ['real', 'imag'] if np.iscomplexobj(f1[key]) else ['abs']
         for part in parts:
             suffix = f'_{part}' if len(parts) > 1 else ''
@@ -399,7 +421,7 @@ def main():
                 f'forward_stage_{name}{suffix}_iter{args.i2:04d}_minus_{args.i1:04d}.png')
             title   = f'{name}  ({part})' if len(parts) > 1 else name
             panel_grid(f1[key], f2[key], j_list, args.k, title,
-                       out_png, complex_part=part)
+                       out_png, complex_part=part, align_phase=align)
             print(f'  saved {out_png}')
 
     # residual figure

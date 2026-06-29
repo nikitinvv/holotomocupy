@@ -193,6 +193,88 @@ def run_forward_per_angle(obj_d, prb_d, pos_full, j_ids, theta, eff_demag,
     return out
 
 
+def compute_full_functionals(obj1, prb1, pos1, obj2, prb2, pos2,
+                              eff_demag, fpath_h5, bin_, n, ndist, ntheta,
+                              cl_tomo, cl_shift, cl_prop, nchunk_z):
+    """Stream over ALL angles to compute four scalar functionals:
+
+      F_obj1_prb1 = mean_{j,k,xy} (|D(prb1[k] · exp(i · curlyS(R(obj1)[j], pos1[j,k]))| - sqrt(data[j,k]))^2
+      F_obj2_prb2 = same with iter 2
+      F_obj1_prb2 = swap: iter1 obj/pos with iter2 probe
+      F_obj2_prb1 = swap: iter2 obj/pos with iter1 probe
+
+    Returns the four floats. Streams angles in batches to bound memory.
+    """
+    nzobj = obj1.shape[0]
+    nobj  = obj1.shape[2]
+    # Push both objects' Radon to CPU first (size: ntheta * nzobj * nobj * 8 bytes,
+    # twice). This is the biggest CPU buffer.
+    print(f'  computing full Radon for both objects (stores 2 × {ntheta*nzobj*nobj*8/1e9:.2f} GB on CPU)')
+    proj_full = [np.empty((ntheta, nzobj, nobj), dtype='complex64'),
+                 np.empty((ntheta, nzobj, nobj), dtype='complex64')]
+    for which, obj in enumerate([obj1, obj2]):
+        obj_d = cp.asarray(obj)
+        for z0 in range(0, nzobj, nchunk_z):
+            z1     = min(z0 + nchunk_z, nzobj)
+            actual = z1 - z0
+            if actual == nchunk_z:
+                slab = obj_d[z0:z1]
+            else:
+                slab = cp.zeros((nchunk_z, nobj, nobj), dtype=obj_d.dtype)
+                slab[:actual] = obj_d[z0:z1]
+            proj_slab = cl_tomo.R(slab)               # (ntheta, nchunk_z, nobj)
+            proj_full[which][:, z0:z1, :] = cp.asnumpy(proj_slab[:, :actual, :])
+            del slab, proj_slab
+        del obj_d
+        cp.get_default_memory_pool().free_all_blocks()
+
+    # GPU-resident probes for each combination
+    prb1_d = cp.asarray(prb1)
+    prb2_d = cp.asarray(prb2)
+    pos1_d = cp.asarray(pos1)
+    pos2_d = cp.asarray(pos2)
+    eff_demag_d = cp.asarray(eff_demag)
+
+    Fsum_11 = 0.0; Fsum_22 = 0.0; Fsum_12 = 0.0; Fsum_21 = 0.0
+    Ntot    = 0
+
+    with h5py.File(fpath_h5, 'r') as fh:
+        ds = [fh[f'/exchange/pdata{k}_{bin_}'] for k in range(ndist)]
+        for j in range(ntheta):
+            proj1_d = cp.asarray(proj_full[0][j:j+1])      # (1, nzobj, nobj)
+            proj2_d = cp.asarray(proj_full[1][j:j+1])
+            for k in range(ndist):
+                m_jk = (1.0 / eff_demag_d[j, k])[None].astype('float32')
+
+                # shift for each obj
+                sh1 = cl_shift.curlyS(proj1_d, pos1_d[j:j+1, k], m_jk)[0]
+                sh2 = cl_shift.curlyS(proj2_d, pos2_d[j:j+1, k], m_jk)[0]
+
+                sqd_jk = cp.asarray(np.sqrt(np.clip(ds[k][j, :n, :n].astype('float32'), 0, None)))
+
+                # Four forward chains
+                for tag, sh, prb in [('11', sh1, prb1_d),
+                                     ('22', sh2, prb2_d),
+                                     ('12', sh1, prb2_d),
+                                     ('21', sh2, prb1_d)]:
+                    wave = prb[k] * cp.exp(1j * sh)
+                    amp  = cp.abs(cl_prop.D(wave, k))
+                    s    = float(cp.sum((amp - sqd_jk) ** 2).get())
+                    if   tag == '11': Fsum_11 += s
+                    elif tag == '22': Fsum_22 += s
+                    elif tag == '12': Fsum_12 += s
+                    else:             Fsum_21 += s
+                Ntot += int(sqd_jk.size)
+            if j % 100 == 0:
+                print(f'    angle {j+1:5d}/{ntheta}')
+
+    del proj_full, prb1_d, prb2_d, pos1_d, pos2_d, eff_demag_d
+    cp.get_default_memory_pool().free_all_blocks()
+
+    return (Fsum_11 / Ntot, Fsum_22 / Ntot,
+            Fsum_12 / Ntot, Fsum_21 / Ntot)
+
+
 def plot_probe_compare(prb1, prb2, out_dir, i1, i2):
     """Compare two complex probes per-distance, four figures: real, imag, abs, phase.
 
@@ -462,35 +544,12 @@ def main():
                 ds = f[f'/exchange/pdata{k}_{bin_}']
                 sqd[i, k] = np.sqrt(np.clip(ds[j_full, :n, :n].astype('float32'), 0, None))
 
-    # ---- functional values, including swapped probes -------------------------
-    # F = (1/N) * sum (|amp| - sqd)^2  over (selected angles, ndist, nz, n)
-    def functional(amp):
-        return float(np.mean((amp - sqd) ** 2))
-
-    def amp_with_other_probe(shift_arr, other_prb):
-        """Recompute |D(other_prb · exp(i · shift))| per (selected angle, distance)."""
-        n_pick = shift_arr.shape[0]
-        nz_d, n_d = shift_arr.shape[2], shift_arr.shape[3]
-        amp = np.empty((n_pick, ndist, nz_d, n_d), dtype='float32')
-        other_prb_d = cp.asarray(other_prb)
-        for i in range(n_pick):
-            for k in range(ndist):
-                shifted = cp.asarray(shift_arr[i, k])
-                wave    = other_prb_d[k] * cp.exp(1j * shifted)
-                prop    = cl_prop.D(wave, k)
-                amp[i, k] = cp.abs(prop).get()
-        del other_prb_d
-        cp.get_default_memory_pool().free_all_blocks()
-        return amp
-
-    print('computing functional values (and swapped-probe variants)')
-    amp_o1p2 = amp_with_other_probe(f1['shift'], prb2)   # F(obj1, prb2, pos1)
-    amp_o2p1 = amp_with_other_probe(f2['shift'], prb1)   # F(obj2, prb1, pos2)
-
-    F11 = functional(f1['amp'])    # baseline iter1: F(obj1, prb1, pos1)
-    F22 = functional(f2['amp'])    # baseline iter2: F(obj2, prb2, pos2)
-    F12 = functional(amp_o1p2)     # swapped: obj/pos from iter1, probe from iter2
-    F21 = functional(amp_o2p1)     # swapped: obj/pos from iter2, probe from iter1
+    # ---- functional values over ALL angles & distances -----------------------
+    print('computing four functional values over ALL angles & distances')
+    F11, F22, F12, F21 = compute_full_functionals(
+        obj1, prb1, pos1, obj2, prb2, pos2,
+        eff_demag, cfg.in_file, bin_, n, ndist, ntheta,
+        cl_tomo, cl_shift, cl_prop, cfg.nchunk)
 
     # ---- save per-stage diffs to one h5 + one png each -----------------------
     stages = [
@@ -560,7 +619,7 @@ def main():
 
     # ---- functional summary (selected angles only) ----------------------------
     print()
-    print('Functional  F(obj, prb, pos) = mean((|amp| - sqrt(data))^2)  over selected angles:')
+    print('Functional  F(obj, prb, pos) = mean((|amp| - sqrt(data))^2)  over ALL angles & distances:')
     print(f'  F(obj1, prb1, pos1)  baseline iter1       = {F11:.6e}')
     print(f'  F(obj2, prb2, pos2)  baseline iter2       = {F22:.6e}')
     print(f'  F(obj1, prb2, pos1)  iter1 obj + iter2 prb = {F12:.6e}   '

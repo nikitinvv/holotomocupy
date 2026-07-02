@@ -218,7 +218,7 @@ class Rec:
         """gradients_cascade + propagate the obj-side gradient through
         fwd_tomo + redist so grads['proj'] is ready for the hessian calls."""
         with nvtx.annotate("gradients"):
-            self.gradients(vars, grads)
+            self.gradients(vars, grads)        
         with nvtx.annotate(":::BH:fwd_tomo"):
             self.fwd_tomo(grads["obj"], out=self.proj_tmp)
         with nvtx.annotate(":::BH:redist", color='red'):

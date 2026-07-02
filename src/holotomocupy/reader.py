@@ -314,17 +314,14 @@ class Reader:
         """Read reference (flat-field) on rank 0 and broadcast to all ranks."""
         nz = self.nz
         n = self.n
-        # FIX: read once on rank 0, broadcast — avoids N redundant identical reads
+        # Read once on rank 0 and broadcast to avoid N redundant identical reads.
         raw_np = np.empty((self.ndist, nz, n), dtype='float32')
         if self.rank == 0:
             with h5py.File(self.in_file, 'r') as fid:
-                key_start = f'/exchange/pref_{self.bin}'
-                key_end   = f'/exchange/pref_end_{self.bin}'
-                nz0 = fid[key_start].shape[1]
+                key = f'/exchange/pref_{self.bin}'
+                nz0 = fid[key].shape[1]
                 st, end = nz0 // 2 - nz // 2, nz0 // 2 + nz // 2
-                raw_np[:] = fid[key_start][:self.ndist, st:end]
-                if key_end in fid:
-                    raw_np[:] = 0.5 * (raw_np + fid[key_end][:self.ndist, st:end])
+                raw_np[:] = fid[key][:self.ndist, st:end]
         self.comm.Bcast(raw_np, root=0)
         raw = cp.array(raw_np)
         if out is None:

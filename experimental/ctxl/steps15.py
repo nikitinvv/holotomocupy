@@ -203,6 +203,7 @@ if rank == 0:
     logger.info(f'ndist={ndist}  n={n}  nobj={nobj}  nref={nref}  ndark={ndark}')
     logger.info(f'shrink_v cumulative     = {[round(float(s), 6) for s in shrink[:, 0]]}')
     logger.info(f'shrink_h cumulative     = {[round(float(s), 6) for s in shrink[:, 1]]}')
+    logger.info(f'rotation_center_shift   = {rotation_center_shift:.4f} px')
     logger.debug(f'wavelength              = {wavelength} m')
     logger.debug(f'magnifications          = {magnifications}')
     logger.debug(f'voxelsizes              = {voxelsizes} m')
@@ -446,48 +447,79 @@ if rank == 0:
     else:
         logger.info('Step 3: combining shifts...')
 
-        # Read per-distance encoder displacements directly from the raw scan
-        # dirs (one correct.txt per distance, shape [ntheta, 2]).
+        # Peter's shift model (holotomo_slave.m ~L1620-1770), translated:
+        #   Peter builds  total = rhapp_file + rhapp_iter + ref_motion - rand_disp
+        #   in [v, h] order, reconstruction pixels.
+        #   Our sign convention is the negative, so
+        #     shifts_final = random_shifts + rhapp_shifts + motion_shifts
+        #   with rhapp_shifts, motion_shifts already carrying the sign flip.
+
+        BIN = 2  # extra_bin block size — correct.txt is in unbinned distance-plane pixels
+
+        # --- 1. Encoder shifts from correct.txt ------------------------------
+        # correct.txt axes: col 0 = horizontal, col 1 = vertical (Nabu).
+        # Peter's per-axis scaling maxM/[Mv,Mh] equals 1/norm_magnifications when
+        # Mv == Mh (true here — z1v == z1h in the .m). For anisotropic scans
+        # this needs a per-axis norm_mag.
         shifts = np.empty([ntheta, ndist, 2], dtype='float32')
         for k in range(ndist):
             dname = f'{path}/{pfile}_{k + 1}_'
-            logger.info(f'Step 3: reading shifts      from {dname}/correct.txt')
-            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta]/2.0
+            logger.info(f'Step 3: reading correct.txt from {dname}/correct.txt')
+            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta] / BIN
 
-        # --- Encoder (random) shifts → object-plane pixels ---
-        # axis 2 is (y, x) in detector pixels; swap to (row, col) and convert
         random_shifts = np.empty([ntheta, ndist, 2], dtype='float32')
-        random_shifts[..., 0] = shifts[..., 1] / norm_magnifications
-        random_shifts[..., 1] = shifts[..., 0] / norm_magnifications
+        random_shifts[..., 0] = shifts[..., 1] / norm_magnifications  # v
+        random_shifts[..., 1] = shifts[..., 0] / norm_magnifications  # h
 
-        # --- RHAPP inter-plane shifts (from Peter's MATLAB pipeline) ---
+        # --- 2. RHAPP (+ rhapp_iter) — Octave sign, [v, h], recon pixels -----
+        # Order matches Peter's holotomo_slave.m ~L1724-1742:
+        #   rhapp += rhapp_iter   →   subtract ref-plane   →   subtract avg over
+        #   projections at plane 0 (shift_first_plane_zero, always-on for us).
+        # The order matters for avg_plane_zero: computing it on the sum instead
+        # of on rhapp alone changes the result by mean_j(iter[j,0] − iter[j,ref]).
+        def _load_octave_swap(fname, varname):
+            """Load Octave [2, ndist, ntheta] and reorder to [ntheta, ndist, 2] (v, h)."""
+            return load_octave_text_mat(fname, varname).swapaxes(0, 2)[:ntheta].astype('float32')
+
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
-        if not os.path.exists(_rhapp_path):
-            logger.warning(f'Step 3: rhapp.mat not found, using zeros: {_rhapp_path}')
-            rhapp_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
-        else:
+        if os.path.exists(_rhapp_path):
             logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
-            rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
-            #following peter:
-            rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
-            rhapp_reordered -= rhapp_reordered[:,ref_dist:ref_dist+1]
-            avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)   # [2]
-            rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
-            logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
-            # I work with negative:
-            rhapp_shifts = (-rhapp_reordered).astype('float32')
-
-        # --- Motion shifts (slow drift of reference plane) ---
-        _motion_dname = f'{path}/{pfile}_{ref_dist+1}_'
-        _motion_path = f'{_motion_dname}/correct_motion.txt'
-        if not os.path.exists(_motion_path):
-            logger.warning(f'Step 3: correct_motion.txt not found, using zeros: {_motion_path}')
-            motion_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+            rhapp_octave = _load_octave_swap(_rhapp_path, 'rhapp')
         else:
+            logger.warning(f'Step 3: rhapp.mat not found, using zeros: {_rhapp_path}')
+            rhapp_octave = np.zeros([ntheta, ndist, 2], dtype='float32')
+
+        _iter_path = f'{path}/{pfile}_/rhapp_iter.mat'
+        if os.path.exists(_iter_path):
+            logger.info(f'Step 3: reading rhapp_iter  from {_iter_path}')
+            rhapp_octave = rhapp_octave + _load_octave_swap(_iter_path, 'rhapp_iter')
+
+        # ref-plane subtraction (per projection). .copy() to avoid write-through
+        # aliasing with the LHS during in-place subtraction.
+        rhapp_octave = rhapp_octave - rhapp_octave[:, ref_dist:ref_dist+1].copy()
+
+        # avg over projections at plane 0 (Peter's shift_first_plane_zero).
+        avg_plane_zero = rhapp_octave[:, 0].mean(axis=0)
+        rhapp_octave -= avg_plane_zero[np.newaxis, np.newaxis, :]
+        logger.info(f'Step 3: avg_plane_zero  v={avg_plane_zero[0]:.4f} px  h={avg_plane_zero[1]:.4f} px')
+
+        rhapp_shifts = (-rhapp_octave).astype('float32')
+
+        # --- 3. Reference-plane motion — Octave sign, [v, h], recon pixels ---
+        # Peter: rhapp(:,k,:) += [ref_v; ref_h] * maxM / [Mv(ref); Mh(ref)]
+        # New reference_motion.mat is pre-scaled to reconstruction pixels, so
+        # NO per-mag division and NO encoder subtraction here. Negate to match
+        # our sign convention.
+        _motion_path = f'{path}/{pfile}_/reference_motion.mat'
+        if os.path.exists(_motion_path):
             logger.info(f'Step 3: reading motion      from {_motion_path}')
-            raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')/2.0
-            motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
-            motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
+            ref_v = load_octave_text_mat(_motion_path, 'ref_v').ravel()[:ntheta]
+            ref_h = load_octave_text_mat(_motion_path, 'ref_h').ravel()[:ntheta]
+            motion_base   = np.stack([ref_v, ref_h], axis=-1).astype('float32')  # (ntheta, 2)
+            motion_shifts = -np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
+        else:
+            logger.warning(f'Step 3: reference_motion.mat not found, using zeros: {_motion_path}')
+            motion_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
 
         # --- 3-D tomographic correction shifts ---
         _c3d_path = f'{path}/{pfile}_/correct_correct3D.txt'

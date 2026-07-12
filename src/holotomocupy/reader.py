@@ -4,7 +4,7 @@ import os
 import h5py
 import numpy as np
 import cupy as cp
-from .logger_config import logger
+from .logger_config import logger, rank as _mpi_rank
 
 
 def load_octave_text_mat(fpath, varname):
@@ -69,7 +69,8 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
     """
     shapp_path = f'{path}/{pfile}_/shapp.mat'
     if os.path.exists(shapp_path):
-        logger.info(f'shrink: reading shapp from {shapp_path}')
+        if _mpi_rank == 0:
+            logger.info(f'shrink: reading shapp from {shapp_path}')
         raw_octave = load_octave_text_mat(shapp_path, 'shapp')
         # Expect Octave 3D [2, ndist, ntheta_file] (v, h; distance; projection).
         # Fail loudly on unexpected layout instead of returning silently wrong
@@ -82,13 +83,18 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
         raw = raw_octave.swapaxes(0, 2)[:ntheta]                # (ntheta, ndist, 2)
         return raw.astype('float32')
 
+    if _mpi_rank == 0:
+        logger.info(f'shrink: shapp.mat not found ({shapp_path}); falling back to per-distance shrink_list.mat')
     inc_v = []  # vertical (y) — col 2 of MATLAB (col 1 zero-indexed)
     inc_h = []  # horizontal (x) — col 1 of MATLAB (col 0 zero-indexed)
     for k in range(ndist):
         mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
         if not os.path.exists(mat_path):
-            logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
+            if _mpi_rank == 0:
+                logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
             return np.zeros((ntheta, ndist, 2), dtype='float32')
+        if _mpi_rank == 0:
+            logger.info(f'shrink: reading {mat_path}')
         sl = load_octave_text_mat(mat_path, 'shrink_list')
         inc_h.append(float(sl[0, 0]))
         inc_v.append(float(sl[0, 1]))
@@ -247,6 +253,9 @@ class Reader:
 
     def read_pos(self, out=None):
         """Read initial positions for this rank's theta-slice into out."""
+        if self.rank == 0:
+            logger.info(f'read_pos: /exchange/cshifts_final from {self.in_file} '
+                        f'(rotation_center_shift={self.rotation_center_shift:.4f} @ bin={self.bin})')
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if out is None:
                 out = fid[f'/exchange/cshifts_final'][
@@ -272,9 +281,14 @@ class Reader:
         local_ntheta = self.end_theta - self.st_theta
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if '/exchange/shrink' not in fid:
+                if self.rank == 0:
+                    logger.warning(f'read_shrink: /exchange/shrink absent in {self.in_file}, using zeros')
                 data = cp.zeros((local_ntheta, self.ndist, 2), dtype='float32')
             else:
                 raw = fid['/exchange/shrink']
+                if self.rank == 0:
+                    logger.info(f'read_shrink: /exchange/shrink from {self.in_file} '
+                                f'(shape={raw.shape}, ndim={raw.ndim})')
                 sl = self.ids[self.st_theta:self.end_theta]
                 if raw.ndim == 3:
                     data = cp.array(raw[sl, :self.ndist, :2].astype('float32'))

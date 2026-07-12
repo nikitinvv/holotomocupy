@@ -43,23 +43,45 @@ def load_octave_text_mat(fpath, varname):
 
 
 def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
-    """Build [ntheta, ndist, 2] shrink array from per-distance shrink_list.mat files.
+    """Build [ntheta, ndist, 2] shrink array; last axis is (v, h).
 
-    Each shrink_list.mat contains a (3,2) matrix; row 0 gives the incremental
-    shrink from the previous distance plane as [h, v] (horizontal, vertical).
-    Returned axis 2 follows the (y, x) convention used elsewhere for r/m:
+    Preferred source: `{pfile}_/shapp.mat` — per-(distance, projection) shrink
+    values Peter saves when the shrinkage is fitted with a model (tanh, ...).
+    Stored as an Octave 3D matrix [2, ndist, ntheta] with axis-0 = (v, h),
+    relative to first projection of first plane.
+
+    Fallback: per-distance `shrink_list.mat`, a (3,2) matrix whose row 0 gives
+    the incremental shrink from the previous plane as [h, v]. Cumulated and
+    broadcast over projections. Layout of the returned axis matches the (v, h)
+    convention used for r/m elsewhere:
         shrink_nd[..., 0] = vertical   (y, row) = shrink_list[0, 1]
         shrink_nd[..., 1] = horizontal (x, col) = shrink_list[0, 0]
 
     angle_ramp=False (default, Peter's convention): constant per distance, equal
     to the mid-scan cumulative value (cum[k] + inc[k]/2). Matches the value
-    Peter feeds to his Fresnel-number correction.
+    Peter feeds to his Fresnel-number correction. Applies to the fallback only;
+    shapp.mat is per-projection so the flag is ignored when it is present.
 
     angle_ramp=True: linear ramp over angles, growing from cum[k] at angle 0
     to cum[k] + inc[k] at angle ntheta. Angle-mean equals Peter's value.
 
-    Returns a zero array if any mat file is missing.
+    Returns a zero array if neither source is available.
     """
+    shapp_path = f'{path}/{pfile}_/shapp.mat'
+    if os.path.exists(shapp_path):
+        logger.info(f'shrink: reading shapp from {shapp_path}')
+        raw_octave = load_octave_text_mat(shapp_path, 'shapp')
+        # Expect Octave 3D [2, ndist, ntheta_file] (v, h; distance; projection).
+        # Fail loudly on unexpected layout instead of returning silently wrong
+        # values — misordered axes here corrupt every downstream step.
+        if raw_octave.ndim != 3 or raw_octave.shape[0] != 2 or raw_octave.shape[1] != ndist:
+            raise ValueError(
+                f'{shapp_path}: expected shape (2, ndist={ndist}, ntheta), '
+                f'got {raw_octave.shape}'
+            )
+        raw = raw_octave.swapaxes(0, 2)[:ntheta]                # (ntheta, ndist, 2)
+        return raw.astype('float32')
+
     inc_v = []  # vertical (y) — col 2 of MATLAB (col 1 zero-indexed)
     inc_h = []  # horizontal (x) — col 1 of MATLAB (col 0 zero-indexed)
     for k in range(ndist):

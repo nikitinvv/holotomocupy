@@ -212,7 +212,6 @@ dkms.conf
 *.png
 
 report*
-*.tiff
 *.npy
 *.nsys-rep
 *.nsys

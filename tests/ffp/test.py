@@ -194,6 +194,77 @@ cl.gen_sqrt_data(cl.vars, cl.data)
 
 
 # ---------------------------------------------------------------------------
+# Setup summary PNG (scan pattern, probe, object, one diffraction pattern)
+# ---------------------------------------------------------------------------
+# Rank 0 writes a 2×3 overview next to this file. Uses matplotlib's Agg
+# backend so it works headless under mpirun. Runs BEFORE the initial-guess
+# reset so we're plotting the ground truth, and uses cl.data[0] (rank 0's
+# first local diffraction) for the example pattern.
+if rank == 0:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    prb_np   = cp.asnumpy(cl.vars['prb'])
+    obj_np   = cp.asnumpy(obj_gt)
+    diff_amp = np.asarray(cl.data[0])          # sqrt-intensity for local θ=0
+    diff_I   = diff_amp ** 2
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+    # (0,0) scan pattern on |δ| silhouette
+    ax = axes[0, 0]
+    ax.imshow(np.abs(obj_np.real), cmap='gray', origin='lower',
+              extent=[0, nobj, 0, nobj], alpha=0.4)
+    obj_c = nobj / 2
+    ax.scatter(obj_c + pos_gt[:, 1], obj_c + pos_gt[:, 0],
+               s=18, c=np.arange(ntheta), cmap='viridis',
+               edgecolors='k', linewidths=0.3)
+    ax.set_xlim(0, nobj); ax.set_ylim(0, nobj); ax.set_aspect('equal')
+    ax.set_title(f'Scan pattern — {ntheta} spiral positions '
+                 f'(overlap ≈ {overlap*100:.0f}%)')
+    ax.set_xlabel('x [pix]'); ax.set_ylabel('y [pix]')
+
+    # (0,1) probe amplitude
+    ax = axes[0, 1]
+    im = ax.imshow(np.abs(prb_np), cmap='gray', origin='lower')
+    ax.set_title('Probe amplitude')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    # (0,2) probe phase
+    ax = axes[0, 2]
+    im = ax.imshow(np.angle(prb_np), cmap='twilight',
+                   vmin=-np.pi, vmax=np.pi, origin='lower')
+    ax.set_title('Probe phase [rad]')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    # (1,0) object δ (real)
+    ax = axes[1, 0]
+    im = ax.imshow(obj_np.real, cmap='gray', origin='lower')
+    ax.set_title(r'Object δ  (Re(obj) — phase)')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    # (1,1) object β (imaginary)
+    ax = axes[1, 1]
+    im = ax.imshow(obj_np.imag, cmap='gray', origin='lower')
+    ax.set_title(r'Object β  (Im(obj) — absorption)')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    # (1,2) one diffraction pattern
+    ax = axes[1, 2]
+    im = ax.imshow(np.log10(diff_I + 1e-6), cmap='inferno', origin='lower')
+    ax.set_title(r'$|F\{prb \cdot S_{pos}(exp(i\,obj))\}|^2$  (θ=0, log10)')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+
+    plt.tight_layout()
+    setup_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'setup.png')
+    plt.savefig(setup_png, dpi=110, bbox_inches='tight')
+    plt.close(fig)
+    logger.info(f'Wrote setup summary → {setup_png}')
+
+
+# ---------------------------------------------------------------------------
 # Reset to initial guess and reconstruct
 # ---------------------------------------------------------------------------
 cl.vars['obj'][:] = 0                                       # flat δ = β = 0

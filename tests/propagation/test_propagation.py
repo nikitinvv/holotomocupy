@@ -8,9 +8,9 @@ from holotomocupy.propagation import Propagation
 
 # ── Acquisition parameters ───────────────────────────────────────────────────
 
-n          = 1024
-nz         = 1024
-ntheta     = 4
+n          = 8192
+nz         = 8192
+ntheta     = 2
 energy     = 17.1                        # keV
 wavelength = 1.24e-9 / energy            # m
 voxelsize  = 20e-9                       # m

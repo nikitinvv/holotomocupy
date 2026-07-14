@@ -91,8 +91,9 @@ def gen_object(n, delta, beta):
 obj = gen_object(nobj, 1, 1e-2)
 
 #### Probe — load from pre-saved ID16A TIFF files
-prb_abs   = read_tiff('data/prb_id16a/prb_abs_2048.tiff')[:ndist]
-prb_phase = read_tiff('data/prb_id16a/prb_phase_2048.tiff')[:ndist]
+_data_dir = '/home/beams/VNIKITIN/holotomocupy_mpi/tests/holotomo3d/data'
+prb_abs   = read_tiff(f'{_data_dir}/prb_abs_2048.tiff')[:ndist]
+prb_phase = read_tiff(f'{_data_dir}/prb_phase_2048.tiff')[:ndist]
 prb = prb_abs * np.exp(1j * prb_phase).astype('complex64')
 prb = prb[:, prb.shape[1]//2-n//2:prb.shape[1]//2+n//2,
              prb.shape[2]//2-n//2:prb.shape[2]//2+n//2]
@@ -136,6 +137,7 @@ args.checkpoint_step = 16          # save checkpoint every N iterations (-1 = ne
 args.error_step      = 4           # log error every N iterations (-1 = never)
 args.start_iter  = 0               # resume from this iteration (0 = fresh start)
 args.lam_laplacian = 0
+args.shift_type  = 'fft'           # 'fft' or 'cubic'
 
 # --- MPI ---
 args.comm = MPI.COMM_WORLD
@@ -171,7 +173,7 @@ cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 #### Reconstruction
 cl.vars['obj'][:] = 0
 cl.vars['prb'][:] = cp.array(1)
-cl.vars['pos'][:] = cp.array((pos + pos_err)[cl.st_theta:cl.end_theta])
+cl.vars['pos'][:] = cp.array((pos)[cl.st_theta:cl.end_theta])
 
 cl.BH(writer=writer)
 

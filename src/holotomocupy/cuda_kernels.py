@@ -822,3 +822,108 @@ void __global__ dsadj(float* f, float* dt1, float* dt2, float* c, float* g, floa
 """,
     "dsadj",
 )
+
+
+# ── Patch extract / scatter-add for RecFFP ─────────────────────────────────
+# Used by rec_ffp_mpi.py's F3 pipeline: gather (nz+2M, n+2M) patches around
+# each ipos = round(pos) from the full object grid, then scatter-add per-theta
+# patch adjoints back into the full obj-space gradient buffer.
+# Semantics:
+#     patches[t, py, px] = obj[cy - ipos_y[t] + py, cx - ipos_x[t] + px]
+# with (cy, cx) = (nzobj//2 - npad_y//2, nobj//2 - npad_x//2), so ipos=0
+# puts the patch center on the object center. Out-of-bounds indices give 0
+# on extract and are dropped on scatter-add.
+
+patch_extract_c64_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void patch_extract_c64(
+    const float2* __restrict__ obj,
+    const int*    __restrict__ ipos_y,
+    const int*    __restrict__ ipos_x,
+    float2*       __restrict__ patches,
+    int nzobj, int nobj, int npad_y, int npad_x, int ntheta,
+    int cy, int cx
+) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    int t  = blockIdx.z;
+    if (px >= npad_x || py >= npad_y || t >= ntheta) return;
+    int oy = cy - ipos_y[t] + py;
+    int ox = cx - ipos_x[t] + px;
+    float2 v;
+    if (oy >= 0 && oy < nzobj && ox >= 0 && ox < nobj) {
+        v = obj[oy * nobj + ox];
+    } else {
+        v.x = 0.0f; v.y = 0.0f;
+    }
+    patches[(t * npad_y + py) * npad_x + px] = v;
+}
+''', 'patch_extract_c64')
+
+patch_extract_f32_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void patch_extract_f32(
+    const float* __restrict__ obj,
+    const int*   __restrict__ ipos_y,
+    const int*   __restrict__ ipos_x,
+    float*       __restrict__ patches,
+    int nzobj, int nobj, int npad_y, int npad_x, int ntheta,
+    int cy, int cx
+) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    int t  = blockIdx.z;
+    if (px >= npad_x || py >= npad_y || t >= ntheta) return;
+    int oy = cy - ipos_y[t] + py;
+    int ox = cx - ipos_x[t] + px;
+    float v = (oy >= 0 && oy < nzobj && ox >= 0 && ox < nobj)
+                ? obj[oy * nobj + ox] : 0.0f;
+    patches[(t * npad_y + py) * npad_x + px] = v;
+}
+''', 'patch_extract_f32')
+
+patch_scatter_add_c64_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void patch_scatter_add_c64(
+    float2*       __restrict__ obj,
+    const int*    __restrict__ ipos_y,
+    const int*    __restrict__ ipos_x,
+    const float2* __restrict__ patches,
+    int nzobj, int nobj, int npad_y, int npad_x, int ntheta,
+    int cy, int cx
+) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    int t  = blockIdx.z;
+    if (px >= npad_x || py >= npad_y || t >= ntheta) return;
+    int oy = cy - ipos_y[t] + py;
+    int ox = cx - ipos_x[t] + px;
+    if (oy < 0 || oy >= nzobj || ox < 0 || ox >= nobj) return;
+    float2 v = patches[(t * npad_y + py) * npad_x + px];
+    float* dst = reinterpret_cast<float*>(&obj[oy * nobj + ox]);
+    atomicAdd(&dst[0], v.x);
+    atomicAdd(&dst[1], v.y);
+}
+''', 'patch_scatter_add_c64')
+
+patch_scatter_add_f32_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void patch_scatter_add_f32(
+    float*       __restrict__ obj,
+    const int*   __restrict__ ipos_y,
+    const int*   __restrict__ ipos_x,
+    const float* __restrict__ patches,
+    int nzobj, int nobj, int npad_y, int npad_x, int ntheta,
+    int cy, int cx
+) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    int t  = blockIdx.z;
+    if (px >= npad_x || py >= npad_y || t >= ntheta) return;
+    int oy = cy - ipos_y[t] + py;
+    int ox = cx - ipos_x[t] + px;
+    if (oy < 0 || oy >= nzobj || ox < 0 || ox >= nobj) return;
+    atomicAdd(&obj[oy * nobj + ox],
+              patches[(t * npad_y + py) * npad_x + px]);
+}
+''', 'patch_scatter_add_f32')

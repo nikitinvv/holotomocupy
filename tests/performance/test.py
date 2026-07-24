@@ -55,7 +55,7 @@ start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                            # no cost computation in hot loop
 log_level       = 'DEBUG'
-
+shift_type      = 'cubic'
 # Physics (brain-Y350 style; values are illustrative — perf timing doesn't depend on them)
 energy                  = 17.1
 detector_pixelsize      = 1.4760147601476e-6 * n / 4096
@@ -173,6 +173,7 @@ args = SimpleNamespace(
     focustodetectordistance=focustodetectordistance,
     z1=z1,
     detector_pixelsize=detector_pixelsize,
+    shift_type=shift_type,
     theta=np.linspace(0, np.pi, ntheta, endpoint=False).astype('float32'),
     mask=mask,
     # MPI

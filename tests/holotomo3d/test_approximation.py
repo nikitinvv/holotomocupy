@@ -49,6 +49,7 @@ args = SimpleNamespace(
     obj_dtype               = 'complex64',
     mask                    = 0.9,
     lam_prbfit              = 0.0,
+    lam_laplacian           = 0.0,
     rho                     = [1, 0.05, 0.02],
     niter                   = 1,
     nchunk                  = ntheta,
@@ -60,11 +61,40 @@ args = SimpleNamespace(
 
 cl = Rec(args)
 
-# F3/dF3/d2F_dF3 read self._eff_demag_chunk, which is normally set inside the
+# F3/dF3/d2F_dF3 read self._demag_chunk, which is normally set inside the
 # batch loops in BH() / gen_sqrt_data(). Mirror that setup once here so the
 # functionals can be called standalone.
-cl.eff_demagnifications[:] = (1 + cl.shrink_nd) / cp.array(cl.norm_magnifications[None, :])
-cl._eff_demag_chunk = cl.eff_demagnifications
+# Shrink grows sqrt-like within each distance and continues cumulatively into
+# the next distance (matching the shrink_list convention Peter uses on real
+# data). Same per-axis increment for y and x here; adjust axis_scale for
+# distinct axes if wanted.
+shrink_step = 0.01                                                   # per-distance end value
+sqrt_ramp   = np.sqrt(np.linspace(0, 1, ntheta, dtype='float32'))    # 0 -> 1, sqrt shape
+shrink_nd   = np.zeros((ntheta, ndist, 2), dtype='float32')
+for k in range(ndist):
+    start = k       * shrink_step
+    end   = (k + 1) * shrink_step
+    shrink_nd[:, k, :] = start + (end - start) * sqrt_ramp[:, None]
+shrink_nd = cp.asarray(shrink_nd)
+
+cl.demagnifications[:] = (1 + shrink_nd) / cp.array(cl.norm_magnifications[None, :, None])
+cl._demag_chunk = cl.demagnifications
+
+# Plot the shrinkage as a sanity check: one line per distance, per axis.
+_sh_np    = cp.asnumpy(shrink_nd)
+_fig_sh, _ax_sh = plt.subplots(figsize=(7, 4))
+_theta_ax = np.arange(ntheta)
+for _k in range(ndist):
+    _ax_sh.plot(_theta_ax, _sh_np[:, _k, 0], label=f'dist {_k}, y', linestyle='-')
+    _ax_sh.plot(_theta_ax, _sh_np[:, _k, 1], label=f'dist {_k}, x', linestyle='--')
+_ax_sh.set_xlabel('projection index')
+_ax_sh.set_ylabel('shrink_nd')
+_ax_sh.set_title('cumulative sqrt-ramp shrinkage per distance')
+_ax_sh.grid(True)
+_ax_sh.legend(fontsize=8)
+_fig_sh.tight_layout()
+_fig_sh.savefig('test_approximation_shrink.png', dpi=110)
+print('Saved figure: test_approximation_shrink.png')
 
 
 # ----------------------------------------------------------------------------

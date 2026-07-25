@@ -36,7 +36,7 @@ from holotomocupy.tomo      import Tomo
 
 # Geometry — small enough to run in seconds; large enough to see scaling effects.
 # Object grid (Radon input) is 2× the data grid so that at norm_mag[5] ≈ 0.5
-# (eff_demag ≈ 2) the data exactly covers the full object FOV — same shape as
+# (demag ≈ 2) the data exactly covers the full object FOV — same shape as
 # ctxl's nobj=3264, n=2048 (binned).
 N      = 256        # data in-plane size (x = column dim of sinogram output)
 NOBJ   = 512        # object in-plane size (x = column dim of Radon input)

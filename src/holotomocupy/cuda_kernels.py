@@ -450,6 +450,184 @@ void __global__ d2s(float2* res, float2* c, float2* c1, float2* c2, float* r, fl
 )
 
 
+# -----------------------------------------------------------------------------
+# d2s_m: single-pass 2nd directional derivative on (c, r, m).
+#
+# Bilinear form on directions (c1, Deltar1, Deltam1) and (c2, Deltar2, Deltam2).
+# Substitutes the identity d/dm_axis = -tau_axis(pixel) * d/dr_axis into the
+# existing d2s formula: use per-pixel effective Delta_r_eff = Deltar - tau*Deltam
+# for BOTH direction slots. Because the d2s kernel is quadratic in Delta_r,
+# swapping Delta_r -> Delta_r_eff produces exactly:
+#     r,r + m,m + r,m + c,r + c,m
+# 2nd-derivative contributions in a single kernel launch.
+# -----------------------------------------------------------------------------
+d2sm_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + fun_d2phi
+    + r"""
+void __global__ d2sm(float2* res, float2* c, float2* c1, float2* c2, float* r, float* mag,
+                     float* Deltar1, float* Deltam1, float* Deltar2, float* Deltam2,
+                     int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x        = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y        = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix       = (int)floorf(x);
+    const int   iy       = (int)floorf(y);
+    const float dx       = x - ix;
+    const float dy       = y - iy;
+
+    const float taux     = tx - (n  - 1) * 0.5f;
+    const float tauy     = ty - (nz - 1) * 0.5f;
+    const float Deltar1x = Deltar1[2 * tz + 1] - taux * Deltam1[2 * tz + 1];
+    const float Deltar1y = Deltar1[2 * tz + 0] - tauy * Deltam1[2 * tz + 0];
+    const float Deltar2x = Deltar2[2 * tz + 1] - taux * Deltam2[2 * tz + 1];
+    const float Deltar2y = Deltar2[2 * tz + 0] - tauy * Deltam2[2 * tz + 0];
+    const float cross    = Deltar1x * Deltar2y + Deltar1y * Deltar2x;
+    const int   tz_off   = tz * npsi * nzpsi;
+
+    float px[4], dpx[4], d2px[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d   = dx - jx;
+        px[jx + 1]   = phi(d);
+        dpx[jx + 1]  = dphi(d);
+        d2px[jx + 1] = d2phi(d);
+    }
+
+    float2 r0 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        float d2pdym  = d2phi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w  = d2px[jx + 1] * pdym    * Deltar1x * Deltar2x
+                     + dpx[jx + 1]  * dpdym   * cross
+                     + px[jx + 1]   * d2pdym  * Deltar1y * Deltar2y;
+            float w1 = dpx[jx + 1] * pdym  * Deltar1x
+                     + dpdym        * px[jx + 1] * Deltar1y;
+            float w2 = dpx[jx + 1] * pdym  * Deltar2x
+                     + dpdym        * px[jx + 1] * Deltar2y;
+            int idx = indx_s + row_off;
+            r0.x += w  * c[idx].x;
+            r0.y += w  * c[idx].y;
+            r0.x -= w1 * c1[idx].x;
+            r0.y -= w1 * c1[idx].y;
+            r0.x -= w2 * c2[idx].x;
+            r0.y -= w2 * c2[idx].y;
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "d2sm",
+)
+
+
+d2smf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + fun_d2phi
+    + r"""
+void __global__ d2sm(float* res, float* c, float* c1, float* c2, float* r, float* mag,
+                     float* Deltar1, float* Deltam1, float* Deltar2, float* Deltam2,
+                     int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x        = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y        = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix       = (int)floorf(x);
+    const int   iy       = (int)floorf(y);
+    const float dx       = x - ix;
+    const float dy       = y - iy;
+
+    const float taux     = tx - (n  - 1) * 0.5f;
+    const float tauy     = ty - (nz - 1) * 0.5f;
+    const float Deltar1x = Deltar1[2 * tz + 1] - taux * Deltam1[2 * tz + 1];
+    const float Deltar1y = Deltar1[2 * tz + 0] - tauy * Deltam1[2 * tz + 0];
+    const float Deltar2x = Deltar2[2 * tz + 1] - taux * Deltam2[2 * tz + 1];
+    const float Deltar2y = Deltar2[2 * tz + 0] - tauy * Deltam2[2 * tz + 0];
+    const float cross    = Deltar1x * Deltar2y + Deltar1y * Deltar2x;
+    const int   tz_off   = tz * npsi * nzpsi;
+
+    float px[4], dpx[4], d2px[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d   = dx - jx;
+        px[jx + 1]   = phi(d);
+        dpx[jx + 1]  = dphi(d);
+        d2px[jx + 1] = d2phi(d);
+    }
+
+    float r0 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        float d2pdym  = d2phi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w  = d2px[jx + 1] * pdym    * Deltar1x * Deltar2x
+                     + dpx[jx + 1]  * dpdym   * cross
+                     + px[jx + 1]   * d2pdym  * Deltar1y * Deltar2y;
+            float w1 = dpx[jx + 1] * pdym  * Deltar1x
+                     + dpdym        * px[jx + 1] * Deltar1y;
+            float w2 = dpx[jx + 1] * pdym  * Deltar2x
+                     + dpdym        * px[jx + 1] * Deltar2y;
+            int idx = indx_s + row_off;
+            r0 += w  * c[idx];
+            r0 -= w1 * c1[idx];
+            r0 -= w2 * c2[idx];
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "d2sm",
+)
+
+
 d2sf_kernel = cp.RawKernel(
     r"""
 extern "C"
@@ -601,6 +779,165 @@ void __global__ ds(float2* res, float2* c, float2* c1, float* r, float* mag, flo
 }
 """,
     "ds",
+)
+
+
+# -----------------------------------------------------------------------------
+# ds_m: single-pass (c, r, m) directional derivative.
+#
+# Same as ds_kernel but with an extra `Deltam` argument. Uses the identity
+#     d/dm_axis  =  - tau_axis(pixel) * d/dr_axis
+# to fold the m-direction into a per-pixel effective r-direction:
+#     Delta_r_eff_axis(pixel) = Delta_r_axis - tau_axis(pixel) * Delta_m_axis
+# and then applies the existing r-derivative formula. This costs the same as
+# ds_kernel: one kernel launch, no extra global memory traffic. Returns
+#     curlySc(c1, r, m) + d/dr curlySc(c, r, m) * Delta_r
+#                      + d/dm curlySc(c, r, m) * Delta_m
+# -----------------------------------------------------------------------------
+dsm_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsm(float2* res, float2* c, float2* c1,
+                    float* r, float* mag, float* Deltar, float* Deltam,
+                    int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x       = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y       = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix      = (int)floorf(x);
+    const int   iy      = (int)floorf(y);
+    const float dx      = x - ix;
+    const float dy      = y - iy;
+
+    // Effective per-pixel r-direction: Delta_r - tau * Delta_m.
+    const float taux    = tx - (n  - 1) * 0.5f;
+    const float tauy    = ty - (nz - 1) * 0.5f;
+    const float Deltarx = Deltar[2 * tz + 1] - taux * Deltam[2 * tz + 1];
+    const float Deltary = Deltar[2 * tz + 0] - tauy * Deltam[2 * tz + 0];
+    const int   tz_off  = tz * npsi * nzpsi;
+
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float2 r0 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w   = dpx[jx + 1] * pdym  * Deltarx
+                      + dpdym        * px[jx + 1] * Deltary;
+            float w1  = px[jx + 1] * pdym;
+
+            int   idx = indx_s + row_off;
+            r0.x -= w * c[idx].x;
+            r0.y -= w * c[idx].y;
+            r0.x += w1 * c1[idx].x;
+            r0.y += w1 * c1[idx].y;
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "dsm",
+)
+
+
+dsmf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsm(float* res, float* c, float* c1,
+                    float* r, float* mag, float* Deltar, float* Deltam,
+                    int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x       = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y       = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix      = (int)floorf(x);
+    const int   iy      = (int)floorf(y);
+    const float dx      = x - ix;
+    const float dy      = y - iy;
+
+    const float taux    = tx - (n  - 1) * 0.5f;
+    const float tauy    = ty - (nz - 1) * 0.5f;
+    const float Deltarx = Deltar[2 * tz + 1] - taux * Deltam[2 * tz + 1];
+    const float Deltary = Deltar[2 * tz + 0] - tauy * Deltam[2 * tz + 0];
+    const int   tz_off  = tz * npsi * nzpsi;
+
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float r0 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w   = dpx[jx + 1] * pdym  * Deltarx
+                      + dpdym        * px[jx + 1] * Deltary;
+            float w1  = px[jx + 1] * pdym;
+
+            int   idx = indx_s + row_off;
+            r0 -= w * c[idx];
+            r0 += w1 * c1[idx];
+        }
+    }
+
+    res[tx + ty * n + tz * n * nz] = r0;
+}
+}
+""",
+    "dsm",
 )
 
 
@@ -821,6 +1158,181 @@ void __global__ dsadj(float* f, float* dt1, float* dt2, float* c, float* g, floa
 }
 """,
     "dsadj",
+)
+
+
+# -----------------------------------------------------------------------------
+# dsm_adj: adjoint of dcurlySmc (the (c, r, m) directional derivative).
+#
+# Same as dsadj_kernel but also writes the per-pixel m-adjoint fields
+#     dtm1 = -tau_y(ty) * dt1     (∂curlySc / ∂m_y   at each pixel)
+#     dtm2 = -tau_x(tx) * dt2     (∂curlySc / ∂m_x   at each pixel)
+# so the m-direction adjoint reduces to a plain redot in Python — no
+# broadcast multiply of a big (ntheta, nz, n) array by tau.
+# -----------------------------------------------------------------------------
+dsmadj_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsmadj(float2* f,
+                       float2* dt1,  float2* dt2,
+                       float2* dtm1, float2* dtm2,
+                       float2* c, float2 *g, float* r, float* mag,
+                       int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x      = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y      = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   tz_off = tz * npsi * nzpsi;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float2 g0 = g[g_ind];
+    float2 dt10 = {};
+    float2 dt20 = {};
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w1  = -dpdym       * px[jx + 1];
+            float w2  = -dpx[jx + 1] * pdym;
+            int   idx = indx_s + row_off;
+
+            dt10.x += w1 * c[idx].x;
+            dt10.y += w1 * c[idx].y;
+            dt20.x += w2 * c[idx].x;
+            dt20.y += w2 * c[idx].y;
+
+            float w3 = px[jx + 1] * pdym;
+            atomicAdd(&(f[idx].x), w3 * g0.x);
+            atomicAdd(&(f[idx].y), w3 * g0.y);
+        }
+    }
+
+    const float tauy = ty - (nz - 1) * 0.5f;
+    const float taux = tx - (n  - 1) * 0.5f;
+    int out_ind = tx + ty * n + tz * n * nz;
+    dt1 [out_ind] = dt10;
+    dt2 [out_ind] = dt20;
+    dtm1[out_ind].x = -tauy * dt10.x;
+    dtm1[out_ind].y = -tauy * dt10.y;
+    dtm2[out_ind].x = -taux * dt20.x;
+    dtm2[out_ind].y = -taux * dt20.y;
+}
+}
+""",
+    "dsmadj",
+)
+
+
+dsmadjf_kernel = cp.RawKernel(
+    r"""
+extern "C"
+{
+"""
+    + fun_phi
+    + fun_dphi
+    + r"""
+void __global__ dsmadj(float* f,
+                       float* dt1,  float* dt2,
+                       float* dtm1, float* dtm2,
+                       float* c, float* g, float* r, float* mag,
+                       int n, int npsi, int nz, int nzpsi, int ntheta)
+{
+    int tx = blockDim.x * blockIdx.x + threadIdx.x;
+    int ty = blockDim.y * blockIdx.y + threadIdx.y;
+    int tz = blockDim.z * blockIdx.z + threadIdx.z;
+
+    if (tx >= n || ty >= nz || tz >= ntheta) return;
+
+    const float x      = mag[2 * tz + 1] * (tx - (n-1) * 0.5f) - r[2 * tz + 1] + (npsi-1) * 0.5f;
+    const float y      = mag[2 * tz + 0] * (ty - (nz-1) * 0.5f) - r[2 * tz + 0] + (nzpsi-1) * 0.5f;
+    const int   ix     = (int)floorf(x);
+    const int   iy     = (int)floorf(y);
+    const float dx     = x - ix;
+    const float dy     = y - iy;
+    const int   tz_off = tz * npsi * nzpsi;
+    const int   g_ind  = tx + ty * n + tz * n * nz;
+
+    float g0 = g[g_ind];
+
+    float px[4], dpx[4];
+    for (int jx = -1; jx < 3; jx++) {
+        float d = dx - jx;
+        px[jx + 1]  = phi(d);
+        dpx[jx + 1] = dphi(d);
+    }
+
+    float dt10 = 0.0f;
+    float dt20 = 0.0f;
+
+    for (int jy = -1; jy < 3; jy++)
+    {
+        int indy = iy + jy;
+        int indy_s = sym_idx(indy, nzpsi);
+        float dym     = dy - jy;
+        float pdym    = phi(dym);
+        float dpdym   = dphi(dym);
+        int   row_off = indy_s * npsi + tz_off;
+
+        for (int jx = -1; jx < 3; jx++)
+        {
+            int indx = ix + jx;
+            int indx_s = sym_idx(indx, npsi);
+
+            float w1  = -dpdym       * px[jx + 1];
+            float w2  = -dpx[jx + 1] * pdym;
+            int   idx = indx_s + row_off;
+            float cv  = c[idx];
+            dt10 += w1 * cv;
+            dt20 += w2 * cv;
+
+            float w3 = px[jx + 1] * pdym;
+            atomicAdd(&(f[idx]), w3 * g0);
+        }
+    }
+
+    const float tauy = ty - (nz - 1) * 0.5f;
+    const float taux = tx - (n  - 1) * 0.5f;
+    int out_ind = tx + ty * n + tz * n * nz;
+    dt1 [out_ind] = dt10;
+    dt2 [out_ind] = dt20;
+    dtm1[out_ind] = -tauy * dt10;
+    dtm2[out_ind] = -taux * dt20;
+}
+}
+""",
+    "dsmadj",
 )
 
 

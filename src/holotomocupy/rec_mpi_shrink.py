@@ -1,3 +1,10 @@
+"""Variant of rec_mpi that treats demag (per-projection, per-axis magnification)
+as an OPTIMIZED variable alongside (obj, prb, pos), instead of a fixed parameter.
+F3/dF3/d2F_dF3/gF3 use dcurlySmc/d2curlySmc/dcurlySadjmc so the extra (Δm)
+direction only costs the same as a single-direction kernel launch.
+
+Requires args.rho to have 4 entries: [rho_obj, rho_prb, rho_pos, rho_demag]."""
+
 import numpy as np
 import cupy as cp
 import os
@@ -30,10 +37,10 @@ class Rec:
             setattr(self, key, value)
 
         # list of functionals, gradients, differentials, and second-order differentials
-        self.F = [self.F0, self.F1, self.F2, self.F3]
-        self.gF = [self.gF0, self.gF1, self.gF2, self.gF3]
-        self.dF = [self.dF0, self.dF1, self.dF2, self.dF3]
-        self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2,self.d2F_dF3]
+        self.F      = [self.F0,      self.F1,      self.F2,      self.F3,      self.F4]
+        self.gF     = [self.gF0,     self.gF1,     self.gF2,     self.gF3,     self.gF4]
+        self.dF     = [self.dF0,     self.dF1,     self.dF2,     self.dF3,     self.dF4]
+        self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2, self.d2F_dF3, self.d2F_dF4]
 
         # Worst-case chunking-pool footprint for any single gpu_batch call,
         # double-buffered. Candidates (all proper-input/output buffers):
@@ -79,7 +86,10 @@ class Rec:
         voxelsize = self.detector_pixelsize / magnifications[0]
 
         # scaling variables
-        self.rho_sq = {'obj': args.rho[0]**2, 'prb': args.rho[1]**2, 'pos': args.rho[2]**2}
+        self.rho_sq = {'obj': args.rho[0]**2,
+                       'prb': args.rho[1]**2,
+                       'pos': args.rho[2]**2,
+                       'tp':  args.rho[3]**2}   # tp = tanh params (A, k) per (dist, y/x)
 
         # cuFFTDx JIT compile: rank 0 builds the .so, then all ranks proceed
         if self.rank == 0:
@@ -143,11 +153,17 @@ class Rec:
             etas_obj = make_pinned(obj_shape, dtype=self.obj_dtype); etas_obj[:] = 0
 
         # reconstruction variables
+        # vars['tp']: tanh parameters (shape (ndist, 3, 2)) — GLOBAL (same on all ranks, like prb).
+        # Param axis: 0=A, 1=k, 2=B  →  shrink(t; A, k, B) = B + A · tanh(k·t)
+        # per (dist, axis) → demag[theta, dist, axis] = (1 + shrink) / norm_mag[dist].
+        # Convention: B[dist=0] = 0 (pinned in _clip_tp) so the first dist has no offset;
+        # B[dist>0] captures the "starting shrink" so profiles can continue between dists.
         self.vars = {
             'obj':  obj_buf,
             'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
             'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
+            'tp':   cp.zeros([self.ndist, 3, 2],                           dtype='float32'),
         }
         # measurement data; ref is owned by cl_prb_term — aliased here for back-compat
         # so external code (readers, gen_sqrt_ref out-arg) can keep using cl.ref.
@@ -163,18 +179,26 @@ class Rec:
             ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2], dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
+            ge["tp"]   = cp.zeros([self.ndist, 3, 2], dtype='float32')
         self.etas["obj"] = etas_obj
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
-        # demagnifications: (local_ntheta, ndist, 2), per-axis (0=y, 1=x).
-        # Filled by reader.read_demagnifications(); reconstructions no
-        # longer track the raw shrink separately.
-        self.demagnifications = cp.zeros((self.local_ntheta, self.ndist, 2), dtype='float32')
+        # Per-rank normalized time coordinate: t = θ_idx / (ntheta − 1), one value
+        # per local projection. Shape (local_ntheta, 1) so it broadcasts cleanly
+        # against (chunk, 2) shrink/demag arrays inside F4/dF4/…
+        # Kept on GPU (cupy) so gpu_batch slices it there without H2D.
+        t_global = cp.arange(self.ntheta, dtype='float32') / max(self.ntheta - 1, 1)
+        self.t_local = t_global[self.st_theta:self.end_theta].reshape(-1, 1)
+        # GPU-resident norm_magnifications for fast per-dist lookup inside kernels.
+        self.norm_magnifications_gpu = cp.asarray(self.norm_magnifications, dtype='float32')
     
-    def BH(self, writer=None):
+    def BH(self, writer=None, shrink_gt=None):
+        """shrink_gt: optional numpy array (ntheta, ndist, 2) — full ground-truth
+        shrink profile, plotted as an overlay on every per-checkpoint shrink PNG."""
         vars  = self.vars
         grads = self.grads
         etas  = self.etas
+        self.shrink_gt = shrink_gt
 
         self.precalc(vars)
         self.error_debug(vars, -1)
@@ -195,8 +219,8 @@ class Rec:
     def precalc(self, vars):
         """One-time setup at the start of BH: obj normalization,
         pos snapshot, initial proj from fwd_tomo + redist.
-        demagnifications must already be filled (by the driver, via
-        reader.read_demagnifications())."""
+        vars['demag'] must already be filled by the driver (via
+        reader.read_demagnifications(out=cl.vars['demag']))."""
 
         # normalize obj to work with normal operators (restored at BH exit)
         vars["obj"] /= self.norm_const
@@ -204,6 +228,7 @@ class Rec:
             vars["obj"] *= self.cl_tomo.mask
 
         self.pos_init = vars['pos'].copy()
+        self.tp_init  = vars['tp'].copy()        # snapshot for shrink plots
 
         self.fwd_tomo(vars["obj"], out=self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])
@@ -241,10 +266,13 @@ class Rec:
             top = 0
             for v in ("obj", "pos"):
                 top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
-            # probe is shared across ranks; only rank 0 contributes to the rank-0 sum
+            # prb and tp are shared across ranks (global); only rank 0 contributes to
+            # the sum so allreduce doesn't double-count.
             dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
+            dot_tp  = self.linear_redot_batch(etas['tp'],  grads['tp'],  beta, -1)
             if self.rank == 0:
                 top -= dot_prb / self.rho_sq['prb']
+                top -= dot_tp  / self.rho_sq['tp']
             self.linear_batch(etas['proj'], grads['proj'], beta, -1)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
@@ -253,7 +281,7 @@ class Rec:
 
     def apply_step(self, vars, etas, alpha):
         """var ← var + alpha·eta for every variable."""
-        for v in ("obj", "prb", "pos", "proj"):
+        for v in ("obj", "prb", "pos", "proj", "tp"):
             self.linear_batch(vars[v], etas[v], 1, alpha)
 
     def log_iter(self, vars, i, writer):
@@ -292,22 +320,23 @@ class Rec:
 
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
         def _hessian_cascade(
-            self, out, d, demag,
-            x2, y2, z2,
-            x1, y1, z1,
-            x0, y0, z0,
+            self, out,
+            d, x2, y2, z2, x1, y1, z1, t_chunk,   # proper inputs (chunked on axis 0)
+            x3, y3, z3,                            # tp (ndist, 2, 2) — nonproper (global)
+            x0, y0, z0,                            # prb (ndist, ...) — nonproper (global)
         ):
-            self._demag_chunk = demag
+            self._t_chunk = t_chunk
             self.cl_shift.coeff_cache_reset()
             # Identity check must happen on the un-sliced arrays; arr[k] views
             # are never `is`-equal even when their backing memory is identical.
             y_is_z = y0 is z0
             for k in range(self.ndist):
                 self._dist_idx = k
-                x = [x0[k], x1, x2[:, k]]
-                y = [y0[k], y1, y2[:, k]]
-                z = y if y_is_z else [z0[k], z1, z2[:, k]]
-                w = [None, None, None]
+                # tp is (ndist, 2, 2) — slice by dist gives (2, 2). Level-4 cascade input.
+                x = [x0[k], x1, x2[:, k], x3[k]]
+                y = [y0[k], y1, y2[:, k], y3[k]]
+                z = y if y_is_z else [z0[k], z1, z2[:, k], z3[k]]
+                w = [None, None, None, None]
 
                 for id in range(1, len(self.F))[::-1]:
                     # d2F(dFy,dFz) + dF(d2F(y,z))
@@ -320,10 +349,11 @@ class Rec:
 
 
         _hessian_cascade(
-            self, out, self.data, self.demagnifications,
-            vars["pos"], grads["pos"], etas["pos"],
-            vars["proj"], grads["proj"], etas["proj"],
-            vars["prb"], grads["prb"], etas["prb"],### reordered to keep syntax for the gpu_batch (last 4 are on gpu)
+            self, out,
+            self.data, vars["pos"], grads["pos"], etas["pos"],
+            vars["proj"], grads["proj"], etas["proj"], self.t_local,
+            vars["tp"],  grads["tp"],  etas["tp"],
+            vars["prb"], grads["prb"], etas["prb"],  ### last block is nonproper (global)
         )
 
         return out[0].get()
@@ -348,7 +378,11 @@ class Rec:
 
         ## copying to cpu before reduce for now
         grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
-        
+
+        # tp is GLOBAL — sum per-rank contributions across ranks.
+        # B is a free variable — no gradient reduction, no B pinning.
+        grads['tp'][:] = cp.array(self.allreduce(grads['tp'].get()))
+
     @timer    
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term
@@ -360,11 +394,16 @@ class Rec:
             parameters to functions are unified as (x,y,z)
         """
 
-        # part1, parallelization over angles
+        # part1, parallelization over angles. prb and tp are GLOBAL — each rank
+        # accumulates its local contribution; allreduce in the outer gradients().
         grads['prb'][:] = 0
-        @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
-        def _gradients_cascade(self,gradproj,gradpos,gradprb,d,demag,proj,pos,prb):
-            self._demag_chunk = demag
+        grads['tp'][:]  = 0
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=4)
+        def _gradients_cascade(self,
+                               gradproj, gradpos, gradprb, gradtp,   # 2 proper + 2 nonproper
+                               d, proj, pos, t_chunk,                # 4 proper inputs
+                               tp, prb):                              # 2 nonproper inputs
+            self._t_chunk = t_chunk
             self.cl_shift.coeff_cache_reset()
             # gF3 returns un-coeff'd Deltapsi per dist on the (nzobj, nobj) grid.
             # Accumulate across dists into gradproj, then apply coeff() once
@@ -372,18 +411,21 @@ class Rec:
             gradproj[:] = 0
             for k in range(self.ndist):
                 self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
+                x = [prb[k], proj, pos[:, k], tp[k]]     # tp[k] shape (2, 2)
                 y = d[:, k]
                 for id in range(len(self.gF)):
                     y = self.gF[id](x, y)
                 gradprb[k]    += y[0] * self.rho_sq['prb']
                 gradproj      += y[1] * self.rho_sq['obj']
                 gradpos[:, k]  = y[2] * self.rho_sq['pos']
+                gradtp[k]     += y[3] * self.rho_sq['tp']   # per-dist tp block
             gradproj[:] = self.cl_shift.coeff(gradproj)
 
-        _gradients_cascade(self,grads['proj'],grads['pos'],grads['prb'],
-                           self.data,self.demagnifications,
-                           vars["proj"],vars["pos"],vars["prb"])
+        _gradients_cascade(self,
+                           grads['proj'], grads['pos'],           # proper outputs
+                           grads['prb'], grads['tp'],             # nonproper outputs
+                           self.data, vars['proj'], vars['pos'], self.t_local,   # proper inputs
+                           vars['tp'], vars['prb'])                # nonproper inputs
 
     @timer
     def fwd_tomo(self, obj, out):
@@ -597,79 +639,227 @@ class Rec:
         y21 = y11
         return [y21, y22]
     
-    ####### (x21,x22) = F3(x31,x32,x33) = (x31,S_{x_33}(x32))
+    ####### (x21,x22) = F3(x31,x32,x33,x34) = (x31,S_{x33,x34}(x32))
+    # x34 = demag[:, dist] is now a VARIABLE (not a fixed param), so it enters
+    # dF3 as its own direction and d2F_dF3 as (r,m) mixed second-order terms.
     @nvtx.annotate("F3", color="green")
     def F3(self, x):
-        """In: (x31, x32, x33)  Out: (x21,x22). Per-dist; uses self._dist_idx."""
-        x31, x32, x33 = x  # x32: [chunk, nzobj, nobj] dist-agnostic, x33: [chunk, 2]
+        """In: (x31, x32, x33, x34)  Out: (x21,x22). Per-dist."""
+        x31, x32, x33, x34 = x  # x33: pos[:,dist] (chunk, 2); x34: demag[:,dist] (chunk, 2)
         c   = self.cl_shift.coeff_cached(x32)
-        ed  = self._demag_chunk[:, self._dist_idx]
-        x22 = self.cl_shift.curlySc(c, x33, ed)
+        x22 = self.cl_shift.curlySc(c, x33, x34)
         return [x31, x22]
 
     @nvtx.annotate("dF3", color="green")
     def dF3(self, x, y, return_x=True):
-        """In: (x31, x32, x33),(y31, y32, y33)  Out: (y31, y22). Per-dist."""
-        x31, x32, x33 = x
-        y31, y32, y33 = y
+        """In: (x31,x32,x33,x34),(y31,y32,y33,y34)  Out: (y31, y22). Per-dist.
+
+        dcurlySmc folds (Δr, Δm) into a per-pixel Δr_eff = Δr − τ·Δm inside a
+        single kernel launch — same cost as the pos-only path.
+        """
+        x31, x32, x33, x34 = x
+        y31, y32, y33, y34 = y
         c   = self.cl_shift.coeff_cached(x32)
         c1  = self.cl_shift.coeff_cached(y32)
-        ed  = self._demag_chunk[:, self._dist_idx]
-        y22 = self.cl_shift.dcurlySc(c, x33, ed, c1, y33)
+        y22 = self.cl_shift.dcurlySmc(c, x33, x34, c1, y33, y34)
         if return_x:
-            x22 = self.cl_shift.curlySc(c, x33, ed)
+            x22 = self.cl_shift.curlySc(c, x33, x34)
             return [x31, x22], [y31, y22]
         return [y31, y22]
 
     @nvtx.annotate("d2F_dF3", color="purple")
     def d2F_dF3(self, x, y, z, w):
-        """In: (x31, x32, x33),(y31, y32, y33),(z31, z32, z33),(w31, w32, w33)  Out: (y21, y22). Per-dist."""
-        x31, x32, x33 = x
-        y31, y32, y33 = y
-        z31, z32, z33 = z
-        w31, w32, w33 = w
+        """In: (x31..x34),(y31..y34),(z31..z34),(w31..w34)  Out: (y21, y22). Per-dist.
 
-        c   = self.cl_shift.coeff_cached(x32)
-        cy  = self.cl_shift.coeff_cached(y32)
-        cz  = self.cl_shift.coeff_cached(z32)
-        ed  = self._demag_chunk[:, self._dist_idx]
-        y22 = self.cl_shift.d2curlySc(c, x33, ed, cy, y33, cz, z33)
+        Analogous to the original d2F_dF3: the (r,r)+(m,m)+(r,m) block is one
+        d2curlySmc call (c1 = c2 = 0 so no c-mixed terms), and the two c-mixed
+        pieces (c,r)+(c,m) — one per (y,z) ordering — are separate dcurlySmc
+        calls just like the original d2F_dF3 used dcurlySc for w-correction.
+        """
+        x31, x32, x33, x34 = x
+        y31, y32, y33, y34 = y
+        z31, z32, z33, z34 = z
+        w31, w32, w33, w34 = w
 
+        c      = self.cl_shift.coeff_cached(x32)
+        cy     = self.cl_shift.coeff_cached(y32)
+        cz     = self.cl_shift.coeff_cached(z32)
+        zero_c = cp.zeros_like(c)
+
+        # (r,r) + (m,m) + (r,m) via single fused kernel (c1 = c2 = 0)
+        y22 = self.cl_shift.d2curlySmc(c, x33, x34,
+                                       zero_c, y33, y34,
+                                       zero_c, z33, z34)
+        # (c,r) + (c,m) mixed 2nd derivatives — symmetric over (y↔z).
+        # dcurlySmc(cy, r, m, 0, z_r, z_m) = ∂/∂(r,m) curlySc(cy, r, m) · (z_r, z_m).
+        y22 += self.cl_shift.dcurlySmc(cy, x33, x34, zero_c, z33, z34)
+        y22 += self.cl_shift.dcurlySmc(cz, x33, x34, zero_c, y33, y34)
+
+        # w-correction (matches original d2F_dF3): full dF3 in direction w
         if w32 is not None:
             cw = self.cl_shift.coeff_cached(w32)
-            y22 += self.cl_shift.dcurlySc(c, x33, ed, cw, w33)
+            y22 += self.cl_shift.dcurlySmc(c, x33, x34, cw, w33, w34)
 
         return [w31, y22]
 
     @nvtx.annotate("gF3", color="green")
     def gF3(self, x, y):
-        """In: x(x01, x02, x03) ,(y21,y22) Out: (y31,y32). Per-dist.
+        """In: x=(x31,x32,x33,x34),(y21,y22)  Out: (y31,y32,y33,y34). Per-dist.
 
-        Returns un-coeff'd Deltapsi in y32; caller must sum over distances and apply
-        cl_shift.coeff() once after the dist loop.
+        dcurlySadjmc returns (adj_c1, adj_r, adj_m) at the same base point. Caller
+        sums y32 over distances and applies cl_shift.coeff() once after the loop.
         """
         y21, y22 = y  # y22: [chunk, nz, n]
         x = self.apply_F_from(x, 4)
-        x31, x32, x33 = x
+        x31, x32, x33, x34 = x
         c = self.cl_shift.coeff_cached(x32)
-        y32, y33 = self.cl_shift.dcurlySadjc(c, x33, self._demag_chunk[:, self._dist_idx], y22)
-        return [y21, y32, y33]
+        y32, y33, y34 = self.cl_shift.dcurlySadjmc(c, x33, x34, y22)
+        return [y21, y32, y33, y34]
+
+    ####### (x31,x32,x33,x34_demag) = F4(x41,x42,x43,x44_tp)
+    # F4 turns per-dist tanh parameters into per-projection demag with
+    # SQUARED reparameterization for positivity (no boundary, no clip):
+    #     A(a)     = a²        →  A ≥ 0 always
+    #     k(k_raw) = k_raw²    →  k ≥ 0 always
+    #     shrink(t; a, k_raw, B) = B + A · tanh(k · t)
+    #     demag = (1 + shrink) / norm_magnifications[dist]
+    #
+    # x44 layout (3, 2): axis 0 = param (0=a, 1=k_raw, 2=B), axis 1 = y/x.
+    # A, k are derived positive quantities. B is a free variable too — no
+    # continuity constraint; the data-fit drives it.
+    # Note: at a=0 or k_raw=0, chain-rule factor (2a, 2k_raw) vanishes — init
+    # both to small nonzero values so the gradient can move them.
+    @nvtx.annotate("F4", color="green")
+    def F4(self, x):
+        """In: (x41, x42, x43, x44_tp)  Out: (x41, x42, x43, x34_demag). Per-dist."""
+        x41, x42, x43, x44 = x
+        a     = x44[0, :]; k_raw = x44[1, :]; B  = x44[2, :]   # (2,) each
+        A     = a * a                                          # (2,)  A = a² ≥ 0
+        k     = k_raw * k_raw                                  # (2,)  k = k_raw² ≥ 0
+        t  = self._t_chunk                                                    # (chunk, 1)
+        kt = k[None, :] * t                                                   # (chunk, 2)
+        shrink = B[None, :] + A[None, :] * cp.tanh(kt)
+        demag  = (1.0 + shrink) / self.norm_magnifications_gpu[self._dist_idx]
+        return [x41, x42, x43, demag]
+
+    @nvtx.annotate("dF4", color="green")
+    def dF4(self, x, y, return_x=True):
+        """Directional derivative on (da, dk_raw, dB). Per-dist. Chain rule:
+            ∂shrink/∂a     = 2a       · tanh(k·t)
+            ∂shrink/∂k_raw = 2k_raw·A · t · sech²(k·t)
+            ∂shrink/∂B     = 1
+        """
+        x41, x42, x43, x44 = x
+        y41, y42, y43, y44 = y
+        a     = x44[0, :]; k_raw = x44[1, :]
+        da    = y44[0, :]; dk_raw = y44[1, :]; dB = y44[2, :]
+        A     = a * a
+        k     = k_raw * k_raw
+        t  = self._t_chunk
+        kt = k[None, :] * t
+        tanh_kt  = cp.tanh(kt)
+        sech2_kt = 1.0 - tanh_kt * tanh_kt
+        nm       = self.norm_magnifications_gpu[self._dist_idx]
+
+        dshrink = (dB[None, :]
+                   + (2.0 * a * da)[None, :] * tanh_kt
+                   + (2.0 * k_raw * A * dk_raw)[None, :] * t * sech2_kt)
+        ddemag  = dshrink / nm
+        if return_x:
+            B     = x44[2, :]
+            shrink = B[None, :] + A[None, :] * tanh_kt
+            demag  = (1.0 + shrink) / nm
+            return [x41, x42, x43, demag], [y41, y42, y43, ddemag]
+        return [y41, y42, y43, ddemag]
+
+    @nvtx.annotate("d2F_dF4", color="purple")
+    def d2F_dF4(self, x, y, z, w):
+        """Bilinear 2nd-derivative on (y, z) + w-correction.
+
+        Second partials (B is linear → all B cross-partials vanish):
+          ∂²/∂a²          = 2 · tanh(k·t)
+          ∂²/∂a·∂k_raw    = 4·a·k_raw · t · sech²(k·t)
+          ∂²/∂k_raw²      = 2·A · t · sech²(k·t) · [1 − 4·k_raw²·t·tanh(k·t)]
+        """
+        x41, x42, x43, x44 = x
+        y41, y42, y43, y44 = y
+        z41, z42, z43, z44 = z
+        w41, w42, w43, w44 = w
+
+        a     = x44[0, :]; k_raw = x44[1, :]
+        A     = a * a
+        k     = k_raw * k_raw
+        t  = self._t_chunk
+        kt = k[None, :] * t
+        tanh_kt  = cp.tanh(kt)
+        sech2_kt = 1.0 - tanh_kt * tanh_kt
+        nm       = self.norm_magnifications_gpu[self._dist_idx]
+
+        # per-pixel 2nd-partial coefficients (all shape (chunk, 2))
+        d_aa    = 2.0 * tanh_kt                                              # broadcasts (1, 2)*
+        d_ak    = (4.0 * a * k_raw)[None, :] * t * sech2_kt
+        d_kk    = 2.0 * A[None, :] * t * sech2_kt \
+                  * (1.0 - 4.0 * (k_raw * k_raw)[None, :] * t * tanh_kt)
+
+        day, dky = y44[0, :], y44[1, :]
+        daz, dkz = z44[0, :], z44[1, :]
+        d2shrink = (d_aa * day[None, :] * daz[None, :]
+                    + d_ak * (day[None, :] * dkz[None, :] + dky[None, :] * daz[None, :])
+                    + d_kk * dky[None, :] * dkz[None, :])
+        d2demag  = d2shrink / nm
+
+        if w44 is not None:
+            daw, dkw, dBw = w44[0, :], w44[1, :], w44[2, :]
+            d2demag += (dBw[None, :]
+                        + (2.0 * a * daw)[None, :] * tanh_kt
+                        + (2.0 * k_raw * A * dkw)[None, :] * t * sech2_kt) / nm
+
+        return [w41, w42, w43, d2demag]
+
+    @nvtx.annotate("gF4", color="green")
+    def gF4(self, x, y):
+        """Adjoint. y = (y21, y32, y33, y34); returns (y21, y32, y33, y44).
+
+        Per-dist (squared chain rule folded in):
+            g_a[axis]     = 2a       · Σ_c y34[c, axis] · tanh(k·t)         / nm
+            g_k_raw[axis] = 2k_raw·A · Σ_c y34[c, axis] · t · sech²(k·t)    / nm
+            g_B[axis]     = Σ_c y34[c, axis]                                / nm
+        g_B is zeroed later in gradients() since B is enforced, not optimized."""
+        y21, y32, y33, y34 = y  # y34 shape (chunk, 2)
+        x = self.apply_F_from(x, 5)                                     # no-op (len(F)=5)
+        x41, x42, x43, x44 = x
+        a     = x44[0, :]; k_raw = x44[1, :]
+        A     = a * a
+        k     = k_raw * k_raw
+        t  = self._t_chunk
+        kt = k[None, :] * t
+        tanh_kt  = cp.tanh(kt)
+        sech2_kt = 1.0 - tanh_kt * tanh_kt
+        nm       = self.norm_magnifications_gpu[self._dist_idx]
+
+        g_a     = 2.0 * a       * cp.sum(y34 * tanh_kt,        axis=0) / nm         # (2,)
+        g_k_raw = 2.0 * k_raw * A * cp.sum(y34 * t * sech2_kt, axis=0) / nm         # (2,)
+        g_B     = cp.sum(y34,                                  axis=0) / nm         # (2,)
+        y44 = cp.stack([g_a, g_k_raw, g_B], axis=0)                                  # (3, 2)
+        return [y21, y32, y33, y44]
 
     @timer
-    def min(self, prb, obj, pos, proj):
+    def min(self, prb, obj, pos, proj, tp):
         out = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
-        def _min(self, out, proj, pos, data, demag, prb):
-            self._demag_chunk = demag
+        def _min(self, out,
+                 proj, pos, t_chunk, data,     # proper
+                 tp, prb):                     # nonproper (global)
+            self._t_chunk = t_chunk
             self.cl_shift.coeff_cache_reset()
             for k in range(self.ndist):
                 self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
-                y = self.apply_F_from(x, 1)
+                x = [prb[k], proj, pos[:, k], tp[k]]
+                y = self.apply_F_from(x, 1)     # applies F4, F3, F2, F1
                 out[:] += self.F0(y, data[:, k])
 
-        _min(self, out, proj, pos, self.data, self.demagnifications, prb)
+        _min(self, out, proj, pos, self.t_local, self.data, tp, prb)
 
         out = out[0]
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -684,8 +874,16 @@ class Rec:
             return
         
         residual = None# self.compute_residual(vars)
+        # writer receives shrink for BOTH init and current tp — computed as
+        # shrink[θ, dist, axis] = B + A · tanh(k·t). Only this rank's theta slice
+        # for (init, current); shrink_gt (if set) is the full ntheta profile.
+        shrink_now  = self._tp_to_shrink_local(vars['tp'])
+        shrink_init = self._tp_to_shrink_local(self.tp_init)
         writer.write_checkpoint(vars, i, self.norm_const,
-                                residual=residual, pos_init=self.pos_init)
+                                residual=residual,
+                                pos_init=self.pos_init,
+                                shrink=shrink_now, shrink_init=shrink_init,
+                                shrink_gt=getattr(self, 'shrink_gt', None))
 
     def check_approximation(self, vars, etas, top, bottom, alpha, i, writer=None):
         """Compare the real functional along the descent direction with the
@@ -705,8 +903,11 @@ class Rec:
             self._chk_projt = make_pinned(vars['proj'].shape, self.obj_dtype)
             self._chk_prbt  = cp.empty_like(vars['prb'])
             self._chk_post  = cp.empty_like(vars['pos'])
+            self._chk_tpt   = cp.empty_like(vars['tp'])
 
-        objt, prbt, post, projt = self._chk_objt, self._chk_prbt, self._chk_post, self._chk_projt
+        objt, prbt, post, projt, tpt = (
+            self._chk_objt, self._chk_prbt, self._chk_post, self._chk_projt, self._chk_tpt
+        )
 
         npp = 5
         t = np.linspace(0, 2 * alpha, npp).astype('float32')
@@ -717,9 +918,10 @@ class Rec:
             self.linear_batch(vars['prb'],  etas['prb'],  1, t[k], out=prbt)
             self.linear_batch(vars['pos'],  etas['pos'],  1, t[k], out=post)
             self.linear_batch(vars['proj'], etas['proj'], 1, t[k], out=projt)
-            err_real[k] = self.min(prbt, objt, post, projt)
+            self.linear_batch(vars['tp'],   etas['tp'],   1, t[k], out=tpt)
+            err_real[k] = self.min(prbt, objt, post, projt, tpt)
 
-        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'])
+        f0 = self.min(vars['prb'], vars['obj'], vars['pos'], vars['proj'], vars['tp'])
         err_approx = f0 - top * t + 0.5 * bottom * t * t
 
         if self.rank != 0:
@@ -751,9 +953,9 @@ class Rec:
         BH (before the loop) and is always logged regardless of error_step."""
         if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
-            
+
         t_min = time.time()
-        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
+        err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"], vars["tp"])
         min_time = time.time() - t_min
         if self.rank==0:
             if i==-1:
@@ -768,25 +970,65 @@ class Rec:
                 name = f"{self.path_out}/conv.csv"
                 os.makedirs(os.path.dirname(name), exist_ok=True)
                 self.table.to_csv(name, index=False)
+        # per-(dist, axis) SHRINK stats — tp is global, so rank 0 computes locally.
+        self._log_shrink_stats(vars['tp'], i)
+
+    def _tp_to_shrink_global(self, tp):
+        """Compute the FULL ntheta shrink array from tp (shape (ndist, 3, 2)).
+        Squared parameterization: A = a², k = k_raw².
+            shrink[θ, dist, axis] = B + A · tanh(k · t)   with t = θ / (ntheta − 1).
+        Returns numpy shape (ntheta, ndist, 2). tp is global so no gather needed."""
+        tp_np = tp.get() if isinstance(tp, cp.ndarray) else np.asarray(tp)
+        a     = tp_np[:, 0, :]                                    # (ndist, 2)
+        k_raw = tp_np[:, 1, :]                                    # (ndist, 2)
+        B     = tp_np[:, 2, :]                                    # (ndist, 2)
+        A     = a * a
+        k     = k_raw * k_raw
+        t = np.arange(self.ntheta, dtype='float32') / max(self.ntheta - 1, 1)  # (ntheta,)
+        kt = k[None, :, :] * t[:, None, None]                     # (ntheta, ndist, 2)
+        return (B[None, :, :] + A[None, :, :] * np.tanh(kt)).astype('float32')
+
+    def _tp_to_shrink_local(self, tp):
+        """This rank's theta slice of the full shrink array — used by writer."""
+        return self._tp_to_shrink_global(tp)[self.st_theta:self.end_theta]
+
+    def _log_shrink_stats(self, tp, i):
+        """Log per-(dist, axis) mean/max abs shrink from the tanh model. tp is
+        global on every rank, so only rank 0 does the compute + log."""
+        if self.rank != 0:
+            return
+        shrink = self._tp_to_shrink_global(tp)                     # (ntheta, ndist, 2)
+        abs_s  = np.abs(shrink)
+        mean_s = abs_s.mean(axis=0)
+        max_s  = abs_s.max(axis=0)
+        parts = "  ".join(
+            f"d{j}: y=(mean={mean_s[j,0]:.4e} max={max_s[j,0]:.4e})"
+            f"  x=(mean={mean_s[j,1]:.4e} max={max_s[j,1]:.4e})"
+            for j in range(self.ndist)
+        )
+        logger.warning(f"iter={i}: shrink abs  {parts}")
 
     def gen_sqrt_data(self, vars, out):
-        """Generate synthetic data. demagnifications must already be
-        filled by the driver (via reader.read_demagnifications())."""
+        """Generate synthetic data. vars['tp'] must already contain the
+        tanh parameters (A, k) for the desired shrink profile."""
         vars["obj"] /= self.norm_const
         self.fwd_tomo(vars["obj"],out = self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])
 
         @self.gpu_batch(axis_out=0, axis_inp=0,nout=1)
-        def _gen_data(self, out, proj, pos, demag, prb):
-            self._demag_chunk = demag
+        def _gen_data(self, out,
+                      proj, pos, t_chunk,        # proper
+                      tp, prb):                  # nonproper
+            self._t_chunk = t_chunk
             self.cl_shift.coeff_cache_reset()
             for k in range(self.ndist):
                 self._dist_idx = k
-                x = [prb[k], proj, pos[:, k]]
+                x = [prb[k], proj, pos[:, k], tp[k]]
                 y = self.apply_F_from(x, 1)
                 out[:, k] = cp.abs(y)
 
-        _gen_data(self, out, vars['proj'], vars['pos'], self.demagnifications, vars['prb'])
+        _gen_data(self, out, vars['proj'], vars['pos'], self.t_local,
+                  vars['tp'], vars['prb'])
         vars["obj"] *= self.norm_const
 
     def compute_residual(self, vars):
@@ -794,13 +1036,13 @@ class Rec:
         res = np.empty([self.local_ntheta, self.ndist, self.nz, self.n], dtype='float32')
         for theta_st in range(0, self.local_ntheta, self.nchunk):
             theta_end = min(theta_st + self.nchunk, self.local_ntheta)
-            self._demag_chunk = self.demagnifications[theta_st:theta_end]
+            self._t_chunk = self.t_local[theta_st:theta_end]
             self.cl_shift.coeff_cache_reset()
-            proj_ch = cp.array(vars['proj'][theta_st:theta_end])
-            pos_ch  = vars['pos'][theta_st:theta_end]
+            proj_ch  = cp.array(vars['proj'][theta_st:theta_end])
+            pos_ch   = vars['pos'][theta_st:theta_end]
             for k in range(self.ndist):
                 self._dist_idx = k
-                x = [vars['prb'][k], proj_ch, pos_ch[:, k]]
+                x = [vars['prb'][k], proj_ch, pos_ch[:, k], vars['tp'][k]]
                 x = self.apply_F_from(x, 1)
                 res[theta_st:theta_end, k] = cp.asnumpy(cp.abs(x)) - self.data[theta_st:theta_end, k]
         return res

@@ -271,31 +271,47 @@ class Reader:
         out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
         return out
 
-    def read_shrink(self, out=None):
-        """Read [local_ntheta, ndist, 2] shrink for this rank's theta-slice from HDF5.
+    def read_demagnifications(self, out=None):
+        """Read [local_ntheta, ndist, 2] demagnifications for this rank's
+        theta-slice.
 
-        Axis 2 is (y, x) per the convention shared with r/m. Falls back to zeros
-        if /exchange/shrink is not present, OR upgrades a legacy 2D dataset by
-        broadcasting it to both axes.
+        HDF5 stores the raw shrink at /exchange/shrink; this method reads it
+        and returns the derived demagnifications:
+            demag = (1 + shrink_nd) / norm_magnifications[None, :, None]
+
+        Axis 2 is (y, x) per the convention shared with r/m. Falls back to
+        zeros for shrink (i.e., demag = 1 / norm_magnifications) when
+        /exchange/shrink is absent, and upgrades a legacy 2D shrink dataset
+        by broadcasting it to both axes.
         """
         local_ntheta = self.end_theta - self.st_theta
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if '/exchange/shrink' not in fid:
                 if self.rank == 0:
-                    logger.warning(f'read_shrink: /exchange/shrink absent in {self.in_file}, using zeros')
-                data = cp.zeros((local_ntheta, self.ndist, 2), dtype='float32')
+                    logger.warning(
+                        f'read_demagnifications: /exchange/shrink absent in '
+                        f'{self.in_file}, using shrink=0'
+                    )
+                shrink_nd = cp.zeros((local_ntheta, self.ndist, 2), dtype='float32')
             else:
                 raw = fid['/exchange/shrink']
                 if self.rank == 0:
-                    logger.info(f'read_shrink: /exchange/shrink from {self.in_file} '
-                                f'(shape={raw.shape}, ndim={raw.ndim})')
+                    logger.info(
+                        f'read_demagnifications: /exchange/shrink from '
+                        f'{self.in_file} (shape={raw.shape}, ndim={raw.ndim})'
+                    )
                 sl = self.ids[self.st_theta:self.end_theta]
                 if raw.ndim == 3:
-                    data = cp.array(raw[sl, :self.ndist, :2].astype('float32'))
+                    shrink_nd = cp.array(raw[sl, :self.ndist, :2].astype('float32'))
                 else:
-                    # Legacy file with single scalar shrink per (j, k); broadcast.
+                    # Legacy 2D dataset with a single scalar shrink per (j, k).
                     flat = cp.array(raw[sl, :self.ndist].astype('float32'))
-                    data = cp.broadcast_to(flat[..., None], (local_ntheta, self.ndist, 2)).copy()
+                    shrink_nd = cp.broadcast_to(
+                        flat[..., None], (local_ntheta, self.ndist, 2)
+                    ).copy()
+
+        nm = cp.array(self.norm_magnifications, dtype='float32')
+        data = (1.0 + shrink_nd) / nm[None, :, None]
         if out is not None:
             out[:] = data
         else:

@@ -6,8 +6,11 @@ from .cuda_kernels import (
     s_kernel, sf_kernel,
     sback_kernel,
     ds_kernel, dsf_kernel,
+    dsm_kernel, dsmf_kernel,
     d2s_kernel, d2sf_kernel,
+    d2sm_kernel, d2smf_kernel,
     dsadj_kernel, dsadjf_kernel,
+    dsmadj_kernel, dsmadjf_kernel,
 )
 from .utils import redot
 
@@ -220,6 +223,33 @@ class Shift():
 
         return res
 
+    def dcurlySmc(self, c, r, m, c1, Deltar, Deltam):
+        """Single-pass (c, r, m) directional derivative:
+            curlySc(c1, r, m)
+          + d/dr curlySc(c, r, m) * Deltar
+          + d/dm curlySc(c, r, m) * Deltam
+
+        Same signature as dcurlySc with an extra Deltam (chunk, 2). Uses
+        the identity d/dm_axis = -tau_axis(pixel) * d/dr_axis to fold Deltam
+        into a per-pixel effective r-direction Deltar - tau * Deltam inside
+        the CUDA kernel, so this is exactly one kernel launch (same cost as
+        dcurlySc) instead of dcurlySc + two extra weighted grad-r calls.
+        """
+        ntheta = c.shape[0]
+        res     = cp.empty([ntheta, self.nz, self.n], self.obj_dtype)
+        c       = ascontig(c)
+        c1      = ascontig(c1)
+        r       = ascontig(r)
+        Deltar  = ascontig(Deltar)
+        Deltam  = ascontig(Deltam)
+        m       = ascontig(m)
+
+        self.launch(dsm_kernel, dsmf_kernel, ntheta,
+                    (res, c, c1, r, m, Deltar, Deltam,
+                     self.n, self.npsi, self.nz, self.nzpsi, ntheta))
+
+        return res
+
     def dcurlySadjc(self, c, r, m, Deltaphi):
 
         ntheta = c.shape[0]
@@ -243,6 +273,43 @@ class Shift():
 
         return [out1, out2]
 
+    def dcurlySadjmc(self, c, r, m, Deltaphi):
+        """Adjoint of dcurlySmc. Returns [out1, out2_r, out2_m] such that
+            <dcurlySmc(c, r, m, c1, Deltar, Deltam), g>
+              = <c1, out1> + <Deltar, out2_r> + <Deltam, out2_m>
+        for the standard inner products (complex for c1, real for the r/m
+        direction vectors).
+
+        dsmadj_kernel writes four per-pixel fields:
+            dt1  = ∂curlySc/∂r_y,  dt2  = ∂curlySc/∂r_x
+            dtm1 = ∂curlySc/∂m_y,  dtm2 = ∂curlySc/∂m_x
+        so all four adjoint reductions become a plain redot with Deltaphi —
+        no big broadcast multiply of a (chunk, nz, n) array by a τ vector.
+        """
+        ntheta = c.shape[0]
+        out1   = cp.zeros([ntheta, self.nzpsi, self.npsi], dtype=self.obj_dtype)
+        out2_r = cp.empty(r.shape, dtype='float32')
+        out2_m = cp.empty(r.shape, dtype='float32')
+        dt1    = cp.empty(Deltaphi.shape, self.obj_dtype)
+        dt2    = cp.empty(Deltaphi.shape, self.obj_dtype)
+        dtm1   = cp.empty(Deltaphi.shape, self.obj_dtype)
+        dtm2   = cp.empty(Deltaphi.shape, self.obj_dtype)
+        c        = ascontig(c)
+        r        = ascontig(r)
+        Deltaphi = ascontig(Deltaphi)
+        m        = ascontig(m)
+
+        self.launch(dsmadj_kernel, dsmadjf_kernel, ntheta,
+                    (out1, dt1, dt2, dtm1, dtm2, c, Deltaphi, r, m,
+                     self.n, self.npsi, self.nz, self.nzpsi, ntheta))
+
+        out2_r[:, 0] = redot(Deltaphi, dt1,  axis=(1, 2))
+        out2_r[:, 1] = redot(Deltaphi, dt2,  axis=(1, 2))
+        out2_m[:, 0] = redot(Deltaphi, dtm1, axis=(1, 2))
+        out2_m[:, 1] = redot(Deltaphi, dtm2, axis=(1, 2))
+
+        return [out1, out2_r, out2_m]
+
     def d2curlySc(self, c, r, m, c1, Deltar1, c2, Deltar2):
 
         ntheta = c.shape[0]
@@ -257,5 +324,37 @@ class Shift():
 
         self.launch(d2s_kernel, d2sf_kernel, ntheta,
                     (res, c, c1, c2, r, m, Deltar1, Deltar2,
+                     self.n, self.npsi, self.nz, self.nzpsi, ntheta))
+        return res
+
+    def d2curlySmc(self, c, r, m, c1, Deltar1, Deltam1, c2, Deltar2, Deltam2):
+        """Single-pass 2nd directional derivative on (c, r, m).
+
+        Bilinear form on directions (c1, Δr1, Δm1) and (c2, Δr2, Δm2).
+        Returns (with c-linearity ∂²/∂c² = 0):
+            ∂²/∂r²   · Δr1·Δr2
+          + ∂²/∂m²   · Δm1·Δm2
+          + ∂²/∂r∂m  · (Δr1·Δm2 + Δr2·Δm1)
+          + ∂²/∂c∂r  · (c1·Δr2 + c2·Δr1)
+          + ∂²/∂c∂m  · (c1·Δm2 + c2·Δm1)
+
+        Uses d/dm_axis = -tau_axis(pixel) * d/dr_axis to fold Δm into a
+        per-pixel effective Δr = Δr − tau · Δm for BOTH direction slots
+        inside the CUDA kernel — one kernel launch, same cost as d2curlySc.
+        """
+        ntheta = c.shape[0]
+        res     = cp.empty([ntheta, self.nz, self.n], self.obj_dtype)
+        c       = ascontig(c)
+        c1      = ascontig(c1)
+        c2      = ascontig(c2)
+        r       = ascontig(r)
+        Deltar1 = ascontig(Deltar1)
+        Deltam1 = ascontig(Deltam1)
+        Deltar2 = ascontig(Deltar2)
+        Deltam2 = ascontig(Deltam2)
+        m       = ascontig(m)
+
+        self.launch(d2sm_kernel, d2smf_kernel, ntheta,
+                    (res, c, c1, c2, r, m, Deltar1, Deltam1, Deltar2, Deltam2,
                      self.n, self.npsi, self.nz, self.nzpsi, ntheta))
         return res

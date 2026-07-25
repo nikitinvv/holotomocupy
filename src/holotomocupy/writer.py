@@ -57,7 +57,8 @@ class Writer:
             return x.get()
         return np.asarray(x)
 
-    def write_checkpoint(self, vars, i, norm_const, residual=None, pos_init=None):
+    def write_checkpoint(self, vars, i, norm_const, residual=None,
+                         pos_init=None, shrink=None, shrink_init=None, shrink_gt=None):
         """Save obj, prb, pos for iteration i to an HDF5 checkpoint file.
 
         Parameters
@@ -74,6 +75,10 @@ class Writer:
         pos_init : array, optional
             Initial positions; when provided, a PNG of per-(theta, dist) drift
             is also saved under {path_out}/pos_errors/.
+        shrink, shrink_init : array, optional
+            Local (per-rank) shrink slices — (local_ntheta, ndist, 2). When
+            both are provided, a PNG overlaying init vs current shrink per
+            (dist, axis) is saved under {path_out}/shrink/.
         """
         path = os.path.join(self.h5_dir, f"checkpoint_{i:04}.h5")
 
@@ -126,14 +131,23 @@ class Writer:
         if self.rank == 0:
             logger.info(f"Writer: checkpoint saved → {path}")
             mid = self.nzobj // 2
+            off = self.nzobj // 8
+            slice_ids = [mid - off, mid, mid + off]
             with h5py.File(path, 'r') as f:
-                slice_re = f['obj_re'][mid]
-            tiff_path = os.path.join(self.tiff_dir, f"checkpoint_{i:04}_obj_re.tiff")
-            tifffile.imwrite(tiff_path, slice_re)
-            logger.info(f"Writer: mid-slice TIFF saved → {tiff_path}")
+                for _sid in slice_ids:
+                    slice_re = f['obj_re'][_sid]
+                    tiff_path = os.path.join(
+                        self.tiff_dir, f"checkpoint_{i:04}_obj_re_z{_sid:04}.tiff"
+                    )
+                    tifffile.imwrite(tiff_path, slice_re)
+            logger.info(
+                f"Writer: 3 slice TIFFs (z={slice_ids}) saved → {self.tiff_dir}/"
+            )
 
         if pos_init is not None:
             self._save_pos_errors_plot(vars['pos'] - pos_init, i)
+        if shrink is not None and shrink_init is not None:
+            self._save_shrink_plot(shrink, shrink_init, i, shrink_gt=shrink_gt)
 
     def _save_pos_errors_plot(self, delta_local, i):
         """Gather per-(theta, dist) position drift across ranks; rank 0 logs stats and saves PNG."""
@@ -175,3 +189,48 @@ class Writer:
         fig.savefig(png_path, dpi=150)
         plt.close(fig)
         logger.info(f"pos error plot → {png_path}")
+
+    def _save_shrink_plot(self, shrink_local, shrink_init_local, i, shrink_gt=None):
+        """Gather per-(theta, dist) shrink across ranks and save 2×ndist plot
+        overlaying init (dashed), current (solid), and — when provided — ground
+        truth (dotted). Row 0 = y axis, row 1 = x."""
+        if isinstance(shrink_local, cp.ndarray):
+            shrink_local = shrink_local.get()
+        if isinstance(shrink_init_local, cp.ndarray):
+            shrink_init_local = shrink_init_local.get()
+        all_curr = self.comm.gather(shrink_local,      root=0)
+        all_init = self.comm.gather(shrink_init_local, root=0)
+        # shrink_gt is a full-ntheta numpy array on every rank (identical), so no gather.
+        if self.rank != 0:
+            return
+
+        curr = np.concatenate(all_curr, axis=0)   # [ntheta, ndist, 2]
+        init = np.concatenate(all_init, axis=0)
+        gt   = None if shrink_gt is None else (
+            shrink_gt.get() if isinstance(shrink_gt, cp.ndarray) else np.asarray(shrink_gt))
+
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, self.ndist, figsize=(5 * self.ndist, 6))
+        if self.ndist == 1:
+            axes = axes[:, np.newaxis]
+        theta_idx = np.arange(curr.shape[0])
+        for j in range(self.ndist):
+            for d, label in enumerate(['y', 'x']):
+                ax = axes[d, j]
+                ax.plot(theta_idx, init[:, j, d], label='init',    linestyle='--', color='C1')
+                ax.plot(theta_idx, curr[:, j, d], label='current',                 color='C0')
+                if gt is not None:
+                    ax.plot(theta_idx, gt[:, j, d], label='ground truth',
+                            linestyle=':', color='C2', linewidth=2)
+                ax.set_title(f"dist {j}, {label}")
+                ax.set_xlabel("theta index")
+                ax.set_ylabel("shrink")
+                ax.grid(True)
+                ax.legend(fontsize=8)
+        fig.tight_layout()
+        shrink_dir = os.path.join(self.path_out, "shrink")
+        os.makedirs(shrink_dir, exist_ok=True)
+        png_path = os.path.join(shrink_dir, f"shrink_{i:04}.png")
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"shrink plot → {png_path}")

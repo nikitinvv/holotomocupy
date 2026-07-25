@@ -240,6 +240,13 @@ class Rec:
             for st, arr in gathered:
                 all_shrink[st:st + arr.shape[0]] = arr
 
+            # Gauge: subtract the data value at (theta=0, dist=0) from ALL
+            # shrink so the constrained fit for dist=0 actually matches the
+            # data at theta=0. This preserves relative shrinks (differences)
+            # across dists and axes and just fixes an overall offset per axis.
+            gauge = all_shrink[0, 0, :].copy()                                 # (2,)
+            all_shrink = all_shrink - gauge[None, None, :]
+
             t = (np.arange(self.ntheta, dtype='float64')
                  / max(self.ntheta - 1, 1))                                    # (ntheta,)
             ones = np.ones_like(t)
@@ -282,6 +289,8 @@ class Rec:
         self.vars['tp'][:] = cp.asarray(tp_init)
 
         if self.rank == 0:
+            logger.info(f'init_tp_from_shrink: gauge (shrink[0, 0, :]) = {gauge} '
+                        f'subtracted from all data before fitting')
             for d in range(self.ndist):
                 for ax, name in enumerate(('y', 'x')):
                     A, k, B = fit_report[d, ax]
@@ -664,8 +673,11 @@ class Rec:
         grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
 
         # tp is GLOBAL — sum per-rank contributions across ranks.
-        # B is a free variable — no gradient reduction, no B pinning.
         grads['tp'][:] = cp.array(self.allreduce(grads['tp'].get()))
+        # Gauge pin: B[dist=0, :] = 0 throughout BH (init_tp_from_shrink sets
+        # it to 0; here we zero its gradient so apply_step never moves it).
+        # tp[:, 2, :] is the B slot; index 0 along axis 0 is dist=0.
+        grads['tp'][0, 2, :] = 0
 
     @timer    
     def gradients_cascade(self, vars, grads):

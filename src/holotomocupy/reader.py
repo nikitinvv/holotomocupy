@@ -271,6 +271,45 @@ class Reader:
         out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
         return out
 
+    def read_shrink(self, out=None):
+        """Read [local_ntheta, ndist, 2] raw shrink for this rank's theta-slice.
+
+        HDF5 stores per-angle shrink at /exchange/shrink. This method returns
+        the raw values (no demag conversion); the caller can convert or fit
+        (e.g. rec_mpi_shrink.Rec.init_tp_from_shrink). Falls back to zeros
+        when /exchange/shrink is absent, and upgrades a legacy 2D shrink
+        dataset by broadcasting the single scalar to both (y, x) axes.
+        """
+        local_ntheta = self.end_theta - self.st_theta
+        with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
+            if '/exchange/shrink' not in fid:
+                if self.rank == 0:
+                    logger.warning(
+                        f'read_shrink: /exchange/shrink absent in {self.in_file}, '
+                        f'using shrink=0'
+                    )
+                shrink_nd = cp.zeros((local_ntheta, self.ndist, 2), dtype='float32')
+            else:
+                raw = fid['/exchange/shrink']
+                if self.rank == 0:
+                    logger.info(
+                        f'read_shrink: /exchange/shrink from {self.in_file} '
+                        f'(shape={raw.shape}, ndim={raw.ndim})'
+                    )
+                sl = self.ids[self.st_theta:self.end_theta]
+                if raw.ndim == 3:
+                    shrink_nd = cp.array(raw[sl, :self.ndist, :2].astype('float32'))
+                else:
+                    # Legacy 2D dataset with a single scalar shrink per (j, k).
+                    flat = cp.array(raw[sl, :self.ndist].astype('float32'))
+                    shrink_nd = cp.broadcast_to(
+                        flat[..., None], (local_ntheta, self.ndist, 2)
+                    ).copy()
+        if out is not None:
+            out[:] = shrink_nd
+        else:
+            return shrink_nd
+
     def read_demagnifications(self, out=None):
         """Read [local_ntheta, ndist, 2] demagnifications for this rank's
         theta-slice.

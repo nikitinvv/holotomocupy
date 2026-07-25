@@ -36,6 +36,7 @@ the same `S`/`Sadj` chirp-z path used by the forward operator.
 
 import cupy as cp
 import cupyx.scipy.fft as cufft
+import numpy as np
 from .utils import redot
 
 
@@ -571,3 +572,230 @@ class ShiftFFT():
         s = self.ifft2(C)
         del C
         return self.from_complex(s[:, :self.nz, :self.n])
+
+    # ==================================================================
+    # Magnification-derivative extensions (Option 3): dcurlySmc / dcurlySadjmc
+    # See docs/shift_fft_m_derivative.md for derivations.
+    # ==================================================================
+
+    def _chirpz_lastaxis_dm(self, X, m, b, axis_xy):
+        """Forward chirp-z along the last axis PLUS its m-derivative, in one
+        pass. Returns (g, dg_dm) with the same shape as _chirpz_lastaxis(...).
+
+        m appears through beta = m/N_in (in pre_twist, h, post) AND through b
+        (in pre_twist only, since the caller passes b = (N_in-1)/2 - r -
+        m*(N_out-1)/2 with a linear m-dependence). Both are linear in m, so
+        every phase's m-derivative is a constant (per index) multiplier
+        (see docs/shift_fft_m_derivative.md).
+
+        Only the forward direction is exposed here (adjoint = False in the
+        original _chirpz_lastaxis). The adjoint is not needed: dS/dm images
+        become adjoint outputs via a redot in dcurlySadjmc.
+        """
+        if axis_xy == 'x':
+            N_in, N_out, L = self.npsi,  self.n,  self.L_x
+            k_signed = self.k_signed_x
+            k_sq, ty_sq, j_sq = self.k_sq_x, self.ty_sq_x, self.j_sq_x
+        else:
+            N_in, N_out, L = self.nzpsi, self.nz, self.L_y
+            k_signed = self.k_signed_y
+            k_sq, ty_sq, j_sq = self.k_sq_y, self.ty_sq_y, self.j_sq_y
+
+        B = X.shape[0]
+        K = X.shape[1]
+        beta = (cp.asarray(m).astype('float32') / cp.float32(N_in))   # [B]
+        b    = cp.asarray(b).astype('float32')                        # [B]
+
+        # phi_pre(k, t) and its m-derivative (both linear in m, so d/dm is a scalar-per-k).
+        #   phi_pre         = (2π/N_in) * b * k_signed - π * β * k_sq
+        #   d phi_pre / d m = -(π*(N_out-1)/N_in) * k_signed - (π/N_in) * k_sq
+        two_pi_over_Nin = cp.float32(2.0 * cp.pi / N_in)
+        pi_over_Nin     = cp.float32(cp.pi / N_in)
+        pi_Nout_over_Nin = cp.float32(cp.pi * (N_out - 1) / N_in)
+
+        phase_pre    = (two_pi_over_Nin * b[:, None] * k_signed[None, :]
+                        - cp.pi * beta[:, None] * k_sq[None, :]).astype('float32')  # [B, N_in]
+        pre_twist    = cp.exp(1j * phase_pre).astype('complex64')                     # [B, N_in]
+        # d phi_pre / d m (does NOT depend on t — same k-profile for all t):
+        phi_pre_dm   = (-pi_Nout_over_Nin * k_signed - pi_over_Nin * k_sq).astype('float32')  # [N_in]
+        # d pre_twist / d m = 1j * phi_pre_dm * pre_twist   (broadcast over t)
+        dpre_twist_dm = (1j * phi_pre_dm[None, :]).astype('complex64') * pre_twist    # [B, N_in]
+
+        # post(ty, t) = exp(-1j π β ty²), d/dm = -1j π (1/N_in) ty² post
+        post          = cp.exp(-1j * cp.pi * beta[:, None] * ty_sq[None, :]).astype('complex64')  # [B, N_out]
+        phi_post_dm   = (-pi_over_Nin * ty_sq).astype('float32')                                   # [N_out]
+        dpost_dm      = (1j * phi_post_dm[None, :]).astype('complex64') * post                     # [B, N_out]
+
+        # h(j, t) = exp(+1j π β j²), d/dm = +1j π (1/N_in) j² h
+        h             = cp.exp(1j * cp.pi * beta[:, None] * j_sq[None, :]).astype('complex64')    # [B, N_in+N_out-1]
+        phi_h_dm      = (pi_over_Nin * j_sq).astype('float32')                                     # [N_in+N_out-1]
+        dh_dm         = (1j * phi_h_dm[None, :]).astype('complex64') * h                           # [B, N_in+N_out-1]
+
+        # Zero-pad h and dh_dm to length L, then take FFT to get H_hat and dH_hat_dm.
+        h_pad         = cp.zeros((B, L), dtype='complex64')
+        h_pad[:, :N_in + N_out - 1] = h
+        dh_pad_dm     = cp.zeros((B, L), dtype='complex64')
+        dh_pad_dm[:, :N_in + N_out - 1] = dh_dm
+        H_hat         = cp.fft.fft(h_pad,     axis=-1)
+        dH_hat_dm     = cp.fft.fft(dh_pad_dm, axis=-1)
+
+        # -- Forward stage: FFT the input.
+        C = cp.fft.fft(X, axis=-1)                                                # [B, K, N_in]
+
+        # a and da/dm share C (X is independent of m).
+        a     = C * pre_twist   [:, None, :]
+        da_dm = C * dpre_twist_dm[:, None, :]
+
+        a     = cp.fft.fftshift(a,     axes=-1)
+        da_dm = cp.fft.fftshift(da_dm, axes=-1)
+
+        # Zero-pad to length L.
+        a_pad      = cp.zeros((B, K, L), dtype='complex64')
+        a_pad[:, :, :N_in] = a
+        da_pad_dm  = cp.zeros((B, K, L), dtype='complex64')
+        da_pad_dm[:, :, :N_in] = da_dm
+
+        # A_pos = ifft(a_pad, norm='forward'), same for derivative.
+        A_pos      = cp.fft.ifft(a_pad,     axis=-1, norm='forward')
+        dA_pos_dm  = cp.fft.ifft(da_pad_dm, axis=-1, norm='forward')
+
+        # corr = ifft(A_pos * H_hat), and by Leibniz:
+        # dcorr/dm = ifft(dA_pos/dm * H_hat + A_pos * dH_hat/dm)
+        corr       = cp.fft.ifft(A_pos * H_hat[:, None, :], axis=-1)              # [B, K, L]
+        dcorr_dm   = cp.fft.ifft(dA_pos_dm * H_hat[:, None, :]
+                                 + A_pos * dH_hat_dm[:, None, :], axis=-1)
+
+        inv_Nin = cp.float32(1.0 / N_in)
+        g      = corr    [:, :, :N_out] * post[:, None, :] * inv_Nin
+        dg_dm  = (dcorr_dm[:, :, :N_out] * post   [:, None, :]
+                  + corr   [:, :, :N_out] * dpost_dm[:, None, :]) * inv_Nin
+        return g, dg_dm
+
+    def _chirpz_2d_dm(self, X, m, ry, rx):
+        """Separable 2-D chirp-z forward plus per-axis m-derivatives.
+        Returns (g, dg_dmy, dg_dmx), each same shape as `_chirpz_2d(..., adjoint=False)`.
+
+        Composition (forward): S_2D(X) = chirpZ_y( chirpZ_x(X, mx), my ).
+        By chain rule (chirpZ_y linear in its first arg):
+          dS_2D / d mx = chirpZ_y( d chirpZ_x / d mx (X), my )
+          dS_2D / d my = d chirpZ_y / d my ( chirpZ_x(X, mx) )
+        """
+        m  = cp.asarray(m).astype('float32')
+        my = cp.ascontiguousarray(m[:, 0])
+        mx = cp.ascontiguousarray(m[:, 1])
+        ry = cp.asarray(ry).astype('float32')
+        rx = cp.asarray(rx).astype('float32')
+        b_x = (cp.float32((self.npsi  - 1) * 0.5) - rx - mx * cp.float32((self.n  - 1) * 0.5))
+        b_y = (cp.float32((self.nzpsi - 1) * 0.5) - ry - my * cp.float32((self.nz - 1) * 0.5))
+
+        X = self.to_complex(ascontig(X))                                # [B, nzpsi, npsi]
+
+        # X-axis pass with m-derivative.
+        Y_x, dY_dmx = self._chirpz_lastaxis_dm(X, mx, b_x, 'x')          # both [B, nzpsi, n]
+
+        # Swap for y-axis pass (last axis becomes y).
+        Y_x_swap   = cp.ascontiguousarray(cp.swapaxes(Y_x,   -2, -1))    # [B, n, nzpsi]
+        dY_dmx_swap = cp.ascontiguousarray(cp.swapaxes(dY_dmx, -2, -1))
+
+        # Y-axis pass on the value: get final value + dS/dmy.
+        Y_val_swap, dY_dmy_swap = self._chirpz_lastaxis_dm(Y_x_swap, my, b_y, 'y')  # [B, n, nz]
+
+        # Y-axis forward on the x-derivative branch → completes dS/dmx.
+        dY_dmx_final_swap = self._chirpz_lastaxis(dY_dmx_swap, my, b_y, 'y', adjoint=False)
+
+        # Swap back to [B, nz, n].
+        g       = cp.ascontiguousarray(cp.swapaxes(Y_val_swap,        -2, -1))
+        dg_dmy  = cp.ascontiguousarray(cp.swapaxes(dY_dmy_swap,       -2, -1))
+        dg_dmx  = cp.ascontiguousarray(cp.swapaxes(dY_dmx_final_swap, -2, -1))
+        return g, dg_dmy, dg_dmx
+
+    def _dS_dm_images(self, c, r, m):
+        """Return (dS/dmy, dS/dmx) — full images of shape [ntheta, nz, n],
+        computed at the base (c, r, m). Handles both the chirp-z and
+        m=1 (unit-mag) paths.
+
+        For the m=1 fast path, uses the identity  dS/dm_axis = -tau_axis · dS/dr_axis
+        with tau at the OUTPUT (per-pixel), reducing the m-derivative to two
+        extra shifts on spatial derivatives of c.
+        """
+        if not self._is_unit_mag(m):
+            _val, dg_dmy, dg_dmx = self._chirpz_2d_dm(c, m, r[:, 0], r[:, 1])
+            return self.from_complex(dg_dmy), self.from_complex(dg_dmx)
+
+        # m == 1 path: dS/dm_axis at output pixel = -tau_axis[pixel] * dS/dr_axis
+        # tau_axis[ty] = ty - (N_out - 1)/2 (output-space centred coordinate).
+        py, px = self.phase_separable(r)
+        C = self.fft2(self.to_complex(ascontig(c)))
+        # Spatial derivatives of c: ∂c/∂y = ifft(C · -i·fy), same for x.
+        Cy = C * self.negi_fy[None, :, None]
+        Cx = C * self.negi_fx[None, None, :]
+        # Apply the same phase multiplier as S (in-place fuse).
+        apply_sep_phase(Cy, py[:, :, cp.newaxis], px[:, cp.newaxis, :], Cy)
+        apply_sep_phase(Cx, py[:, :, cp.newaxis], px[:, cp.newaxis, :], Cx)
+        s_dy = self.ifft2(Cy)[:, :self.nz, :self.n]
+        s_dx = self.ifft2(Cx)[:, :self.nz, :self.n]
+        del Cy, Cx, C
+        # Multiply by -tau (per output pixel).
+        tau_y = (cp.arange(self.nz, dtype='float32') - cp.float32(0.5 * (self.nz - 1)))
+        tau_x = (cp.arange(self.n , dtype='float32') - cp.float32(0.5 * (self.n  - 1)))
+        dS_dmy = -tau_y[None, :, None] * s_dy
+        dS_dmx = -tau_x[None, None, :] * s_dx
+        return self.from_complex(dS_dmy), self.from_complex(dS_dmx)
+
+    def dcurlySmc(self, c, r, m, c1, Deltar, Deltam):
+        """1st directional derivative on (c, r, m). Matches Shift.dcurlySmc:
+            curlySc(c1, r, m)
+          + ∂/∂r curlySc(c, r, m) · Δr
+          + ∂/∂m curlySc(c, r, m) · Δm
+        """
+        # r-block + c1: reuse existing dcurlySc for both branches.
+        r_part = self.dcurlySc(c, r, m, c1, Deltar)
+
+        # m-block: dS/dm_y * Δm_y + dS/dm_x * Δm_x.
+        Deltam = cp.asarray(Deltam).astype('float32')
+        # Short-circuit if Δm is all zero (avoids the extra chirp-z / spatial-diff work).
+        if bool(cp.all(Deltam == 0)):
+            return r_part
+        dSy, dSx = self._dS_dm_images(c, r, m)
+        m_part = (dSy * Deltam[:, 0, None, None]
+                  + dSx * Deltam[:, 1, None, None])
+        # dSy/dSx already come back at obj_dtype (from_complex applied inside
+        # _dS_dm_images); Deltam is float32 → product keeps obj_dtype.
+        return r_part + m_part
+
+    def dcurlySadjmc(self, c, r, m, Deltaphi):
+        """Adjoint of dcurlySmc. Returns [out1_c, out2_r, out2_m] such that
+            <dcurlySmc(c, r, m, c1, Δr, Δm), Δφ>
+              = <c1, out1_c> + <Δr, out2_r> + <Δm, out2_m>.
+
+        out1_c, out2_r come from the existing dcurlySadjc; out2_m is added
+        here by redotting Δφ with dS/dm_y and dS/dm_x images.
+        """
+        out1, out2_r = self.dcurlySadjc(c, r, m, Deltaphi)
+        dSy, dSx = self._dS_dm_images(c, r, m)
+        Dphi_c = self.to_complex(ascontig(Deltaphi))
+        # dS/dm_i comes back at the output-real dtype from _dS_dm_images already.
+        dSy_c = self.to_complex(ascontig(dSy))
+        dSx_c = self.to_complex(ascontig(dSx))
+        ntheta_loc = c.shape[0]
+        out2_m = cp.empty([ntheta_loc, 2], dtype='float32')
+        out2_m[:, 0] = redot(Dphi_c, dSy_c, axis=(1, 2))
+        out2_m[:, 1] = redot(Dphi_c, dSx_c, axis=(1, 2))
+        return [out1, out2_r, out2_m]
+
+    def d2curlySmc(self, c, r, m, c1, Deltar1, Deltam1, c2, Deltar2, Deltam2):
+        """Bilinear 2nd derivative on (c, r, m). NOT YET IMPLEMENTED.
+
+        The native chirp-z 2nd-order derivation is a 9-term Leibniz expansion
+        over the (pre_twist, h, post) branches (see
+        docs/shift_fft_m_derivative.md). It's substantial work, so this
+        stub raises to force a decision. Options:
+          - shift_type='cubic' — the cubic Shift class already has a native
+            single-kernel implementation and is production-ready today.
+          - Wait for Option 3 (analytic chirp-z 2nd-order) to land here.
+        """
+        raise NotImplementedError(
+            "ShiftFFT.d2curlySmc is not implemented — the analytic chirp-z "
+            "2nd-order derivation (Option 3 in docs/shift_fft_m_derivative.md) "
+            "hasn't been written yet. Use shift_type='cubic' when args.rho[3] "
+            "> 0 (tp optimization) until it lands.")

@@ -16,7 +16,7 @@ run resumes automatically from the latest saved iteration.
 import sys
 import h5py
 from mpi4py import MPI
-from holotomocupy.rec_mpi import Rec
+from holotomocupy.rec_mpi_shrink import Rec
 from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.reader import Reader, find_latest_checkpoint
@@ -92,8 +92,11 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
-reader.read_demagnifications(out=cl.demagnifications)
-logger.info(cl.demagnifications[:3, :, :])
+# Initial guess for the tanh-parameterized shrink variable vars['tp']:
+# constant per (dist, axis) = global-mean of stored /exchange/shrink.
+# Solver refines it. No persistent shrink buffer is kept — reader.read_shrink
+# is called locally inside init_tp_from_shrink and freed after summing.
+cl.init_tp_from_shrink(reader)
 
 # --- Load initial variables (object, probe, positions) ------------------
 # Resume from the latest checkpoint if one exists; otherwise use the

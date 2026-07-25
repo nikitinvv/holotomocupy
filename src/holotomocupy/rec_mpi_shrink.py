@@ -85,11 +85,20 @@ class Rec:
         distance = (self.z1 * z2) / self.focustodetectordistance * norm_magnifications**2
         voxelsize = self.detector_pixelsize / magnifications[0]
 
-        # scaling variables
+        # scaling variables — args.rho are the INITIAL values (used as-is
+        # through the whole BH run unless args.estimate_rho is set). When
+        # args.estimate_rho is True, BH first runs a coordinate search on
+        # rho[prb, pos, tp] with short trials of args.rho_estimate_niter iters
+        # each (default 16), centred on the args.rho values, and BH's main loop
+        # then uses the found rho.
         self.rho_sq = {'obj': args.rho[0]**2,
                        'prb': args.rho[1]**2,
                        'pos': args.rho[2]**2,
                        'tp':  args.rho[3]**2}   # tp = tanh params (A, k) per (dist, y/x)
+        if not hasattr(self, 'estimate_rho'):
+            self.estimate_rho = False
+        if not hasattr(self, 'rho_estimate_niter'):
+            self.rho_estimate_niter = 16
 
         # cuFFTDx JIT compile: rank 0 builds the .so, then all ranks proceed
         if self.rank == 0:
@@ -191,7 +200,96 @@ class Rec:
         self.t_local = t_global[self.st_theta:self.end_theta].reshape(-1, 1)
         # GPU-resident norm_magnifications for fast per-dist lookup inside kernels.
         self.norm_magnifications_gpu = cp.asarray(self.norm_magnifications, dtype='float32')
-    
+
+    def init_tp_from_shrink(self, reader,
+                            k_candidates=(0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0)):
+        """Fit the tanh shrink model to per-angle stored shrink and use the
+        fitted parameters as the initial guess for vars['tp'].
+
+        Model (per (dist, axis), from F4):
+            shrink(theta) = B + A * tanh(k * t),   t = theta_idx / (ntheta - 1),  t in [0, 1]
+        with A = a^2 >= 0, k = k_raw^2 >= 0. Stored as
+            tp[dist, 0, axis] = a = sqrt(A)
+            tp[dist, 1, axis] = k_raw = sqrt(k)
+            tp[dist, 2, axis] = B
+
+        Fit strategy (cheap and closed-form-per-k):
+          - Grid search over `k_candidates`.
+          - For each candidate k, linear least-squares on (B, A) using the
+            feature vector [1, tanh(k*t)].
+          - Keep the (A, k, B) with the smallest residual per (dist, axis).
+          - Clip A to zero if the fit returns negative (parametrization
+            requires A >= 0; a decreasing shrink profile is rare in practice
+            and safer to init with A = 0 constant-B).
+
+        All ranks contribute their local theta slice via a gather to rank 0
+        (data is tiny — ntheta * ndist * 2 float32s); rank 0 does the fit
+        and broadcasts the resulting tp.
+        """
+        local_shrink = reader.read_shrink()                                    # cupy (local_ntheta, ndist, 2)
+        local_np = cp.asnumpy(local_shrink).astype('float32')
+        del local_shrink
+
+        # Gather per-rank (st_theta, slice) on rank 0.
+        gathered = self.cl_mpi.comm.gather((self.st_theta, local_np), root=0)
+
+        tp_init = np.zeros((self.ndist, 3, 2), dtype='float32')
+        fit_report = None
+        if self.rank == 0:
+            all_shrink = np.zeros((self.ntheta, self.ndist, 2), dtype='float32')
+            for st, arr in gathered:
+                all_shrink[st:st + arr.shape[0]] = arr
+
+            t = (np.arange(self.ntheta, dtype='float64')
+                 / max(self.ntheta - 1, 1))                                    # (ntheta,)
+            ones = np.ones_like(t)
+
+            fit_report = np.zeros((self.ndist, 2, 3), dtype='float64')         # (dist, axis, (A, k, B))
+            rms_report = np.zeros((self.ndist, 2), dtype='float64')            # (dist, axis)
+            for d in range(self.ndist):
+                # Convention B[dist=0] = 0 → constrain B for dist 0 during the fit.
+                constrain_B_zero = (d == 0)
+                for ax in range(2):
+                    y = all_shrink[:, d, ax].astype('float64')
+                    best = None                                                # (res, A, k, B)
+                    for k in k_candidates:
+                        u = np.tanh(k * t)
+                        if constrain_B_zero:
+                            # y ≈ A · u, B fixed at 0.
+                            uu = float(np.dot(u, u))
+                            A_fit = float(np.dot(u, y) / uu) if uu > 0 else 0.0
+                            B_fit = 0.0
+                        else:
+                            M = np.column_stack([ones, u])                      # (ntheta, 2)
+                            (B_fit, A_fit), *_ = np.linalg.lstsq(M, y, rcond=None)
+                            B_fit, A_fit = float(B_fit), float(A_fit)
+                        y_pred = B_fit + A_fit * u
+                        res    = float(np.sum((y - y_pred) ** 2))
+                        if best is None or res < best[0]:
+                            best = (res, A_fit, float(k), B_fit)
+                    res, A_fit, k_fit, B_fit = best
+                    # Enforce A >= 0 (parametrization stores sqrt(A)).
+                    if A_fit < 0.0:
+                        A_fit = 0.0
+                    tp_init[d, 0, ax] = np.sqrt(A_fit)                          # a
+                    tp_init[d, 1, ax] = np.sqrt(max(k_fit, 0.0))                # k_raw
+                    tp_init[d, 2, ax] = B_fit                                   # B
+                    fit_report[d, ax] = [A_fit, k_fit, B_fit]
+                    rms_report[d, ax] = float(np.sqrt(res / self.ntheta))
+
+        # Broadcast tp_init to every rank (tiny — ndist * 3 * 2 float32).
+        self.cl_mpi.comm.Bcast(tp_init, root=0)
+        self.vars['tp'][:] = cp.asarray(tp_init)
+
+        if self.rank == 0:
+            for d in range(self.ndist):
+                for ax, name in enumerate(('y', 'x')):
+                    A, k, B = fit_report[d, ax]
+                    rms      = rms_report[d, ax]
+                    logger.info(
+                        f'init_tp_from_shrink: dist={d} axis={name}  '
+                        f'A={A:+.4e} k={k:+.4e} B={B:+.4e}  RMS_fit={rms:.3e}')
+
     def BH(self, writer=None, shrink_gt=None):
         """shrink_gt: optional numpy array (ntheta, ndist, 2) — full ground-truth
         shrink profile, plotted as an overlay on every per-checkpoint shrink PNG."""
@@ -203,6 +301,16 @@ class Rec:
         self.precalc(vars)
         self.error_debug(vars, -1)
 
+        if self.estimate_rho:
+            self.estimate_rho_coord(vars, grads, etas,
+                                    niter_trial=self.rho_estimate_niter)
+
+        self._iterate(vars, grads, etas, writer)
+        self.postcalc(vars)
+        return vars
+
+    def _iterate(self, vars, grads, etas, writer=None):
+        """Main BH iteration loop. Assumes precalc() has already run."""
         self.time_start = time.time()
         for i in range(self.start_iter, self.niter):
             with nvtx.annotate(f"::BH:{i}"):
@@ -212,9 +320,6 @@ class Rec:
                 self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
                 self.apply_step(vars, etas, alpha)
                 self.log_iter(vars, i, writer)
-
-        self.postcalc(vars)
-        return vars
     
     def precalc(self, vars):
         """One-time setup at the start of BH: obj normalization,
@@ -265,14 +370,14 @@ class Rec:
         with nvtx.annotate(":::BH:calc_alpha"):
             top = 0
             for v in ("obj", "pos"):
-                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
+                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / (self.rho_sq[v]+1e-10)
             # prb and tp are shared across ranks (global); only rank 0 contributes to
             # the sum so allreduce doesn't double-count.
             dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
             dot_tp  = self.linear_redot_batch(etas['tp'],  grads['tp'],  beta, -1)
             if self.rank == 0:
-                top -= dot_prb / self.rho_sq['prb']
-                top -= dot_tp  / self.rho_sq['tp']
+                top -= dot_prb / (self.rho_sq['prb']+1e-10)
+                top -= dot_tp  / (self.rho_sq['tp']+1e-10)
             self.linear_batch(etas['proj'], grads['proj'], beta, -1)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
@@ -357,6 +462,185 @@ class Rec:
         )
 
         return out[0].get()
+
+    def estimate_rho_from_hessian(self, vars, grads, etas):
+        """Cauchy-step per-variable rho estimate, normalized to rho_sq['obj']=1.
+
+        For each v in (obj, prb, pos, tp): rho_sq[v] = <g_v, g_v> / <g_v, H_vv g_v>,
+        where H_vv is the true directional Hessian evaluated by self.hessian on an
+        etas vector with only the v-block populated by the raw gradient (and, for
+        v='obj', etas['proj'] derived from etas['obj'] via fwd_tomo+redist — the
+        same coupling compute_gradient uses).
+
+        Called from BH every `self.rho_estimate_step` iterations. Overwrites
+        self.rho_sq in place. Uses grads and etas as scratch (BH's next
+        compute_gradient repopulates grads; compute_alpha rebuilds etas).
+        """
+        # Turn off pre-scaling so compute_gradient returns raw gF*.
+        self.rho_sq = {'obj': 1.0, 'prb': 1.0, 'pos': 1.0, 'tp': 1.0}
+        self.compute_gradient(vars, grads)
+
+        new_rho_sq = {}
+        for v in ('obj', 'prb', 'pos', 'tp'):
+            for buf in etas.values():
+                buf[:] = 0
+            etas[v][:] = grads[v]
+            if v == 'obj':
+                self.fwd_tomo(etas['obj'], out=self.proj_tmp)
+                self.redist(self.proj_tmp, etas['proj'])
+
+            H_vv = self.hessian(vars, etas, etas)
+            g2   = self.redot_batch(grads[v], grads[v])
+            # prb, tp are global; only rank 0 contributes so allreduce doesn't double-count.
+            if v in ('prb', 'tp') and self.rank != 0:
+                g2 = 0.0
+            g2, H_vv = self.allreduce2(g2, H_vv)
+
+            if H_vv > 0 and g2 > 0:
+                new_rho_sq[v] = g2 / H_vv
+            else:
+                new_rho_sq[v] = 1.0
+                if self.rank == 0:
+                    logger.warning(f'estimate_rho_from_hessian: {v} '
+                                   f'H_vv={H_vv:.3e} g2={g2:.3e} — fallback to 1.0')
+
+        # Normalize so rho_sq['obj'] = 1; joint alpha absorbs the overall scale.
+        if new_rho_sq['obj'] > 0:
+            s = new_rho_sq['obj']
+            for k in new_rho_sq:
+                new_rho_sq[k] /= s
+
+        self.rho_sq = new_rho_sq
+        if self.rank == 0:
+            est = {k: float(np.sqrt(v)) for k, v in new_rho_sq.items()}
+            logger.info(f'rho estimated (sqrt, obj-normalized): '
+                        f"obj={est['obj']:.3e} prb={est['prb']:.3e} "
+                        f"pos={est['pos']:.3e} tp={est['tp']:.3e}")
+
+    def estimate_rho_coord(self, vars, grads, etas, niter_trial=16, max_extend=8):
+        """Coordinate search on rho[prb, pos, tp] over a geometric grid
+        {..., init/2, init, 2*init, ...} centred on the current self.rho_sq.
+
+        For each variable in order (prb → pos → tp):
+          - Run three short BH trials at rho = {init/2, init, 2*init}
+              (`init` = the current sqrt(rho_sq[v])).
+          - If the middle wins, keep it.
+          - Else extend up (×2, ×4, ...) or down (÷2, ÷4, ...) until improvement
+            stops, capped by max_extend rungs.
+          - Adopt the winning value; move to the next variable with the winner
+            baked into `base_rho`.
+
+        Each trial:
+          - Restores vars/grads/etas/table/start_iter to the snapshot taken here.
+          - Runs `_iterate` for niter_trial iterations, silently.
+          - Uses self.min() for the final err (no reliance on the log table).
+          - Catches CUDA / RuntimeError → err = inf so the search skips past
+            divergent rho values.
+
+        Updates self.rho_sq in place and restores vars/grads/etas/... so the
+        outer BH loop starts from a clean state.
+        """
+        # Snapshot the state so trials leave nothing behind.
+        snap_vars       = {k: v.copy() for k, v in vars.items()}
+        snap_table      = self.table.copy()
+        snap_start_iter = self.start_iter
+        snap_niter      = self.niter
+        snap_error_step = self.error_step
+        snap_ckpt_step  = self.checkpoint_step
+
+        # Silence trial logging / disable checkpoint writes for the duration.
+        self.niter          = niter_trial
+        self.start_iter     = 0
+        self.error_step     = -1
+        self.checkpoint_step = -1
+
+        def _reset_trial():
+            for k, v in vars.items():
+                v[:] = snap_vars[k]
+            for buf in grads.values(): buf[:] = 0
+            for buf in etas.values():  buf[:] = 0
+            self.table      = pd.DataFrame(columns=["iter", "err", "time"])
+            self.start_iter = 0
+
+        def _run_trial(rho_vec):
+            _reset_trial()
+            self.rho_sq = {'obj': rho_vec[0]**2, 'prb': rho_vec[1]**2,
+                           'pos': rho_vec[2]**2, 'tp':  rho_vec[3]**2}
+            try:
+                self._iterate(vars, grads, etas, writer=None)
+                err = float(self.min(vars['prb'], vars['obj'], vars['pos'],
+                                     vars['proj'], vars['tp']))
+                if not np.isfinite(err):
+                    err = float('inf')
+            except Exception as e:
+                if self.rank == 0:
+                    logger.warning(f'rho trial {rho_vec} crashed '
+                                   f'({type(e).__name__}: {e}) → err=inf')
+                err = float('inf')
+            return err
+
+        def _coord(base, idx, name, init):
+            cache = {}
+            def probe(val):
+                if val in cache:
+                    return cache[val]
+                rv = list(base); rv[idx] = val
+                e  = _run_trial(rv)
+                cache[val] = e
+                if self.rank == 0:
+                    logger.info(f'  {name}={val:g}  err={e:.4e}')
+                return e
+            e_c  = probe(init)
+            e_up = probe(init * 2)
+            e_dn = probe(init / 2)
+            if e_c <= e_up and e_c <= e_dn:
+                best = init
+            elif e_up < e_dn:
+                cur_v, cur_e = init * 2, e_up
+                for _ in range(max_extend):
+                    nxt = cur_v * 2
+                    e_nxt = probe(nxt)
+                    if e_nxt >= cur_e: break
+                    cur_v, cur_e = nxt, e_nxt
+                best = cur_v
+            else:
+                cur_v, cur_e = init / 2, e_dn
+                for _ in range(max_extend):
+                    nxt = cur_v / 2
+                    e_nxt = probe(nxt)
+                    if e_nxt >= cur_e: break
+                    cur_v, cur_e = nxt, e_nxt
+                best = cur_v
+            if self.rank == 0:
+                logger.info(f'  → best {name}={best:g}')
+            return best, sorted(cache.items())
+
+        # Initial values come from current self.rho_sq (i.e. from args.rho).
+        base = [float(np.sqrt(self.rho_sq[k])) for k in ('obj', 'prb', 'pos', 'tp')]
+        if self.rank == 0:
+            logger.info(f'estimate_rho_coord: start from {base}, '
+                        f'niter_trial={niter_trial}')
+
+        # obj stays at whatever it was; only prb, pos, tp get searched.
+        history = {}
+        base[1], history['prb'] = _coord(base, 1, 'prb', base[1])
+        base[2], history['pos'] = _coord(base, 2, 'pos', base[2])
+        base[3], history['tp']  = _coord(base, 3, 'tp',  base[3])
+
+        # Restore state so the outer BH loop starts clean.
+        _reset_trial()
+        self.table       = snap_table
+        self.start_iter  = snap_start_iter
+        self.niter       = snap_niter
+        self.error_step  = snap_error_step
+        self.checkpoint_step = snap_ckpt_step
+
+        # Commit the found rho.
+        self.rho_sq = {'obj': base[0]**2, 'prb': base[1]**2,
+                       'pos': base[2]**2, 'tp':  base[3]**2}
+        if self.rank == 0:
+            logger.info(f'estimate_rho_coord: final rho = {base}')
+        return history
 
     def gradients(self, vars, grads):
         """Full gradient, consists of 2 terms:

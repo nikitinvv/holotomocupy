@@ -240,13 +240,6 @@ class Rec:
             for st, arr in gathered:
                 all_shrink[st:st + arr.shape[0]] = arr
 
-            # Gauge: subtract the data value at (theta=0, dist=0) from ALL
-            # shrink so the constrained fit for dist=0 actually matches the
-            # data at theta=0. This preserves relative shrinks (differences)
-            # across dists and axes and just fixes an overall offset per axis.
-            gauge = all_shrink[0, 0, :].copy()                                 # (2,)
-            all_shrink = all_shrink - gauge[None, None, :]
-
             t = (np.arange(self.ntheta, dtype='float64')
                  / max(self.ntheta - 1, 1))                                    # (ntheta,)
             ones = np.ones_like(t)
@@ -254,22 +247,14 @@ class Rec:
             fit_report = np.zeros((self.ndist, 2, 3), dtype='float64')         # (dist, axis, (A, k, B))
             rms_report = np.zeros((self.ndist, 2), dtype='float64')            # (dist, axis)
             for d in range(self.ndist):
-                # Convention B[dist=0] = 0 → constrain B for dist 0 during the fit.
-                constrain_B_zero = (d == 0)
                 for ax in range(2):
                     y = all_shrink[:, d, ax].astype('float64')
                     best = None                                                # (res, A, k, B)
                     for k in k_candidates:
                         u = np.tanh(k * t)
-                        if constrain_B_zero:
-                            # y ≈ A · u, B fixed at 0.
-                            uu = float(np.dot(u, u))
-                            A_fit = float(np.dot(u, y) / uu) if uu > 0 else 0.0
-                            B_fit = 0.0
-                        else:
-                            M = np.column_stack([ones, u])                      # (ntheta, 2)
-                            (B_fit, A_fit), *_ = np.linalg.lstsq(M, y, rcond=None)
-                            B_fit, A_fit = float(B_fit), float(A_fit)
+                        M = np.column_stack([ones, u])                          # (ntheta, 2)
+                        (B_fit, A_fit), *_ = np.linalg.lstsq(M, y, rcond=None)
+                        B_fit, A_fit = float(B_fit), float(A_fit)
                         y_pred = B_fit + A_fit * u
                         res    = float(np.sum((y - y_pred) ** 2))
                         if best is None or res < best[0]:
@@ -289,8 +274,6 @@ class Rec:
         self.vars['tp'][:] = cp.asarray(tp_init)
 
         if self.rank == 0:
-            logger.info(f'init_tp_from_shrink: gauge (shrink[0, 0, :]) = {gauge} '
-                        f'subtracted from all data before fitting')
             for d in range(self.ndist):
                 for ax, name in enumerate(('y', 'x')):
                     A, k, B = fit_report[d, ax]
@@ -673,11 +656,8 @@ class Rec:
         grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
 
         # tp is GLOBAL — sum per-rank contributions across ranks.
+        # B is a free variable — no gradient reduction, no B pinning.
         grads['tp'][:] = cp.array(self.allreduce(grads['tp'].get()))
-        # Gauge pin: B[dist=0, :] = 0 throughout BH (init_tp_from_shrink sets
-        # it to 0; here we zero its gradient so apply_step never moves it).
-        # tp[:, 2, :] is the B slot; index 0 along axis 0 is dist=0.
-        grads['tp'][0, 2, :] = 0
 
     @timer    
     def gradients_cascade(self, vars, grads):

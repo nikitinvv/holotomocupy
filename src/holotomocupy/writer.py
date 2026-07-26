@@ -59,13 +59,14 @@ class Writer:
 
     def write_checkpoint(self, vars, i, norm_const, residual=None,
                          pos_init=None, shrink=None, shrink_init=None, shrink_gt=None):
-        """Save obj, prb, pos for iteration i to an HDF5 checkpoint file.
+        """Save obj, prb, pos, tp for iteration i to an HDF5 checkpoint file.
 
         Parameters
         ----------
         vars : dict
-            Reconstruction variables with keys 'obj', 'prb', 'pos'.
+            Reconstruction variables with keys 'obj', 'prb', 'pos', 'tp'.
             obj is expected to be scaled by 1/norm_const (as during iteration).
+            tp (ndist, 3, 2) is GLOBAL — identical on every rank; rank 0 writes it.
         i : int
             Iteration number, used in the filename.
         norm_const : float
@@ -84,6 +85,8 @@ class Writer:
 
         pos = self._cpu(vars['pos'])
         prb = self._cpu(vars['prb'])
+        # tp is small (ndist, 3, 2) and global — same on every rank.
+        tp = self._cpu(vars['tp']) if 'tp' in vars else None
 
         # mpio block: all ranks create datasets and write obj/pos collectively
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
@@ -98,6 +101,10 @@ class Writer:
             prb_shape = (self.ndist, self.nz, self.n)
             ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
             ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
+            if tp is not None:
+                # (ndist, 3, 2) — always the same across ranks; still create collectively
+                # so the dataset exists uniformly, but only rank 0 fills it below.
+                f.create_dataset('tp', shape=tp.shape, dtype='float32')
             if residual is not None:
                 ds_res = f.create_dataset('residual', shape=(self.ntheta, self.ndist, self.nz, self.n), dtype='float32')
 
@@ -121,12 +128,14 @@ class Writer:
             if residual is not None:
                 ds_res[self.st_theta:self.end_theta] = residual
 
-        # prb written by rank 0 only via serial driver after mpio block closes
+        # prb + tp written by rank 0 only via serial driver after mpio block closes
         self.comm.Barrier()
         if self.rank == 0:
             with h5py.File(path, 'a') as f:
                 f['prb_abs'][:]   = np.abs(prb).astype('float32')
                 f['prb_phase'][:] = np.angle(prb).astype('float32')
+                if tp is not None:
+                    f['tp'][:] = tp.astype('float32')
         self.comm.Barrier()
         if self.rank == 0:
             logger.info(f"Writer: checkpoint saved → {path}")

@@ -421,7 +421,7 @@ class Reader:
             cp.sqrt(raw, out=out)
         return out
 
-    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None):
+    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None, out_tp=None):
         """Read a checkpoint saved at a coarser resolution and upsample.
 
         Scale is inferred automatically from checkpoint n vs self.n.
@@ -429,6 +429,10 @@ class Reader:
         prb  : upsampled in y and x by scale (repeat).
         obj  : upsampled in x and y by scale (repeat); z mapped by nearest-neighbour.
         pos  : multiplied by scale (pixel coords scale with resolution).
+        tp   : (ndist, 3, 2) — shrinkage tanh parameters (A, k_raw, B).
+               NOT scaled by binning (shrink is a unitless ratio). If the
+               checkpoint predates tp saves, tp is left untouched and a
+               warning is logged on rank 0.
         """
         # --- infer scale and probe on rank 0, broadcast ---
         prb_np = np.empty((self.ndist, self.nz, self.n), dtype='complex64')
@@ -509,13 +513,27 @@ class Reader:
             # --- pos: scale pixel coordinates up ---
             pos = f['pos'][self.st_theta:self.end_theta].astype('float32')
 
+            # --- tp: read directly, NO binning scale (unitless ratios) ---
+            has_tp = 'tp' in f
+            if has_tp:
+                tp_raw = f['tp'][:].astype('float32')
+
         pos_up = pos * scale
         if out_pos is None:
             out_pos = cp.array(pos_up)
         else:
             out_pos[:] = cp.array(pos_up, dtype='float32')
 
-        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos}
+        if out_tp is not None:
+            if has_tp:
+                out_tp[:] = cp.asarray(tp_raw)
+            elif self.rank == 0:
+                logger.warning(
+                    f'read_checkpoint: {path} has no /tp dataset '
+                    f'(legacy checkpoint); leaving vars[tp] unchanged.')
+
+        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos,
+                'tp': out_tp if out_tp is not None else None}
 
     def read_pos_checkpoint(self, path, out=None):
         """Read positions from a checkpoint file and upsample to current resolution.

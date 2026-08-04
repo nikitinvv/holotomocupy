@@ -119,8 +119,9 @@ else:
         logger.info(f"Loading {args.ndist} probes from: {args.prb_file}")
     reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 if args.pos_checkpoint:
-    logger.info(f"Overriding positions from: {args.pos_checkpoint}")
-    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
+    logger.info(f"Overriding positions and tp from: {args.pos_checkpoint}")
+    reader.read_pos_checkpoint(args.pos_checkpoint,
+                               out=cl.vars['pos'], out_tp=cl.vars['tp'])
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

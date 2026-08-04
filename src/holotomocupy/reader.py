@@ -535,10 +535,12 @@ class Reader:
         return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos,
                 'tp': out_tp if out_tp is not None else None}
 
-    def read_pos_checkpoint(self, path, out=None):
+    def read_pos_checkpoint(self, path, out=None, out_tp=None):
         """Read positions from a checkpoint file and upsample to current resolution.
 
         Scale is inferred from the checkpoint probe size vs self.n.
+        If out_tp is provided, also load /tp (tanh shrink params) — unscaled,
+        since tp values are unitless ratios independent of binning.
         """
         if self.rank == 0:
             with h5py.File(path, 'r') as f:
@@ -551,6 +553,9 @@ class Reader:
 
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
             pos = f['pos'][self.ids[self.st_theta:self.end_theta]].astype('float32')
+            has_tp = 'tp' in f
+            if has_tp and out_tp is not None:
+                tp_raw = f['tp'][:].astype('float32')
 
         pos_up = pos * scale
         pos_up[..., 1] += np.float32(0.5 * (scale - 1))
@@ -558,6 +563,14 @@ class Reader:
             out = cp.array(pos_up)
         else:
             out[:] = cp.array(pos_up, dtype='float32')
+
+        if out_tp is not None:
+            if has_tp:
+                out_tp[:] = cp.asarray(tp_raw)
+            elif self.rank == 0:
+                logger.warning(
+                    f'read_pos_checkpoint: {path} has no /tp dataset '
+                    f'(legacy checkpoint); leaving vars[tp] unchanged.')
         return out
 
     def read_obj_unbin(self, out):

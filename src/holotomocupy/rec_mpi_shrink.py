@@ -971,10 +971,14 @@ class Rec:
         y22 += self.cl_shift.dcurlySmc(cy, x33, x34, zero_c, z33, z34)
         y22 += self.cl_shift.dcurlySmc(cz, x33, x34, zero_c, y33, y34)
 
-        # w-correction (matches original d2F_dF3): full dF3 in direction w
-        if w32 is not None:
-            cw = self.cl_shift.coeff_cached(w32)
-            y22 += self.cl_shift.dcurlySmc(c, x33, x34, cw, w33, w34)
+        # w-correction: full dF3 in direction w. In the shrink cascade, F4's d2
+        # contribution enters as w = (None, None, None, d2demag) — w32 is None
+        # but w34 is not, and dF3's m-direction must still lift it through F3.
+        if w32 is not None or w33 is not None or w34 is not None:
+            cw   = self.cl_shift.coeff_cached(w32) if w32 is not None else zero_c
+            w33u = w33 if w33 is not None else cp.zeros_like(x33)
+            w34u = w34 if w34 is not None else cp.zeros_like(x34)
+            y22 += self.cl_shift.dcurlySmc(c, x33, x34, cw, w33u, w34u)
 
         return [w31, y22]
 

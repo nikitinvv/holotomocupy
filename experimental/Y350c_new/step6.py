@@ -92,8 +92,8 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
-# Initial guess for tanh-parameterized shrink variable vars['tp'] — reads
-# per-angle /exchange/shrink internally and fits (A, k, B) per (dist, axis).
+# Initial guess for linear-parameterized shrink variable vars['tp'] — reads
+# per-angle /exchange/shrink internally and fits (A, B) per (dist, axis).
 cl.init_tp_from_shrink(reader)
 
 # --- Load initial variables (object, probe, positions) ------------------

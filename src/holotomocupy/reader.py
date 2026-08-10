@@ -46,7 +46,7 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
     """Build [ntheta, ndist, 2] shrink array; last axis is (v, h).
 
     Preferred source: `{pfile}_/shapp.mat` — per-(distance, projection) shrink
-    values Peter saves when the shrinkage is fitted with a model (tanh, ...).
+    values Peter saves when the shrinkage is fitted with a model.
     Stored as an Octave 3D matrix [2, ndist, ntheta] with axis-0 = (v, h),
     relative to first projection of first plane.
 
@@ -429,7 +429,7 @@ class Reader:
         prb  : upsampled in y and x by scale (repeat).
         obj  : upsampled in x and y by scale (repeat); z mapped by nearest-neighbour.
         pos  : multiplied by scale (pixel coords scale with resolution).
-        tp   : (ndist, 3, 2) — shrinkage tanh parameters (A, k_raw, B).
+        tp   : (ndist, 2, 2) — shrinkage linear parameters (A, B).
                NOT scaled by binning (shrink is a unitless ratio). If the
                checkpoint predates tp saves, tp is left untouched and a
                warning is logged on rank 0.
@@ -539,7 +539,7 @@ class Reader:
         """Read positions from a checkpoint file and upsample to current resolution.
 
         Scale is inferred from the checkpoint probe size vs self.n.
-        If out_tp is provided, also load /tp (tanh shrink params) — unscaled,
+        If out_tp is provided, also load /tp (linear shrink params) — unscaled,
         since tp values are unitless ratios independent of binning.
         """
         if self.rank == 0:

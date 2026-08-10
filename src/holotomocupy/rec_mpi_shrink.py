@@ -94,7 +94,7 @@ class Rec:
         self.rho_sq = {'obj': args.rho[0]**2,
                        'prb': args.rho[1]**2,
                        'pos': args.rho[2]**2,
-                       'tp':  args.rho[3]**2}   # tp = tanh params (A, k) per (dist, y/x)
+                       'tp':  args.rho[3]**2}   # tp = linear shrink params (A, B) per (dist, y/x)
         if not hasattr(self, 'estimate_rho'):
             self.estimate_rho = False
         if not hasattr(self, 'rho_estimate_niter'):
@@ -162,17 +162,17 @@ class Rec:
             etas_obj = make_pinned(obj_shape, dtype=self.obj_dtype); etas_obj[:] = 0
 
         # reconstruction variables
-        # vars['tp']: tanh parameters (shape (ndist, 3, 2)) — GLOBAL (same on all ranks, like prb).
-        # Param axis: 0=A, 1=k, 2=B  →  shrink(t; A, k, B) = B + A · tanh(k·t)
+        # vars['tp']: linear shrink parameters (shape (ndist, 2, 2)) — GLOBAL
+        # (same on all ranks, like prb). Param axis: 0=A slope, 1=B intercept →
+        #   shrink(t; A, B) = A·t + B    (t = θ_idx / (ntheta − 1))
         # per (dist, axis) → demag[theta, dist, axis] = (1 + shrink) / norm_mag[dist].
-        # Convention: B[dist=0] = 0 (pinned in _clip_tp) so the first dist has no offset;
-        # B[dist>0] captures the "starting shrink" so profiles can continue between dists.
+        # Both A and B are free floats; no reparameterization, no positivity clip.
         self.vars = {
             'obj':  obj_buf,
             'pos':  cp.zeros([self.local_ntheta, self.ndist, 2],           dtype='float32'),
             'prb':  cp.empty(prb_shape,                                    dtype='complex64'),
             'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
-            'tp':   cp.zeros([self.ndist, 3, 2],                           dtype='float32'),
+            'tp':   cp.zeros([self.ndist, 2, 2],                           dtype='float32'),
         }
         # measurement data; ref is owned by cl_prb_term — aliased here for back-compat
         # so external code (readers, gen_sqrt_ref out-arg) can keep using cl.ref.
@@ -188,7 +188,7 @@ class Rec:
             ge["pos"]  = cp.zeros([self.local_ntheta, self.ndist, 2], dtype='float32')
             ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             ge["prb"]  = cp.empty(prb_shape, dtype='complex64')
-            ge["tp"]   = cp.zeros([self.ndist, 3, 2], dtype='float32')
+            ge["tp"]   = cp.zeros([self.ndist, 2, 2], dtype='float32')
         self.etas["obj"] = etas_obj
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
@@ -201,26 +201,17 @@ class Rec:
         # GPU-resident norm_magnifications for fast per-dist lookup inside kernels.
         self.norm_magnifications_gpu = cp.asarray(self.norm_magnifications, dtype='float32')
 
-    def init_tp_from_shrink(self, reader,
-                            k_candidates=(0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0)):
-        """Fit the tanh shrink model to per-angle stored shrink and use the
+    def init_tp_from_shrink(self, reader):
+        """Fit the linear shrink model to per-angle stored shrink and use the
         fitted parameters as the initial guess for vars['tp'].
 
         Model (per (dist, axis), from F4):
-            shrink(theta) = B + A * tanh(k * t),   t = theta_idx / (ntheta - 1),  t in [0, 1]
-        with A = a^2 >= 0, k = k_raw^2 >= 0. Stored as
-            tp[dist, 0, axis] = a = sqrt(A)
-            tp[dist, 1, axis] = k_raw = sqrt(k)
-            tp[dist, 2, axis] = B
+            shrink(theta) = A * t + B,   t = theta_idx / (ntheta - 1),  t in [0, 1]
+        Stored as
+            tp[dist, 0, axis] = A
+            tp[dist, 1, axis] = B
 
-        Fit strategy (cheap and closed-form-per-k):
-          - Grid search over `k_candidates`.
-          - For each candidate k, linear least-squares on (B, A) using the
-            feature vector [1, tanh(k*t)].
-          - Keep the (A, k, B) with the smallest residual per (dist, axis).
-          - Clip A to zero if the fit returns negative (parametrization
-            requires A >= 0; a decreasing shrink profile is rare in practice
-            and safer to init with A = 0 constant-B).
+        Closed-form 2-parameter linear least squares on M = [t, 1].
 
         All ranks contribute their local theta slice via a gather to rank 0
         (data is tiny — ntheta * ndist * 2 float32s); rank 0 does the fit
@@ -233,7 +224,7 @@ class Rec:
         # Gather per-rank (st_theta, slice) on rank 0.
         gathered = self.cl_mpi.comm.gather((self.st_theta, local_np), root=0)
 
-        tp_init = np.zeros((self.ndist, 3, 2), dtype='float32')
+        tp_init = np.zeros((self.ndist, 2, 2), dtype='float32')
         fit_report = None
         if self.rank == 0:
             all_shrink = np.zeros((self.ntheta, self.ndist, 2), dtype='float32')
@@ -242,45 +233,34 @@ class Rec:
 
             t = (np.arange(self.ntheta, dtype='float64')
                  / max(self.ntheta - 1, 1))                                    # (ntheta,)
-            ones = np.ones_like(t)
+            M = np.column_stack([t, np.ones_like(t)])                          # (ntheta, 2)
 
-            fit_report = np.zeros((self.ndist, 2, 3), dtype='float64')         # (dist, axis, (A, k, B))
+            fit_report = np.zeros((self.ndist, 2, 2), dtype='float64')         # (dist, axis, (A, B))
             rms_report = np.zeros((self.ndist, 2), dtype='float64')            # (dist, axis)
             for d in range(self.ndist):
                 for ax in range(2):
                     y = all_shrink[:, d, ax].astype('float64')
-                    best = None                                                # (res, A, k, B)
-                    for k in k_candidates:
-                        u = np.tanh(k * t)
-                        M = np.column_stack([ones, u])                          # (ntheta, 2)
-                        (B_fit, A_fit), *_ = np.linalg.lstsq(M, y, rcond=None)
-                        B_fit, A_fit = float(B_fit), float(A_fit)
-                        y_pred = B_fit + A_fit * u
-                        res    = float(np.sum((y - y_pred) ** 2))
-                        if best is None or res < best[0]:
-                            best = (res, A_fit, float(k), B_fit)
-                    res, A_fit, k_fit, B_fit = best
-                    # Enforce A >= 0 (parametrization stores sqrt(A)).
-                    if A_fit < 0.0:
-                        A_fit = 0.0
-                    tp_init[d, 0, ax] = np.sqrt(A_fit)                          # a
-                    tp_init[d, 1, ax] = np.sqrt(max(k_fit, 0.0))                # k_raw
-                    tp_init[d, 2, ax] = B_fit                                   # B
-                    fit_report[d, ax] = [A_fit, k_fit, B_fit]
+                    (A_fit, B_fit), *_ = np.linalg.lstsq(M, y, rcond=None)
+                    A_fit, B_fit = float(A_fit), float(B_fit)
+                    y_pred = A_fit * t + B_fit
+                    res    = float(np.sum((y - y_pred) ** 2))
+                    tp_init[d, 0, ax] = A_fit
+                    tp_init[d, 1, ax] = B_fit
+                    fit_report[d, ax] = [A_fit, B_fit]
                     rms_report[d, ax] = float(np.sqrt(res / self.ntheta))
 
-        # Broadcast tp_init to every rank (tiny — ndist * 3 * 2 float32).
+        # Broadcast tp_init to every rank (tiny — ndist * 2 * 2 float32).
         self.cl_mpi.comm.Bcast(tp_init, root=0)
         self.vars['tp'][:] = cp.asarray(tp_init)
 
         if self.rank == 0:
             for d in range(self.ndist):
                 for ax, name in enumerate(('y', 'x')):
-                    A, k, B = fit_report[d, ax]
-                    rms      = rms_report[d, ax]
+                    A, B = fit_report[d, ax]
+                    rms   = rms_report[d, ax]
                     logger.info(
                         f'init_tp_from_shrink: dist={d} axis={name}  '
-                        f'A={A:+.4e} k={k:+.4e} B={B:+.4e}  RMS_fit={rms:.3e}')
+                        f'A={A:+.4e} B={B:+.4e}  RMS_fit={rms:.3e}')
 
     def BH(self, writer=None, shrink_gt=None):
         """shrink_gt: optional numpy array (ntheta, ndist, 2) — full ground-truth
@@ -656,7 +636,6 @@ class Rec:
         grads['prb'][:] = cp.array(self.allreduce(grads['prb'].get()))
 
         # tp is GLOBAL — sum per-rank contributions across ranks.
-        # B is a free variable — no gradient reduction, no B pinning.
         grads['tp'][:] = cp.array(self.allreduce(grads['tp'].get()))
 
     @timer    
@@ -971,9 +950,11 @@ class Rec:
         y22 += self.cl_shift.dcurlySmc(cy, x33, x34, zero_c, z33, z34)
         y22 += self.cl_shift.dcurlySmc(cz, x33, x34, zero_c, y33, y34)
 
-        # w-correction: full dF3 in direction w. In the shrink cascade, F4's d2
-        # contribution enters as w = (None, None, None, d2demag) — w32 is None
-        # but w34 is not, and dF3's m-direction must still lift it through F3.
+        # w-correction: full dF3 in direction w. Under the linear F4, F4's own
+        # d² vanishes so d2F_dF4 returns w34=None at the top of the cascade —
+        # the guard here skips the kernel entirely in that case. When a caller
+        # threads a non-None w through (nested cascade / mixed calls), the
+        # m-direction still lifts through F3 via dcurlySmc.
         if w32 is not None or w33 is not None or w34 is not None:
             cw   = self.cl_shift.coeff_cached(w32) if w32 is not None else zero_c
             w33u = w33 if w33 is not None else cp.zeros_like(x33)
@@ -997,102 +978,58 @@ class Rec:
         return [y21, y32, y33, y34]
 
     ####### (x31,x32,x33,x34_demag) = F4(x41,x42,x43,x44_tp)
-    # F4 turns per-dist tanh parameters into per-projection demag with
-    # SQUARED reparameterization for positivity (no boundary, no clip):
-    #     A(a)     = a²        →  A ≥ 0 always
-    #     k(k_raw) = k_raw²    →  k ≥ 0 always
-    #     shrink(t; a, k_raw, B) = B + A · tanh(k · t)
-    #     demag = (1 + shrink) / norm_magnifications[dist]
+    # F4 turns per-dist linear shrink parameters into per-projection demag:
+    #     shrink(t; A, B) = A · t + B
+    #     demag           = (1 + shrink) / norm_magnifications[dist]
     #
-    # x44 layout (3, 2): axis 0 = param (0=a, 1=k_raw, 2=B), axis 1 = y/x.
-    # A, k are derived positive quantities. B is a free variable too — no
-    # continuity constraint; the data-fit drives it.
-    # Note: at a=0 or k_raw=0, chain-rule factor (2a, 2k_raw) vanishes — init
-    # both to small nonzero values so the gradient can move them.
+    # x44 layout (2, 2): axis 0 = param (0=A slope, 1=B intercept), axis 1 = y/x.
+    # Both A and B are free floats — no reparameterization, no positivity clip;
+    # the data-fit drives them.
     @nvtx.annotate("F4", color="green")
     def F4(self, x):
         """In: (x41, x42, x43, x44_tp)  Out: (x41, x42, x43, x34_demag). Per-dist."""
         x41, x42, x43, x44 = x
-        a     = x44[0, :]; k_raw = x44[1, :]; B  = x44[2, :]   # (2,) each
-        A     = a * a                                          # (2,)  A = a² ≥ 0
-        k     = k_raw * k_raw                                  # (2,)  k = k_raw² ≥ 0
-        t  = self._t_chunk                                                    # (chunk, 1)
-        kt = k[None, :] * t                                                   # (chunk, 2)
-        shrink = B[None, :] + A[None, :] * cp.tanh(kt)
+        A = x44[0, :]; B = x44[1, :]                              # (2,) each
+        t = self._t_chunk                                         # (chunk, 1)
+        shrink = A[None, :] * t + B[None, :]
         demag  = (1.0 + shrink) / self.norm_magnifications_gpu[self._dist_idx]
         return [x41, x42, x43, demag]
 
     @nvtx.annotate("dF4", color="green")
     def dF4(self, x, y, return_x=True):
-        """Directional derivative on (da, dk_raw, dB). Per-dist. Chain rule:
-            ∂shrink/∂a     = 2a       · tanh(k·t)
-            ∂shrink/∂k_raw = 2k_raw·A · t · sech²(k·t)
-            ∂shrink/∂B     = 1
+        """Directional derivative on (dA, dB). Per-dist.
+            ∂shrink/∂A = t,   ∂shrink/∂B = 1
         """
         x41, x42, x43, x44 = x
         y41, y42, y43, y44 = y
-        a     = x44[0, :]; k_raw = x44[1, :]
-        da    = y44[0, :]; dk_raw = y44[1, :]; dB = y44[2, :]
-        A     = a * a
-        k     = k_raw * k_raw
+        dA = y44[0, :]; dB = y44[1, :]
         t  = self._t_chunk
-        kt = k[None, :] * t
-        tanh_kt  = cp.tanh(kt)
-        sech2_kt = 1.0 - tanh_kt * tanh_kt
-        nm       = self.norm_magnifications_gpu[self._dist_idx]
+        nm = self.norm_magnifications_gpu[self._dist_idx]
 
-        dshrink = (dB[None, :]
-                   + (2.0 * a * da)[None, :] * tanh_kt
-                   + (2.0 * k_raw * A * dk_raw)[None, :] * t * sech2_kt)
-        ddemag  = dshrink / nm
+        ddemag = (dA[None, :] * t + dB[None, :]) / nm
         if return_x:
-            B     = x44[2, :]
-            shrink = B[None, :] + A[None, :] * tanh_kt
+            A = x44[0, :]; B = x44[1, :]
+            shrink = A[None, :] * t + B[None, :]
             demag  = (1.0 + shrink) / nm
             return [x41, x42, x43, demag], [y41, y42, y43, ddemag]
         return [y41, y42, y43, ddemag]
 
     @nvtx.annotate("d2F_dF4", color="purple")
     def d2F_dF4(self, x, y, z, w):
-        """Bilinear 2nd-derivative on (y, z) + w-correction.
-
-        Second partials (B is linear → all B cross-partials vanish):
-          ∂²/∂a²          = 2 · tanh(k·t)
-          ∂²/∂a·∂k_raw    = 4·a·k_raw · t · sech²(k·t)
-          ∂²/∂k_raw²      = 2·A · t · sech²(k·t) · [1 − 4·k_raw²·t·tanh(k·t)]
-        """
+        """Bilinear 2nd-derivative on (y, z) + w-correction. The model is
+        linear in (A, B), so the (y, z) bilinear part vanishes; only the
+        w-correction (first-order pass-through of w) remains."""
         x41, x42, x43, x44 = x
-        y41, y42, y43, y44 = y
-        z41, z42, z43, z44 = z
         w41, w42, w43, w44 = w
 
-        a     = x44[0, :]; k_raw = x44[1, :]
-        A     = a * a
-        k     = k_raw * k_raw
         t  = self._t_chunk
-        kt = k[None, :] * t
-        tanh_kt  = cp.tanh(kt)
-        sech2_kt = 1.0 - tanh_kt * tanh_kt
-        nm       = self.norm_magnifications_gpu[self._dist_idx]
-
-        # per-pixel 2nd-partial coefficients (all shape (chunk, 2))
-        d_aa    = 2.0 * tanh_kt                                              # broadcasts (1, 2)*
-        d_ak    = (4.0 * a * k_raw)[None, :] * t * sech2_kt
-        d_kk    = 2.0 * A[None, :] * t * sech2_kt \
-                  * (1.0 - 4.0 * (k_raw * k_raw)[None, :] * t * tanh_kt)
-
-        day, dky = y44[0, :], y44[1, :]
-        daz, dkz = z44[0, :], z44[1, :]
-        d2shrink = (d_aa * day[None, :] * daz[None, :]
-                    + d_ak * (day[None, :] * dkz[None, :] + dky[None, :] * daz[None, :])
-                    + d_kk * dky[None, :] * dkz[None, :])
-        d2demag  = d2shrink / nm
+        nm = self.norm_magnifications_gpu[self._dist_idx]
 
         if w44 is not None:
-            daw, dkw, dBw = w44[0, :], w44[1, :], w44[2, :]
-            d2demag += (dBw[None, :]
-                        + (2.0 * a * daw)[None, :] * tanh_kt
-                        + (2.0 * k_raw * A * dkw)[None, :] * t * sech2_kt) / nm
+            dAw = w44[0, :]; dBw = w44[1, :]
+            d2demag = (dAw[None, :] * t + dBw[None, :]) / nm
+        else:
+            d2demag = None                 # signals d2F_dF3 to skip the w-correction kernel
 
         return [w41, w42, w43, d2demag]
 
@@ -1100,27 +1037,18 @@ class Rec:
     def gF4(self, x, y):
         """Adjoint. y = (y21, y32, y33, y34); returns (y21, y32, y33, y44).
 
-        Per-dist (squared chain rule folded in):
-            g_a[axis]     = 2a       · Σ_c y34[c, axis] · tanh(k·t)         / nm
-            g_k_raw[axis] = 2k_raw·A · Σ_c y34[c, axis] · t · sech²(k·t)    / nm
-            g_B[axis]     = Σ_c y34[c, axis]                                / nm
-        g_B is zeroed later in gradients() since B is enforced, not optimized."""
+        Per-dist:
+            g_A[axis] = Σ_c y34[c, axis] · t / nm
+            g_B[axis] = Σ_c y34[c, axis]     / nm
+        """
         y21, y32, y33, y34 = y  # y34 shape (chunk, 2)
         x = self.apply_F_from(x, 5)                                     # no-op (len(F)=5)
-        x41, x42, x43, x44 = x
-        a     = x44[0, :]; k_raw = x44[1, :]
-        A     = a * a
-        k     = k_raw * k_raw
         t  = self._t_chunk
-        kt = k[None, :] * t
-        tanh_kt  = cp.tanh(kt)
-        sech2_kt = 1.0 - tanh_kt * tanh_kt
-        nm       = self.norm_magnifications_gpu[self._dist_idx]
+        nm = self.norm_magnifications_gpu[self._dist_idx]
 
-        g_a     = 2.0 * a       * cp.sum(y34 * tanh_kt,        axis=0) / nm         # (2,)
-        g_k_raw = 2.0 * k_raw * A * cp.sum(y34 * t * sech2_kt, axis=0) / nm         # (2,)
-        g_B     = cp.sum(y34,                                  axis=0) / nm         # (2,)
-        y44 = cp.stack([g_a, g_k_raw, g_B], axis=0)                                  # (3, 2)
+        g_A = cp.sum(y34 * t, axis=0) / nm                              # (2,)
+        g_B = cp.sum(y34,     axis=0) / nm                              # (2,)
+        y44 = cp.stack([g_A, g_B], axis=0)                              # (2, 2)
         return [y21, y32, y33, y44]
 
     @timer
@@ -1155,7 +1083,7 @@ class Rec:
         
         residual = None# self.compute_residual(vars)
         # writer receives shrink for BOTH init and current tp — computed as
-        # shrink[θ, dist, axis] = B + A · tanh(k·t). Only this rank's theta slice
+        # shrink[θ, dist, axis] = A · t + B. Only this rank's theta slice
         # for (init, current); shrink_gt (if set) is the full ntheta profile.
         shrink_now  = self._tp_to_shrink_local(vars['tp'])
         shrink_init = self._tp_to_shrink_local(self.tp_init)
@@ -1254,26 +1182,21 @@ class Rec:
         self._log_shrink_stats(vars['tp'], i)
 
     def _tp_to_shrink_global(self, tp):
-        """Compute the FULL ntheta shrink array from tp (shape (ndist, 3, 2)).
-        Squared parameterization: A = a², k = k_raw².
-            shrink[θ, dist, axis] = B + A · tanh(k · t)   with t = θ / (ntheta − 1).
+        """Compute the FULL ntheta shrink array from tp (shape (ndist, 2, 2)).
+            shrink[θ, dist, axis] = A · t + B    with t = θ / (ntheta − 1).
         Returns numpy shape (ntheta, ndist, 2). tp is global so no gather needed."""
         tp_np = tp.get() if isinstance(tp, cp.ndarray) else np.asarray(tp)
-        a     = tp_np[:, 0, :]                                    # (ndist, 2)
-        k_raw = tp_np[:, 1, :]                                    # (ndist, 2)
-        B     = tp_np[:, 2, :]                                    # (ndist, 2)
-        A     = a * a
-        k     = k_raw * k_raw
+        A = tp_np[:, 0, :]                                        # (ndist, 2)
+        B = tp_np[:, 1, :]                                        # (ndist, 2)
         t = np.arange(self.ntheta, dtype='float32') / max(self.ntheta - 1, 1)  # (ntheta,)
-        kt = k[None, :, :] * t[:, None, None]                     # (ntheta, ndist, 2)
-        return (B[None, :, :] + A[None, :, :] * np.tanh(kt)).astype('float32')
+        return (A[None, :, :] * t[:, None, None] + B[None, :, :]).astype('float32')
 
     def _tp_to_shrink_local(self, tp):
         """This rank's theta slice of the full shrink array — used by writer."""
         return self._tp_to_shrink_global(tp)[self.st_theta:self.end_theta]
 
     def _log_shrink_stats(self, tp, i):
-        """Log per-(dist, axis) mean/max abs shrink from the tanh model. tp is
+        """Log per-(dist, axis) mean/max abs shrink from the linear model. tp is
         global on every rank, so only rank 0 does the compute + log."""
         if self.rank != 0:
             return
@@ -1290,7 +1213,7 @@ class Rec:
 
     def gen_sqrt_data(self, vars, out):
         """Generate synthetic data. vars['tp'] must already contain the
-        tanh parameters (A, k) for the desired shrink profile."""
+        linear parameters (A, B) for the desired shrink profile."""
         vars["obj"] /= self.norm_const
         self.fwd_tomo(vars["obj"],out = self.proj_tmp)
         self.redist(self.proj_tmp, vars['proj'])

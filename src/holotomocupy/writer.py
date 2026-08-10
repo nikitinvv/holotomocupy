@@ -66,7 +66,7 @@ class Writer:
         vars : dict
             Reconstruction variables with keys 'obj', 'prb', 'pos', 'tp'.
             obj is expected to be scaled by 1/norm_const (as during iteration).
-            tp (ndist, 3, 2) is GLOBAL — identical on every rank; rank 0 writes it.
+            tp (ndist, 2, 2) is GLOBAL — identical on every rank; rank 0 writes it.
         i : int
             Iteration number, used in the filename.
         norm_const : float
@@ -85,7 +85,7 @@ class Writer:
 
         pos = self._cpu(vars['pos'])
         prb = self._cpu(vars['prb'])
-        # tp is small (ndist, 3, 2) and global — same on every rank.
+        # tp is small (ndist, 2, 2) and global — same on every rank.
         tp = self._cpu(vars['tp']) if 'tp' in vars else None
 
         # mpio block: all ranks create datasets and write obj/pos collectively
@@ -102,7 +102,7 @@ class Writer:
             ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
             ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
             if tp is not None:
-                # (ndist, 3, 2) — always the same across ranks; still create collectively
+                # (ndist, 2, 2) — always the same across ranks; still create collectively
                 # so the dataset exists uniformly, but only rank 0 fills it below.
                 f.create_dataset('tp', shape=tp.shape, dtype='float32')
             if residual is not None:

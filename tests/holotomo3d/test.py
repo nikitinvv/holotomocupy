@@ -147,7 +147,7 @@ def gen_object(n, delta, beta):
 obj = gen_object(nobj, 2, 2e-2)
 
 #### Probe — load from pre-saved ID16A TIFF files
-_data_dir = '/home/beams/VNIKITIN/holotomocupy_mpi/tests/holotomo3d/data'
+_data_dir = '/home/beams/VNIKITIN/holotomocupy_mpi_deform/tests/holotomo3d/data'
 prb_abs   = read_tiff(f'{_data_dir}/prb_abs_2048.tiff')[:ndist]
 prb_phase = read_tiff(f'{_data_dir}/prb_phase_2048.tiff')[:ndist]
 prb = prb_abs * np.exp(1j * prb_phase).astype('complex64')
@@ -199,35 +199,30 @@ args.comm = MPI.COMM_WORLD
 
 cl = Rec(args)
 
-#### Ground-truth tanh-parameterized shrinkage with per-dist offset
-# rec_mpi_shrink's F4 models  shrink(t; A, k, B) = B + A · tanh(k·t) with t = θ_idx/(ntheta−1).
-# Direct parameterization (no softplus, no clip). Continuity across dists is
-# enforced in the solver via _enforce_continuity: B[j] = Σ_{i<j} A[i]·tanh(k[i]).
-# Per (dist, axis) A is the same each dist; k is shared; B is likewise built by
-# continuity so the shrink profile is continuous across distances.
+#### Ground-truth linear-parameterized shrinkage with per-dist offset
+# rec_mpi_shrink's F4 models  shrink(t; A, B) = A · t + B  with t = θ_idx/(ntheta−1).
+# Per (dist, axis): A is the slope, B is the intercept — both free floats.
+# B is built by continuity so the shrink profile is continuous across distances:
+# at t = 1 shrink is A + B, so B[j] = Σ_{i<j} A[i]  (with B[0] = 0).
 # Target total: 1.5% (y) / 3% (x) at last dist.
-tanh_k_gt   = 2.0
-end_shrink  = np.array([0.06, 0.12], dtype='float32')                                 # (y, x) at last dist
-# Per-dist tanh amplitude decays by dist_decay each dist — shrink slows down as
+end_shrink  = np.array([0.02, 0.04], dtype='float32')                                 # (y, x) at last dist
+# Per-dist slope A decays by dist_decay each dist — shrink slows down as
 # distance grows. Normalize so the cumulative shrink at the last dist matches
-# end_shrink exactly:  A[j]·tanh(k) = base·decay^j,  Σ_j A[j]·tanh(k) = end_shrink.
+# end_shrink exactly:  A[j] = base·decay^j,  Σ_j A[j] = end_shrink.
 dist_decay  = 0.7
 _geom_sum   = (1.0 - dist_decay ** ndist) / (1.0 - dist_decay)                        # Σ decay^j, j=0..ndist-1
-_A_base     = end_shrink / (np.tanh(tanh_k_gt) * _geom_sum)                           # amp for dist 0
+_A_base     = end_shrink / _geom_sum                                                  # slope for dist 0
 A_gt        = (_A_base[None, :] * (dist_decay ** np.arange(ndist)[:, None])).astype('float32')  # (ndist, 2)
-_per_dist_end = A_gt * np.tanh(tanh_k_gt)                                             # (ndist, 2)
 B_gt        = np.zeros_like(A_gt)
-B_gt[1:]    = np.cumsum(_per_dist_end[:-1], axis=0)                                   # (ndist, 2)
-# tp_gt storage layout is (a, k_raw, B) — inside F4:
-#   A = a²,  k = k_raw²  (both automatically ≥ 0).  B is stored directly.
-tp_gt = np.zeros((ndist, 3, 2), dtype='float32')
-tp_gt[:, 0, :] = np.sqrt(A_gt)                                                        # a = sqrt(A)
-tp_gt[:, 1, :] = np.sqrt(tanh_k_gt)                                                   # k_raw = sqrt(k)
-tp_gt[:, 2, :] = B_gt
+B_gt[1:]    = np.cumsum(A_gt[:-1], axis=0)                                            # (ndist, 2)
+# tp_gt storage layout is (A, B) — both stored directly (no reparameterization).
+tp_gt = np.zeros((ndist, 2, 2), dtype='float32')
+tp_gt[:, 0, :] = A_gt
+tp_gt[:, 1, :] = B_gt
 # Evaluate the shrink profile once for plotting/logging.
 _t_all      = (np.arange(ntheta, dtype='float32') / max(ntheta - 1, 1))              # (ntheta,)
-shrink_nd   = (B_gt[None, :, :]
-               + A_gt[None, :, :] * np.tanh(tanh_k_gt * _t_all[:, None, None])).astype('float32')  # (ntheta, ndist, 2)
+shrink_nd   = (A_gt[None, :, :] * _t_all[:, None, None]
+               + B_gt[None, :, :]).astype('float32')                                  # (ntheta, ndist, 2)
 
 #### Create Writer
 writer = Writer(
@@ -309,24 +304,29 @@ del _obj_blur_re, _obj_blur_im, _obj_blur
 cl.vars['prb'][:] = cp.array(1)
 cl.vars['pos'][:] = cp.array((pos+pos_err)[cl.st_theta:cl.end_theta])
 
-# tp init for the RECONSTRUCTION: perturbed A, k around GT; B built by continuity
-# from the perturbed A, k so the initial shrink profile has no jumps between dists.
+# tp init for the RECONSTRUCTION: perturbed A around GT; B built by continuity
+# from the perturbed A so the initial shrink profile has no jumps between dists.
 # During BH iterations B is free (no ongoing continuity constraint), but the
 # *starting* profile is continuous.
 _tp_init = np.zeros_like(tp_gt)
-_mag  = 0.3 + np.random.random([ndist, 2]) * 0.2                              # (ndist, 2): |offset| ∈ [0.3, 0.5]
-_sign = np.where(np.random.random([ndist, 2]) < 0.5, -1.0, 1.0)                # random ± per (dist, param)
+_mag  = 0.3 + np.random.random([ndist, 1]) * 0.2                              # (ndist, 1): |offset| ∈ [0.3, 0.5]
+_sign = np.where(np.random.random([ndist, 1]) < 0.5, -1.0, 1.0)                # random ± per dist
 err   = 1.0 + _sign * _mag                                                     # err ∈ [0.5, 0.7] ∪ [1.3, 1.5]
-_A_init = A_gt * err[:, 0:1]                                             # perturbed A
-_k_init = tanh_k_gt * err[:, 1:2]                                        # perturbed k (scalar → shape (ndist, 1))
-_tp_init[:, 0, :] = np.sqrt(_A_init)                                     # a     = √A
-_tp_init[:, 1, :] = np.sqrt(_k_init)                                     # k_raw = √k
-# Continuous B derived from perturbed A, k: B[0]=0, B[j] = Σ_{i<j} A[i]·tanh(k[i])
-_ends_init      = _A_init * np.tanh(_k_init)                             # (ndist, 2)
-_tp_init[0, 2, :] = 0.0
+_A_init = A_gt * err                                                     # perturbed A (ndist, 2)
+_tp_init[:, 0, :] = _A_init
+# Continuous B derived from perturbed A: B[0]=0, B[j] = Σ_{i<j} A_init[i]
+_tp_init[0, 1, :] = 0.0
 if ndist > 1:
-    _tp_init[1:, 2, :] = np.cumsum(_ends_init[:-1], axis=0)
+    _tp_init[1:, 1, :] = np.cumsum(_A_init[:-1], axis=0)
 cl.vars['tp'][:] = cp.asarray(_tp_init)
+
+
+
+cl.vars['tp'][:] = 0
+cl.vars['tp'][:, 0, :] = 0.05      # A (slope)
+
+
+
 cl.BH(writer=writer, shrink_gt=shrink_nd)
 
 #### Post-reconstruction: horizontal + vertical mid-slices, fixed clim,

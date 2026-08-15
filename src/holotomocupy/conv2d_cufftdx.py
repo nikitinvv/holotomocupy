@@ -25,9 +25,10 @@ import ctypes
 import os
 import pathlib
 import subprocess
-import sys
 
 import cupy as cp
+
+from .logger_config import logger
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -89,8 +90,8 @@ _lib_cache: dict = {}
 def _compile(nx, ny, ept_x, fpb_x, ept_y, fpb_y) -> ctypes.CDLL:
     so = _SO_DIR / f"libconv2d_sm{_SM}_{nx}x{ny}_xe{ept_x}f{fpb_x}_ye{ept_y}f{fpb_y}.so"
     if not so.exists() or so.stat().st_mtime < _SRC.stat().st_mtime:
-        print(f"  JIT-compiling {nx}x{ny} EPT_X={ept_x} FPB_X={fpb_x} "
-              f"EPT_Y={ept_y} FPB_Y={fpb_y} …", flush=True)
+        logger.info(f'JIT-compiling {nx}x{ny} EPT_X={ept_x} FPB_X={fpb_x} '
+                    f'EPT_Y={ept_y} FPB_Y={fpb_y} ...')
         r = subprocess.run([
             _NVCC, "-O3", "--std=c++17", f"-arch=sm_{_SM}",
             "-Xcompiler", "-fPIC", "-shared",
@@ -104,7 +105,7 @@ def _compile(nx, ny, ept_x, fpb_x, ept_y, fpb_y) -> ctypes.CDLL:
         ], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"cuFFTDx build failed for {nx}x{ny}:\n{r.stderr}")
-        print("  Done.", flush=True)
+        logger.info(f'JIT-compiled {so.name}')
     lib = ctypes.CDLL(str(so))
     lib.conv2d_create.restype   = ctypes.c_void_p
     lib.conv2d_create.argtypes  = [ctypes.c_void_p]
@@ -239,7 +240,7 @@ def _check_available() -> bool:
 
 CUFFTDX_AVAILABLE: bool = _check_available()
 if CUFFTDX_AVAILABLE:
-    print("cuFFTDx (mathDX) available — using fast cuFFTDx propagator.", flush=True)
+    logger.info('cuFFTDx (mathDX) available - using the fast cuFFTDx propagator.')
 
 
 def precompile(nx: int, ny: int) -> None:

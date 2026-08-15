@@ -12,7 +12,7 @@ from .cuda_kernels import (
     dsadj_kernel, dsadjf_kernel,
     dsmadj_kernel, dsmadjf_kernel,
 )
-from .utils import redot
+from .utils import redot, CoeffCacheMixin
 
 
 def ascontig(x):
@@ -22,7 +22,7 @@ def ascontig(x):
     return cp.ascontiguousarray(cp.asarray(x))
 
 
-class Shift():
+class Shift(CoeffCacheMixin):
     """Cubic B-spline shift operator (requires coeff() prefilter, C2 smooth).
 
     coeff() is the FFT B-spline prefilter on the input grid (periodic BC).
@@ -94,34 +94,6 @@ class Shift():
         if self.obj_dtype == 'float32':
             out = out.real
         return out
-
-    def coeff_cached(self, psi):
-        """coeff(psi) memoized by id(psi). MUST be paired with explicit
-        coeff_cache_reset() at safe lifetime boundaries (e.g., per chunk):
-        id() values can be reused across distinct Python objects once an
-        earlier one is garbage-collected. Hit/miss counters are exposed for
-        verification; reset along with the cache."""
-        key = id(psi)
-        cached = self.coeff_cache.get(key)
-        if cached is None:
-            self.coeff_misses += 1
-            cached = self.coeff(psi)
-            self.coeff_cache[key] = cached
-        else:
-            self.coeff_hits += 1
-        return cached
-
-    def coeff_cache_reset(self):
-        self.coeff_cache = {}
-
-    def coeff_cache_stats(self, reset=False):
-        """Return (hits, misses) accumulated since the last stats reset.
-        Set reset=True to zero the counters."""
-        stats = (self.coeff_hits, self.coeff_misses)
-        if reset:
-            self.coeff_hits = 0
-            self.coeff_misses = 0
-        return stats
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*

@@ -103,6 +103,42 @@ def redot(a, b, axis=None):
     return cp.sum(reprod(a, b), axis=axis)
 
 
+class CoeffCacheMixin:
+    """Memoization of ``coeff(psi)`` shared by the shift operators.
+
+    The host class must define ``coeff`` and initialise ``coeff_cache`` (dict),
+    ``coeff_hits`` and ``coeff_misses`` (ints).
+    """
+
+    def coeff_cached(self, psi):
+        """coeff(psi) memoized by id(psi). MUST be paired with explicit
+        coeff_cache_reset() at safe lifetime boundaries (e.g., per chunk):
+        id() values can be reused across distinct Python objects once an
+        earlier one is garbage-collected. Hit/miss counters are exposed for
+        verification; reset along with the cache."""
+        key = id(psi)
+        cached = self.coeff_cache.get(key)
+        if cached is None:
+            self.coeff_misses += 1
+            cached = self.coeff(psi)
+            self.coeff_cache[key] = cached
+        else:
+            self.coeff_hits += 1
+        return cached
+
+    def coeff_cache_reset(self):
+        self.coeff_cache = {}
+
+    def coeff_cache_stats(self, reset=False):
+        """Return (hits, misses) accumulated since the last stats reset.
+        Set reset=True to zero the counters."""
+        stats = (self.coeff_hits, self.coeff_misses)
+        if reset:
+            self.coeff_hits = 0
+            self.coeff_misses = 0
+        return stats
+
+
 def lap(a, b, c):
     """5-stencil Laplacian on the centre slice b given its z-neighbours a, c.
     Output shape matches b: ∇²b ≈ a + c + roll(b,±1,axis=1) + roll(b,±1,axis=2) - 6·b."""

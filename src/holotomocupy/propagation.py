@@ -2,6 +2,7 @@ import math
 import cupy as cp
 import cupyx.scipy.fft as cufft
 from .cuda_kernels import pad_fwd_kernel, pad_adj_kernel
+from .logger_config import logger
 try:
     from .conv2d_cufftdx import Conv2DCUFFTDX, CUFFTDX_AVAILABLE
 except Exception:
@@ -38,7 +39,7 @@ class Propagation:
             try:
                 self._conv2d = Conv2DCUFFTDX(2 * nz, 2 * n)
             except Exception as e:
-                print(f"  cuFFTDx unavailable ({e}), falling back to cuPy FFT.", flush=True)
+                logger.warning(f'cuFFTDx unavailable ({e}), falling back to cuPy FFT.')
                 self._use_cufftdx = False
         if not self._use_cufftdx:
             self._plan_2d = cufft.get_fft_plan(self._buf_big, axes=(-2, -1), value_type='C2C')

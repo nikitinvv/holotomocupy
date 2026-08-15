@@ -37,7 +37,7 @@ the same `S`/`Sadj` chirp-z path used by the forward operator.
 import cupy as cp
 import cupyx.scipy.fft as cufft
 import numpy as np
-from .utils import redot
+from .utils import redot, CoeffCacheMixin
 
 
 def ascontig(x):
@@ -84,7 +84,7 @@ combine_d2curlySc = cp.ElementwiseKernel(
 )
 
 
-class ShiftFFT():
+class ShiftFFT(CoeffCacheMixin):
     """Fourier-shift-theorem shift operator (assumes magnification m = 1).
 
     Runs the FFT shift directly on the input (nzpsi × npsi) grid — periodic
@@ -389,27 +389,6 @@ class ShiftFFT():
     def coeff(self, psi):
         """FFT shift needs no B-spline prefilter — identity."""
         return psi
-
-    def coeff_cached(self, psi):
-        key = id(psi)
-        cached = self.coeff_cache.get(key)
-        if cached is None:
-            self.coeff_misses += 1
-            cached = self.coeff(psi)
-            self.coeff_cache[key] = cached
-        else:
-            self.coeff_hits += 1
-        return cached
-
-    def coeff_cache_reset(self):
-        self.coeff_cache = {}
-
-    def coeff_cache_stats(self, reset=False):
-        stats = (self.coeff_hits, self.coeff_misses)
-        if reset:
-            self.coeff_hits = 0
-            self.coeff_misses = 0
-        return stats
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*
@@ -722,13 +701,6 @@ class ShiftFFT():
 
         return {'val': val_img, 'dr': dr_img, 'dm': dm_img,
                 'd2r': d2r_img, 'd2m': d2m_img, 'drdm': drdm_img}
-
-    def _chirpz_2d_apply_axis_val_only(self, X, m, b, axis_xy):
-        """Shortcut: chirp-z forward only, same signature as
-        _chirpz_lastaxis_all_derivs but returns just the value image (used
-        as an internal building block when a specific x-branch only needs
-        the y-forward)."""
-        return self._chirpz_lastaxis(X, m, b, axis_xy, adjoint=False)
 
     def _dS_dm_images(self, c, r, m):
         """Return (dS/dmy, dS/dmx) — full images of shape [ntheta, nz, n],

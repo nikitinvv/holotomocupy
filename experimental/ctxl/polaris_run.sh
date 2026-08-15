@@ -19,7 +19,9 @@ NTHREADS=4
 NDEPTH=8
 export NTOTRANKS=$(( NNODES * NRANKS ))
 
-SCRIPT_DIR=/home/vvnikitin/holotomocupy/experimental/ctxl #"$(pwd)"
+# Directory the job was submitted from (PBS_O_WORKDIR when submitted via qsub;
+# falls back to the script's own directory for local ./polaris_run.sh testing).
+SCRIPT_DIR="${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 echo $SCRIPT_DIR
 rec_dir="$(dirname "${SCRIPT_DIR}")"
 

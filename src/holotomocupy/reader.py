@@ -67,6 +67,49 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
 
     Returns a zero array if neither source is available.
     """
+    kind, val = _read_shrink_mats(path, pfile, ndist, ntheta)
+    if kind is None:
+        return np.zeros((ntheta, ndist, 2), dtype='float32')
+    if kind == 'shapp':
+        return val
+    cum, inc = val
+    if angle_ramp:
+        j_frac = (np.arange(ntheta) / ntheta).astype('float32')                # (ntheta,)
+        shrink_nd = cum[None, :, :] + inc[None, :, :] * j_frac[:, None, None]  # (ntheta, ndist, 2)
+    else:
+        peter_val = cum + 0.5 * inc                                            # (ndist, 2)
+        shrink_nd = np.broadcast_to(peter_val[None, :, :], (ntheta, ndist, 2)).copy()
+    return shrink_nd.astype('float32')
+
+
+def load_shrink_total(path, pfile, ndist, ntheta):
+    """Shrink accumulated by the END of one scan, (2,) = (v, h).
+
+    The value ``load_shrink_from_mats`` would report for the last frame the
+    scan took — last projection of the last plane — which is where the next
+    scan of the same sample starts from. Not the same as ``shrink_nd[-1, -1]``:
+    under Peter's convention (``angle_ramp=False``) that is the mid-scan value
+    of the last plane, half an increment short of the end. Taken from the mats
+    directly so it is exact under either convention.
+
+    Zero if neither shapp.mat nor shrink_list.mat is there.
+    """
+    kind, val = _read_shrink_mats(path, pfile, ndist, ntheta)
+    if kind is None:
+        return np.zeros(2, dtype='float32')
+    if kind == 'shapp':
+        return val[-1, -1].astype('float32')
+    cum, inc = val
+    return (cum[-1] + inc[-1]).astype('float32')
+
+
+def _read_shrink_mats(path, pfile, ndist, ntheta):
+    """Raw shrink sources for one scan, shared by the two loaders above.
+
+    Returns ``('shapp', raw[ntheta, ndist, 2])`` when shapp.mat is present,
+    ``('list', (cum, inc))`` with both ``(ndist, 2)`` when falling back to the
+    per-distance shrink_list.mat, or ``(None, None)`` when neither exists.
+    """
     shapp_path = f'{path}/{pfile}_/shapp.mat'
     if os.path.exists(shapp_path):
         if _mpi_rank == 0:
@@ -81,7 +124,7 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
                 f'got {raw_octave.shape}'
             )
         raw = raw_octave.swapaxes(0, 2)[:ntheta]                # (ntheta, ndist, 2)
-        return raw.astype('float32')
+        return 'shapp', raw.astype('float32')
 
     if _mpi_rank == 0:
         logger.info(f'shrink: shapp.mat not found ({shapp_path}); falling back to per-distance shrink_list.mat')
@@ -92,7 +135,7 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
         if not os.path.exists(mat_path):
             if _mpi_rank == 0:
                 logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
-            return np.zeros((ntheta, ndist, 2), dtype='float32')
+            return None, None
         if _mpi_rank == 0:
             logger.info(f'shrink: reading {mat_path}')
         sl = load_octave_text_mat(mat_path, 'shrink_list')
@@ -100,13 +143,7 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
         inc_v.append(float(sl[0, 1]))
     inc = np.stack([inc_v, inc_h], axis=-1)                                   # (ndist, 2)
     cum = np.concatenate([np.zeros((1, 2)), np.cumsum(inc, axis=0)])[:ndist]  # (ndist, 2)
-    if angle_ramp:
-        j_frac = (np.arange(ntheta) / ntheta).astype('float32')                # (ntheta,)
-        shrink_nd = cum[None, :, :] + inc[None, :, :] * j_frac[:, None, None]  # (ntheta, ndist, 2)
-    else:
-        peter_val = cum + 0.5 * inc                                            # (ndist, 2)
-        shrink_nd = np.broadcast_to(peter_val[None, :, :], (ntheta, ndist, 2)).copy()
-    return shrink_nd.astype('float32')
+    return 'list', (cum, inc)
 
 
 def read_nxtomo_meta(nx_path):
@@ -227,7 +264,8 @@ class Reader:
         obj_file = self.in_file.replace('.h5', '_obj.h5')
         if not os.path.exists(obj_file):
             obj_file = self.in_file
-        print(f"read object from {obj_file}")
+        if self.rank == 0:
+            logger.info(f'read object from {obj_file}')
         with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
             obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
             im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
@@ -373,7 +411,8 @@ class Reader:
                         prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
                     out[k] = cp.array(prb)
                 if self.rank == 0:
-                    print(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}', flush=True)
+                    logger.info(f'Probe read from {prb_file}, shape '
+                                f'{tuple(_f["prb_amp"].shape)}')
         else:
             out[:] = 1
         return out
@@ -677,3 +716,427 @@ class Reader:
             prb = np.repeat(prb, scale, axis=axis)
         out[:] = cp.array(prb).astype('complex64')
         return out
+
+
+class MosaicReader(Reader):
+    """Reader over N tile scans presented to the solver as one wide scan.
+
+    A mosaic acquisition is N separate scans of the same rotation axis, the
+    stage stepped sideways between them, each with its own ``ndist_tile``
+    propagation distances. There is no reason for the solver to know that: from
+    its point of view the mosaic is a single object seen through
+    ``ndist = ntiles * ndist_tile`` "distances", of which every group of
+    ``ndist_tile`` happens to share a z1 and to sit at a different lateral
+    position. ``rec_mpi.Rec`` derives magnifications, propagation distances and
+    voxel size from ``z1`` alone, so tiling ``z1`` is all it takes — no solver
+    change.
+
+    Index order is **tile-major**: entry ``t * ndist_tile + k`` is tile ``t``,
+    distance ``k``.
+
+    The tile's place on the mosaic rides in the position, not in a paste
+    origin: ``pos = (cshifts_final + tile_offsets[t]) / 2**bin``, plus the usual
+    rotation-centre term. ``tile_offsets`` is what step 5's ``estimate_overlap``
+    measured, stored next to ``cshifts_final`` in every tile file.
+
+    Shrinkage is applied exactly as in the single-tile reader: every tile file
+    carries its own ``/exchange/shrink`` (step 3 of ``steps15.py``), and both
+    ``read_shrink`` and ``read_demagnifications`` lay those out on the same
+    flattened tile x distance axis as the data.
+    """
+
+    def __init__(self, tile_files, mosaic_file, comm,
+                 st_obj, end_obj, nzobj, nobj,
+                 st_theta, end_theta, ntheta,
+                 ndist_tile, nz, n, obj_dtype,
+                 paganin, rotation_center_shift, start_theta, bin,
+                 tiles=None):
+        # Scalar acquisition parameters are read from the first tile; they are
+        # identical across tiles (same optics, same energy, same angles) and
+        # _check_tiles below verifies that rather than assuming it.
+        super().__init__(tile_files[0], comm,
+                         st_obj, end_obj, nzobj, nobj,
+                         st_theta, end_theta, ntheta,
+                         ndist_tile, nz, n, obj_dtype,
+                         paganin, rotation_center_shift, start_theta, bin)
+
+        self.tile_files  = list(tile_files)
+        self.ntiles      = len(self.tile_files)
+        self.ndist_tile  = ndist_tile
+        self.mosaic_file = mosaic_file
+        self.tiles       = ([str(t) for t in tiles] if tiles
+                            else [str(i) for i in range(self.ntiles)])
+        if len(self.tiles) != self.ntiles:
+            raise ValueError(f'{len(self.tiles)} tile names for '
+                             f'{self.ntiles} tile files')
+
+        z1_tile = np.asarray(self.z1, dtype='float64').copy()
+        self._check_tiles(z1_tile)
+
+        # Expand to the flattened tile x distance axis.
+        self.z1    = np.tile(z1_tile, self.ntiles)
+        self.ndist = self.ntiles * ndist_tile
+
+        # Filled by read_pos; kept for logging / cross-checks by the driver.
+        self.tile_offsets = None
+
+        if self.rank == 0:
+            logger.info(f'MosaicReader: {self.ntiles} tiles x {ndist_tile} '
+                        f'distances -> ndist={self.ndist} (tile-major: '
+                        f'idx = tile*{ndist_tile} + dist)')
+            for t, path in enumerate(self.tile_files):
+                logger.info(f'  tile {t} {self.tiles[t]:<10s} {path}')
+
+    # ------------------------------------------------------------------ setup
+
+    def _check_tiles(self, z1_tile):
+        """Fail loudly if the tiles do not share the same acquisition geometry.
+
+        A mismatch here means the tiles are not what the caller thinks they
+        are, and every array below would be silently misassembled.
+        """
+        for t, path in enumerate(self.tile_files[1:], start=1):
+            with h5py.File(path, 'r', driver="mpio", comm=self.comm) as fid:
+                z1_t = fid['/exchange/z1'][:self.ndist_tile]
+                dpx  = float(fid['/exchange/detector_pixelsize'][0]) * 2**self.bin
+                fdd  = float(fid['/exchange/focusdetectordistance'][0])
+                nth  = len(fid['/exchange/theta'])
+            if len(z1_t) != self.ndist_tile:
+                raise ValueError(f'{path}: /exchange/z1 has {len(z1_t)} entries, '
+                                 f'need ndist_tile={self.ndist_tile}')
+            if not np.allclose(z1_t, z1_tile, rtol=0, atol=1e-9):
+                raise ValueError(
+                    f'{path}: z1 {np.array2string(np.asarray(z1_t) * 1e3, precision=4)} mm '
+                    f'differs from tile 0 '
+                    f'{np.array2string(z1_tile * 1e3, precision=4)} mm')
+            if not np.isclose(dpx, self.detector_pixelsize, rtol=1e-9, atol=0):
+                raise ValueError(f'{path}: detector_pixelsize {dpx} differs from '
+                                 f'tile 0 {self.detector_pixelsize}')
+            if not np.isclose(fdd, self.focustodetectordistance, rtol=0, atol=1e-9):
+                raise ValueError(f'{path}: focustodetectordistance {fdd} differs '
+                                 f'from tile 0 {self.focustodetectordistance}')
+            if nth < self.ids[-1] + 1:
+                raise ValueError(f'{path}: only {nth} angles, but angle index '
+                                 f'{self.ids[-1]} is requested')
+
+    def _norm_magnifications(self):
+        """M_k / M_0 over the flattened tile x distance axis.
+
+        Computed here rather than taken from an attribute, so it cannot drift
+        from what ``rec_mpi.Rec`` derives from the same (tiled) ``z1``.
+        """
+        mag = self.focustodetectordistance / np.asarray(self.z1, dtype='float64')
+        return (mag / mag[0]).astype('float32')
+
+    def _tile_offset(self, fid, t, path):
+        """Row ``t`` of /exchange/tile_offsets, in object px on the finest grid."""
+        key = '/exchange/tile_offsets'
+        if key not in fid:
+            raise RuntimeError(
+                f'{path}: {key} is missing. It is written by step 5 of '
+                f'steps15.py (the estimate_overlap block); without it the tile '
+                f'placement is unknown and the reconstruction would be '
+                f'meaningless. Re-run step 5 with estimate_overlap=true.')
+        ds    = fid[key]
+        table = np.asarray(ds[...], dtype='float32')
+        if table.shape != (self.ntiles, 2):
+            raise ValueError(f'{path}:{key} has shape {table.shape}, '
+                             f'expected ({self.ntiles}, 2)')
+
+        idx   = t
+        names = [str(x) for x in ds.attrs.get('tiles', [])]
+        if names:
+            if names == self.tiles:
+                stored = ds.attrs.get('index', None)
+                if stored is not None and int(stored) != t and self.rank == 0:
+                    logger.warning(f'{path}:{key} index attr is {int(stored)} but '
+                                   f'this file is tile {t} in the configured '
+                                   f'order; going by the configured order')
+            else:
+                # The table keeps its own order; find our tile inside it rather
+                # than trusting the row number.
+                if self.tiles[t] not in names:
+                    raise ValueError(
+                        f'{path}:{key} was written for tiles {names}, which does '
+                        f'not contain {self.tiles[t]!r} (config order '
+                        f'{self.tiles}). Re-run step 5 with the same tile list.')
+                idx = names.index(self.tiles[t])
+                if self.rank == 0:
+                    logger.warning(f'{path}:{key} tile order {names} differs from '
+                                   f'the configured {self.tiles}; taking row '
+                                   f'{idx} for {self.tiles[t]!r}')
+        return table[idx]
+
+    # ------------------------------------------------------------------- reads
+
+    def read_pos(self, out=None):
+        """Positions for this rank's angles: cshifts_final + tile_offsets.
+
+        Step 5 splits a tile offset into an integer paste origin plus a
+        fractional shift; here there is no paste, so the whole offset goes into
+        the shift. Writing out the mosaic-frame window centre both ways,
+
+            step5: origin_x[t] + (nobj_tile_bin-1)/2 - frac[t,1] - cs*scale - rcs
+                   with origin_x[t] = (nobj_bin - nobj_tile_bin)//2 - ioff[t,1]
+                 = (nobj_bin-1)/2 - off_bin[t,1] - cs*scale - rcs
+            step6: (nobj-1)/2 - pos[...,1],   nobj = step 5's nobj_bin
+
+        gives pos = (cshifts_final + tile_offsets) * scale + rcs term, exactly
+        (both halves of the //2 split are even, so no half-pixel drift).
+        """
+        local_ntheta = self.end_theta - self.st_theta
+        ids  = self.ids[self.st_theta:self.end_theta]
+        nd   = self.ndist_tile
+        pos  = np.empty((local_ntheta, self.ndist, 2), dtype='float32')
+        offs = np.zeros((self.ntiles, 2), dtype='float32')
+
+        for t, path in enumerate(self.tile_files):
+            with h5py.File(path, 'r', driver="mpio", comm=self.comm) as fid:
+                cs       = np.asarray(fid['/exchange/cshifts_final'][ids, :nd],
+                                      dtype='float32')
+                offs[t]  = self._tile_offset(fid, t, path)
+            pos[:, t * nd:(t + 1) * nd] = cs + offs[t][None, None, :]
+
+        scale = np.float32(1.0 / 2**self.bin)
+        pos *= scale
+        pos[..., 1] += np.float32(self.rotation_center_shift * scale
+                                  + 0.5 * (scale - 1))
+        self.tile_offsets = offs
+
+        if self.rank == 0:
+            logger.info(f'read_pos: cshifts_final + tile_offsets, '
+                        f'rotation_center_shift={self.rotation_center_shift:.4f} '
+                        f'@ bin={self.bin}')
+            for t in range(self.ntiles):
+                logger.info(f'  {self.tiles[t]:<10s} tile_offset '
+                            f'v={offs[t, 0]:+9.4f} h={offs[t, 1]:+11.4f} '
+                            f'finest-grid px  ->  v={offs[t, 0] * scale:+8.3f} '
+                            f'h={offs[t, 1] * scale:+10.3f} bin px')
+
+        if out is None:
+            return cp.array(pos)
+        out[:] = cp.array(pos)
+        return out
+
+    def read_data(self, out=None):
+        """Projection data for this rank's angles, all tiles, tile-major."""
+        nz, n = self.nz, self.n
+        local_ntheta = self.end_theta - self.st_theta
+        if out is None:
+            out = np.empty([local_ntheta, self.ndist, nz, n], dtype='float32')
+        # Batch reads to stay under 2^31 bytes (MPI-IO uses int transfer sizes)
+        batch = max(1, (1 << 28) // (nz * n))
+        for t, path in enumerate(self.tile_files):
+            with h5py.File(path, 'r', driver="mpio", comm=self.comm) as fid:
+                for k in range(self.ndist_tile):
+                    ds = fid[f'/exchange/pdata{k}_{self.bin}']
+                    nz0 = ds.shape[1]
+                    st, end = nz0 // 2 - nz // 2, nz0 // 2 + nz // 2
+                    kk = t * self.ndist_tile + k
+                    for i0 in range(0, local_ntheta, batch):
+                        i1 = min(i0 + batch, local_ntheta)
+                        out[i0:i1, kk] = ds[
+                            self.ids[self.st_theta + i0:self.st_theta + i1], st:end]
+                    np.sqrt(out[:, kk], out=out[:, kk])
+        return out
+
+    def read_ref(self, out=None):
+        """Flat fields for all tiles, read on rank 0 and broadcast."""
+        nz, n = self.nz, self.n
+        raw_np = np.empty((self.ndist, nz, n), dtype='float32')
+        if self.rank == 0:
+            for t, path in enumerate(self.tile_files):
+                with h5py.File(path, 'r') as fid:
+                    key = f'/exchange/pref_{self.bin}'
+                    nz0 = fid[key].shape[1]
+                    st, end = nz0 // 2 - nz // 2, nz0 // 2 + nz // 2
+                    raw_np[t * self.ndist_tile:(t + 1) * self.ndist_tile] = \
+                        fid[key][:self.ndist_tile, st:end]
+        self.comm.Bcast(raw_np, root=0)
+        raw = cp.array(raw_np)
+        if out is None:
+            return cp.sqrt(raw)
+        cp.sqrt(raw, out=out)
+        return out
+
+    def read_prb(self, prb_file=None, out=None):
+        """Initialise the ndist = ntiles*ndist_tile probes.
+
+        Each tile is its own scan with its own measured flat field, so the
+        probes stay independent. A probe file holding only ``ndist_tile``
+        entries (one per distance, as a single-tile run writes) is repeated
+        across the tiles as a starting guess.
+        """
+        if out is None:
+            out = cp.empty([self.ndist, self.nz, self.n], dtype='complex64')
+        if not prb_file:
+            out[:] = 1
+            return out
+
+        with h5py.File(prb_file, 'r') as _f:
+            nprb = _f['prb_amp'].shape[0]
+            if nprb == self.ndist:
+                src = list(range(self.ndist))
+            elif nprb == self.ndist_tile:
+                src = [k % self.ndist_tile for k in range(self.ndist)]
+                if self.rank == 0:
+                    logger.info(f'read_prb: {prb_file} holds {nprb} probes '
+                                f'(one per distance); repeating them across the '
+                                f'{self.ntiles} tiles')
+            else:
+                raise ValueError(f'{prb_file}: {nprb} probes, expected '
+                                 f'{self.ndist} (tile x distance) or '
+                                 f'{self.ndist_tile} (per distance)')
+            for kk, k in enumerate(src):
+                prb = (_f['prb_amp'][k]
+                       * np.exp(1j * _f['prb_phase'][k])).astype('complex64')
+                nz0, n0 = prb.shape
+                if nz0 > self.nz or n0 > self.n:
+                    bz, bn = nz0 // self.nz, n0 // self.n
+                    prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
+                out[kk] = cp.array(prb)
+            if self.rank == 0:
+                logger.info(f'read_prb: {self.ndist} probes from {prb_file} '
+                            f'(file shape {tuple(_f["prb_amp"].shape)})')
+        return out
+
+    def read_demagnifications(self, out=None):
+        """(1 + shrink) / norm_magnifications over the tile x distance axis.
+
+        Same definition as ``Reader.read_demagnifications``, with the shrink of
+        each tile read from that tile's own ``/exchange/shrink`` (see
+        ``read_shrink``). ``rec_mpi_shrink.Rec`` does not use this — it derives
+        demag from the fitted ``vars['tp']`` — but ``rec_mpi.Rec`` does, and
+        both must mean the same thing.
+        """
+        shrink_nd = self.read_shrink()
+        nm = cp.array(self._norm_magnifications(), dtype='float32')
+        data = (1.0 + shrink_nd) / nm[None, :, None]
+        if self.rank == 0:
+            logger.info('read_demagnifications: 1/norm_magnifications = '
+                        + np.array2string(1.0 / self._norm_magnifications()[
+                            :self.ndist_tile], precision=6)
+                        + f' (repeated for all {self.ntiles} tiles), scaled by '
+                        f'(1 + shrink) per angle')
+        if out is not None:
+            out[:] = data
+            return out
+        return data
+
+    def read_shrink(self, out=None):
+        """[local_ntheta, ndist, 2] raw shrink for this rank's angles, tile-major.
+
+        Each tile is its own scan and was fitted its own shrinkage, so the
+        values come from that tile's ``/exchange/shrink`` — shape
+        (ntheta_file, ndist_tile, 2), written by step 3 of ``steps15.py`` from
+        the tile's ``shapp.mat``/``shrink_list.mat`` — and land at
+        ``t * ndist_tile + k``, matching how ``read_data`` lays out the frames.
+
+        As in ``Reader.read_shrink``: a tile with no ``/exchange/shrink``
+        contributes zeros (that tile then runs unshrunk), and a legacy 2-D
+        (theta, dist) dataset is broadcast to both (y, x) axes.
+        """
+        local_ntheta = self.end_theta - self.st_theta
+        ids = self.ids[self.st_theta:self.end_theta]
+        nd  = self.ndist_tile
+        shrink = np.zeros((local_ntheta, self.ndist, 2), dtype='float32')
+
+        for t, path in enumerate(self.tile_files):
+            with h5py.File(path, 'r', driver="mpio", comm=self.comm) as fid:
+                if '/exchange/shrink' not in fid:
+                    if self.rank == 0:
+                        logger.warning(
+                            f'read_shrink: /exchange/shrink absent in {path} '
+                            f'(tile {self.tiles[t]}), using shrink=0 for it')
+                    continue
+                raw = fid['/exchange/shrink']
+                if raw.ndim == 3:
+                    blk = np.asarray(raw[ids, :nd, :2], dtype='float32')
+                else:
+                    # Legacy 2D dataset with a single scalar shrink per (j, k).
+                    blk = np.asarray(raw[ids, :nd], dtype='float32')[..., None]
+                    blk = np.broadcast_to(blk, (local_ntheta, nd, 2))
+                shrink[:, t * nd:(t + 1) * nd] = blk
+                if self.rank == 0:
+                    logger.info(f'read_shrink: {self.tiles[t]:<10s} '
+                                f'/exchange/shrink {raw.shape} -> ndist '
+                                f'[{t * nd}:{(t + 1) * nd}), '
+                                f'|shrink| max={np.abs(blk).max():.4e}')
+
+        data = cp.asarray(shrink)
+        if out is not None:
+            out[:] = data
+            return out
+        return data
+
+    def read_obj(self, out=None):
+        """Read the step-5 mosaic Paganin volume for this rank's z-slice.
+
+        Same body as ``Reader.read_obj``, except that the file is the mosaic's
+        ``*_obj.h5`` (not a tile's) and the imaginary part is accepted under
+        either spelling: ``steps15.py`` writes ``obj_init_imag{p}_{b}`` while
+        ``Reader`` only ever looked for ``obj_init_im{p}_{b}``.
+        """
+        obj_file = self.mosaic_file.replace('.h5', '_obj.h5')
+        if not os.path.exists(obj_file):
+            raise FileNotFoundError(
+                f'{obj_file} not found — this is what step 5 writes the mosaic '
+                f'Paganin/FBP volume to. Run step 5 first, or point the config '
+                f'at the right path/pfile.')
+        with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
+            re_key = f'/exchange/obj_init_re{self.paganin}_{self.bin}'
+            if re_key not in fid:
+                have = sorted(k for k in fid.get('/exchange', {})
+                              if k.startswith('obj_init_re'))
+                raise KeyError(f'{obj_file}: {re_key} not found; it has {have}')
+            obj_ds_re = fid[re_key]
+            obj_ds_im = None
+            for im_key in (f'/exchange/obj_init_imag{self.paganin}_{self.bin}',
+                           f'/exchange/obj_init_im{self.paganin}_{self.bin}'):
+                if im_key in fid:
+                    obj_ds_im = fid[im_key]
+                    break
+            if self.rank == 0:
+                logger.info(f'read_obj: {obj_file} {re_key} '
+                            f'{obj_ds_re.shape} + '
+                            f'{im_key if obj_ds_im is not None else "no imag part"}')
+
+            nzobj0, nobj0 = obj_ds_re.shape[:2]
+            stz  = nzobj0 // 2 - self.nzobj // 2
+            stx  = nobj0  // 2 - self.nobj  // 2
+            endx = nobj0  // 2 + self.nobj  // 2
+            local_nz = self.end_obj - self.st_obj
+            if out is None:
+                out = np.empty([local_nz, self.nobj, self.nobj],
+                               dtype=self.obj_dtype)
+            batch = max(1, (1 << 28) // (self.nobj * self.nobj
+                                         * obj_ds_re.dtype.itemsize))
+            for i0 in range(0, local_nz, batch):
+                i1 = min(i0 + batch, local_nz)
+                sl = (slice(stz + self.st_obj + i0, stz + self.st_obj + i1),
+                      slice(stx, endx), slice(stx, endx))
+                if out.dtype == np.complex64:
+                    out[i0:i1].real[:] = obj_ds_re[sl]
+                    out[i0:i1].imag[:] = obj_ds_im[sl] if obj_ds_im is not None else 0
+                else:
+                    out[i0:i1] = obj_ds_re[sl]
+        return out
+
+    @staticmethod
+    def mosaic_obj_shape(mosaic_file, paganin, bin):
+        """(nzobj, nobj) of the step-5 mosaic volume, for auto-sizing.
+
+        Plain (non-MPI) open — call on rank 0 and broadcast.
+        """
+        obj_file = mosaic_file.replace('.h5', '_obj.h5')
+        with h5py.File(obj_file, 'r') as fid:
+            key = f'/exchange/obj_init_re{paganin}_{bin}'
+            if key not in fid:
+                have = sorted(k for k in fid.get('/exchange', {})
+                              if k.startswith('obj_init_re'))
+                raise KeyError(f'{obj_file}: {key} not found; it has {have}')
+            shape = fid[key].shape
+        if shape[1] != shape[2]:
+            raise ValueError(f'{obj_file}: {key} is {shape}, expected the two '
+                             f'transverse axes to match')
+        return int(shape[0]), int(shape[1])

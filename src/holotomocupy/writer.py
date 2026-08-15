@@ -26,7 +26,7 @@ class Writer:
     def __init__(self, path_out, comm,
                  st_obj, end_obj, nzobj, nobj,
                  st_theta, end_theta, ntheta,
-                 ndist, nz, n, obj_dtype):
+                 ndist, nz, n, obj_dtype, ndist_tile=None):
         self.path_out  = path_out
         self.comm      = comm
         self.rank      = comm.Get_rank()
@@ -42,6 +42,10 @@ class Writer:
         self.nz        = nz
         self.n         = n
         self.obj_dtype = obj_dtype
+        # Panels per row in the pos-error plot. On a mosaic scan ndist is
+        # ntiles*ndist_tile in tile-major order, so ndist_tile columns puts one
+        # tile per row. None = square-ish grid.
+        self.ndist_tile = ndist_tile
 
         self.h5_dir   = os.path.join(path_out, 'checkpoints')
         self.tiff_dir = os.path.join(path_out, 'checkpoints_tiff')
@@ -179,18 +183,29 @@ class Writer:
         logger.warning(f"iter={i}: pos abs error [px]  {parts}")
 
         import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(2, self.ndist, figsize=(5 * self.ndist, 6))
-        if self.ndist == 1:
-            axes = axes[:, np.newaxis]
+        # One panel per distance, y and x overlaid, wrapped into a grid — a
+        # single row of 2*ndist panels is unreadable once ndist is 20.
+        ncols = self.ndist_tile or int(np.ceil(np.sqrt(self.ndist)))
+        ncols = max(1, min(ncols, self.ndist))
+        nrows = int(np.ceil(self.ndist / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 2.6 * nrows),
+                                 squeeze=False, sharex=True)
         theta_idx = np.arange(self.ntheta)
         for j in range(self.ndist):
+            ax = axes[j // ncols, j % ncols]
             for d, label in enumerate(['y', 'x']):
-                ax = axes[d, j]
-                ax.plot(theta_idx, all_delta[:, j, d])
-                ax.set_title(f"dist {j}, {label}")
-                ax.set_xlabel("theta index")
-                ax.set_ylabel("error [px]")
-                ax.grid(True)
+                ax.plot(theta_idx, all_delta[:, j, d], lw=0.8, label=label)
+            ax.set_title(f"dist {j}", fontsize=9)
+            ax.grid(True)
+            ax.tick_params(labelsize=8)
+            if j == 0:
+                ax.legend(fontsize=8, loc='upper right')
+            if j // ncols == nrows - 1:
+                ax.set_xlabel("theta index", fontsize=8)
+            if j % ncols == 0:
+                ax.set_ylabel("error [px]", fontsize=8)
+        for j in range(self.ndist, nrows * ncols):      # unused cells in a ragged grid
+            axes[j // ncols, j % ncols].axis('off')
         fig.tight_layout()
         pos_err_dir = os.path.join(self.path_out, "pos_errors")
         os.makedirs(pos_err_dir, exist_ok=True)
@@ -219,13 +234,20 @@ class Writer:
             shrink_gt.get() if isinstance(shrink_gt, cp.ndarray) else np.asarray(shrink_gt))
 
         import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(2, self.ndist, figsize=(5 * self.ndist, 6))
-        if self.ndist == 1:
-            axes = axes[:, np.newaxis]
+        # Distances are wrapped into a grid of ndist_tile columns (one tile per
+        # column block on a mosaic scan); a single row of ndist panels is
+        # 100 inches wide once ndist is 20. Each distance keeps its own pair of
+        # rows: y on top, x below.
+        ncols  = self.ndist_tile or self.ndist
+        ncols  = max(1, min(ncols, self.ndist))
+        nblock = int(np.ceil(self.ndist / ncols))
+        fig, axes = plt.subplots(2 * nblock, ncols,
+                                 figsize=(5 * ncols, 3 * 2 * nblock),
+                                 squeeze=False)
         theta_idx = np.arange(curr.shape[0])
         for j in range(self.ndist):
             for d, label in enumerate(['y', 'x']):
-                ax = axes[d, j]
+                ax = axes[2 * (j // ncols) + d, j % ncols]
                 ax.plot(theta_idx, init[:, j, d], label='init',    linestyle='--', color='C1')
                 ax.plot(theta_idx, curr[:, j, d], label='current',                 color='C0')
                 if gt is not None:
@@ -236,6 +258,9 @@ class Writer:
                 ax.set_ylabel("shrink")
                 ax.grid(True)
                 ax.legend(fontsize=8)
+        for j in range(self.ndist, nblock * ncols):     # unused cells in a ragged grid
+            for d in range(2):
+                axes[2 * (j // ncols) + d, j % ncols].axis('off')
         fig.tight_layout()
         shrink_dir = os.path.join(self.path_out, "shrink")
         os.makedirs(shrink_dir, exist_ok=True)

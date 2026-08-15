@@ -6,6 +6,19 @@ def get_list(c, key, cast=str, sep=","):
     s = c.get(key, fallback="")
     return [cast(x.strip()) for x in s.split(sep) if x.strip()]
 
+
+def pfile_tile(pfile, tile, scan_suffix=""):
+    """Per-tile scan prefix, e.g. YY037A_HT_F2_100nm_center_0001.
+
+    Same rule as ``_pfile_tile`` in the mosaic ``steps15.py`` (which is what
+    named the files in the first place); keep the two in step.
+    """
+    if not tile:
+        return pfile
+    if scan_suffix:
+        return f"{pfile}_{tile}_{scan_suffix}"
+    return f"{pfile}_{tile}"
+
 def parse_args(config_file):
     parser = configparser.ConfigParser(inline_comment_prefixes=("#",))
     with open(config_file, "r", encoding="utf-8") as f:
@@ -27,10 +40,36 @@ def parse_args(config_file):
             args.in_file = f"{args.path}/{args.pfile}.h5"
         else:
             args.in_file = os.path.join(_path, cfg.get("in_file"))
+        # --- mosaic mode -------------------------------------------------
+        # Empty `tiles` → single-tile, everything below is a no-op and the
+        # config behaves exactly as before. With tiles listed (left to right on
+        # the mosaic, the same order steps15.py used), the data lives in one h5
+        # per tile and the initial object in the shared `{pfile}_mosaic_obj.h5`.
+        # `ndist` in the config stays PER TILE; the driver expands it.
+        args.tiles       = get_list(cfg, "tiles", str)
+        args.scan_suffix = cfg.get("scan_suffix", fallback="").strip()
+        if args.tiles:
+            if not args.pfile:
+                raise ValueError("tiles= requires pfile=")
+            args.tile_files = [
+                f"{args.path}/{pfile_tile(args.pfile, t, args.scan_suffix)}.h5"
+                for t in args.tiles
+            ]
+            args.mosaic_file = f"{args.path}/{args.pfile}_mosaic.h5"
+            # Only ever used to locate the `*_obj.h5` next to it; the mosaic
+            # file itself is never written by step 5.
+            args.in_file = args.mosaic_file
+        else:
+            args.tile_files  = None
+            args.mosaic_file = None
         args.ntheta = cfg.getint("ntheta")
         args.start_theta = cfg.getint("start_theta")
         args.nz = cfg.getint("nz")
         args.n = cfg.getint("n")
+        # 0 = let the driver size the object from the initial-guess volume on
+        # disk. Only the mosaic step6 does that so far (step 5 picks the mosaic
+        # grid from the measured tile spread, which is not obvious from a
+        # config); everywhere else these stay explicit.
         args.nzobj = cfg.getint("nzobj")
         args.nobj = cfg.getint("nobj")
         args.ndist = cfg.getint("ndist")
@@ -186,135 +225,6 @@ def read_nx_geometry(nx_path):
     )
 
 
-# Back-compat alias for existing callers in this module.
-_read_nx_geometry = read_nx_geometry
-
-
-def parse_args_nx(config_file):
-    """Variant of parse_args() that reads geometry from ESRF NXtomo (.nx) files.
-
-    Instead of pulling detector size, energy, angles, and propagation distances from
-    a pre-converted /exchange/* HDF5 archive, this function reads them directly
-    from one NXtomo file per propagation distance (the `nxtomomill_edf2nx`
-    output produced at ID16A).
-
-    Required config keys (geometry side):
-      path        : directory containing the NX files (prefix for relative paths)
-      path_out    : output directory
-      nx_files    : comma-separated list of NX paths, one per distance, in order
-                    — OR —
-      nx_template : path with one `{}` placeholder for the distance id
-      nx_ids      : comma-separated list of integers substituted into the template
-
-    All other keys (nzobj, nobj, obj_dtype, paganin, mask, lam_prbfit,
-    lam_laplacian, rho, niter, nchunk, checkpoint_step, error_step, start_iter,
-    rotation_center_shift, bin, log_level, method, start_method, shift_type,
-    pos_checkpoint, prb_file, init_vol, init_vol_scale, start_theta) are read
-    from the config the same way as parse_args(). `ntheta` defaults to the
-    number of projection frames found in the NX file; `n` and `nz` default to
-    the detector frame width and height from NX.
-
-    Geometry fields filled from NX (override any same-named config keys):
-      ntheta, nz, n, ndist, energy, sample_pixelsize, z1 (ndist,),
-      theta (ntheta,), ids (ntheta,)
-    """
-    import numpy as np
-
-    parser = configparser.ConfigParser(inline_comment_prefixes=("#",), interpolation=None)
-    with open(config_file, "r", encoding="utf-8") as f:
-        parser.read_string("[DEFAULT]\n" + f.read())
-    cfg = parser["DEFAULT"]
-
-    try:
-        args = SimpleNamespace()
-        _path = cfg.get("path").rstrip('/')
-        args.path = _path
-        args.path_out = cfg.get("path_out").rstrip('/')
-
-        # Resolve the NX file list ------------------------------------------------
-        nx_files_raw = cfg.get("nx_files", fallback="")
-        if nx_files_raw.strip():
-            nx_files = [x.strip() for x in nx_files_raw.split(",") if x.strip()]
-        else:
-            template = cfg.get("nx_template")
-            ids      = [x.strip() for x in cfg.get("nx_ids").split(",") if x.strip()]
-            nx_files = [template.format(i) for i in ids]
-        nx_files = [p if os.path.isabs(p) else os.path.join(_path, p) for p in nx_files]
-        for p in nx_files:
-            if not os.path.exists(p):
-                raise FileNotFoundError(f"NX file not found: {p}")
-        args.nx_files = nx_files
-        args.in_file  = nx_files[0]   # for code paths that still expect a single in_file
-
-        # Pull geometry from each NX file ----------------------------------------
-        metas = [_read_nx_geometry(p) for p in nx_files]
-        m0 = metas[0]
-
-        # ndist + per-distance z1/magnifications:
-        #   - single NX file with multiple distances in positioners/0  → use those
-        #   - one NX file per distance                                  → assemble
-        if len(metas) == 1 and m0["z1"].size > 1:
-            args.z1 = m0["z1"]
-            args.magnifications = m0["magnifications"]
-        else:
-            args.z1 = np.array([m["z1"][0] for m in metas], dtype="float64")
-            args.magnifications = np.array(
-                [m["magnifications"][0] for m in metas], dtype="float64")
-        args.ndist = int(args.z1.size)
-
-        ntheta_full = int(len(m0["data_ids"]))
-        args.ntheta = cfg.getint("ntheta", fallback=ntheta_full)
-        args.start_theta = cfg.getint("start_theta", fallback=0)
-        step = ntheta_full / args.ntheta
-        ids  = np.arange(args.start_theta, ntheta_full, step)[:args.ntheta].astype("int")
-        args.ids = ids
-
-        args.nz = cfg.getint("nz", fallback=m0["ny"])
-        args.n  = cfg.getint("n",  fallback=m0["nx"])
-
-        args.energy             = float(m0["energy"])
-        args.sample_pixelsize   = float(m0["sample_pixelsize"])
-        args.detector_pixelsize = float(m0["detector_pixelsize"])
-        args.focustodetectordistance = float(m0["focustodetectordistance"])
-
-        # theta in radians, same sign convention as Reader.__init__
-        rot_deg = m0["rotation_angle_deg"][ids]
-        args.theta = (-rot_deg / 180.0 * np.pi).astype("float64")
-
-        # Reconstruction hyperparameters (same contract as parse_args) -----------
-        args.pfile     = cfg.get("pfile", fallback=None)
-        args.nzobj     = cfg.getint("nzobj", fallback=args.nz)
-        args.nobj      = cfg.getint("nobj",  fallback=args.n)
-        args.obj_dtype = cfg.get("obj_dtype")
-        args.paganin   = cfg.getint("paganin")
-        args.mask      = cfg.getfloat("mask")
-        args.lam_prbfit    = cfg.getfloat("lam_prbfit")
-        args.lam_laplacian = cfg.getfloat("lam_laplacian", fallback=0.0)
-        args.rho       = get_list(cfg, "rho", float)
-        args.niter     = cfg.getint("niter")
-        args.nchunk    = cfg.getint("nchunk")
-        args.checkpoint_step = cfg.getint("checkpoint_step")
-        args.error_step      = cfg.getint("error_step")
-        args.start_iter      = cfg.getint("start_iter")
-        args.rotation_center_shift = cfg.getfloat("rotation_center_shift")
-        args.bin       = cfg.getint("bin")
-        args.log_level = cfg.get("log_level", fallback="WARNING")
-        args.method        = cfg.getint("method",        fallback=0)
-        args.start_method  = cfg.getint("start_method",  fallback=1)
-        args.shift_type    = cfg.get("shift_type",       fallback="cubic").strip().lower()
-        _pos_chk            = cfg.get("pos_checkpoint", fallback=None)
-        args.pos_checkpoint = os.path.join(_path, _pos_chk) if _pos_chk else None
-        _prb                = cfg.get("prb_file", fallback=None)
-        args.prb_file       = os.path.join(args.path_out, _prb) if _prb else None
-        _init_vol           = cfg.get("init_vol", fallback=None)
-        args.init_vol       = _init_vol.strip() if _init_vol and _init_vol.strip() else None
-        args.init_vol_scale = cfg.getfloat("init_vol_scale", fallback=1.0)
-    except configparser.NoOptionError as e:
-        raise ValueError(f"Missing required field in {config_file}: {e}") from e
-
-    return args
-
-
 def parse_args_step0(config_file):
     parser = configparser.ConfigParser(inline_comment_prefixes=("#",), interpolation=None)
     with open(config_file, "r", encoding="utf-8") as f:
@@ -393,10 +303,55 @@ def parse_args_steps15(config_file):
         # (constant per distance = cum[k] + inc[k]/2). True = linear ramp
         # over angles from cum[k] at angle 0 to cum[k] + inc[k] at angle ntheta.
         args.shrink_angle_ramp = cfg.getboolean("shrink_angle_ramp", fallback=False)
-        _n            = cfg.getint("n",    fallback=0)
-        _nobj         = cfg.getint("nobj", fallback=0)
-        args.n        = _n    if _n    > 0 else None
-        args.nobj     = _nobj if _nobj > 0 else None
+        # Mosaic-tile fields. Empty tiles → single-tile mode (backward compatible).
+        args.tiles           = get_list(cfg, "tiles", str)
+        args.scan_suffix     = cfg.get("scan_suffix", fallback="").strip()
+        # The order the tiles were ACQUIRED in, which is not the left-to-right
+        # `tiles` order. The sample keeps shrinking for the whole session, so a
+        # tile's shrink starts where the previously acquired tile's ended; this
+        # is what says which tile that was. Must be a permutation of `tiles`.
+        # Empty → no accumulation, each tile's shapp.mat taken as it stands.
+        # steps15 only: step 6 reads the accumulated result from
+        # /exchange/shrink and refines it, so it needs no order of its own.
+        args.tile_order      = get_list(cfg, "tile_order", str)
+        args.overlap_width   = cfg.getint("overlap_width",   fallback=200)
+        args.overlap_nangles = cfg.getint("overlap_nangles", fallback=10)
+        args.overlap_check   = cfg.getboolean("overlap_check", fallback=False)
+        # Nominal spacing between adjacent tiles, in object px on the finest
+        # grid, decreasing with tile index (tiles are listed left to right).
+        # This is only the starting guess — estimate_overlap measures the rest.
+        args.tile_step = cfg.getfloat("tile_step", fallback=0.0)
+        # Measure the tile placement in step 5, by correlating neighbouring
+        # tiles once their distances have been assembled into one projection.
+        # Uses overlap_nangles angles, starting from the tile_step guess.
+        args.estimate_overlap = cfg.getboolean("estimate_overlap", fallback=False)
+        # Reconstruct step 5 from a subset of the angles, for fast tests. 0 (or
+        # >= ntheta) uses all of them; otherwise this many, spread evenly over
+        # the full angular range, so the FBP still covers 0..180/360 -- just
+        # more sparsely. Steps 1-4 always run over every angle.
+        args.ntheta_rec = cfg.getint("ntheta_rec", fallback=0)
+        # Object grids, both in object px on the finest grid, 0 → auto:
+        #   nobj_tile   the tile-local grid   (auto from n and the magnifications)
+        #   nobj/nzobj  the mosaic grid the tiles are composited onto in step 5
+        #               (auto from the spread of the tile positions)
+        # The mosaic pair carries the same two names step 6 uses for the same
+        # two numbers — nzobj the height, i.e. the z extent of the volume, nobj
+        # the width — except that here they are on the finest grid and step 6
+        # takes them divided by 2**bin.
+        #
+        # In single-tile mode there is no mosaic grid, so a bare `nobj` is the
+        # tile grid and is accepted as a spelling of nobj_tile: that is what
+        # every single-tile config_steps15.conf in experimental/ still says.
+        _n         = cfg.getint("n",         fallback=0)
+        _nobj_tile = cfg.getint("nobj_tile", fallback=0)
+        _nobj      = cfg.getint("nobj",      fallback=0)
+        _nzobj     = cfg.getint("nzobj",     fallback=0)
+        if not args.tiles:
+            _nobj_tile = _nobj_tile or _nobj
+        args.n         = _n         if _n         > 0 else None
+        args.nobj_tile = _nobj_tile if _nobj_tile > 0 else None
+        args.nobj      = _nobj      if _nobj      > 0 else None
+        args.nzobj     = _nzobj     if _nzobj     > 0 else None
         args.log_level = cfg.get("log_level", fallback="INFO")
         # Optional NXtomo file to source geometry (energy, z1, focustodetectordistance,
         # detector_pixelsize) from, instead of the per-distance HDF5 scan files.

@@ -92,8 +92,8 @@ logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_th
 logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
-# Initial guess for the tanh-parameterized shrink variable vars['tp']:
-# constant per (dist, axis) = global-mean of stored /exchange/shrink.
+# Initial guess for the linear-parameterized shrink variable vars['tp']:
+# closed-form 2-parameter linear LS fit to stored /exchange/shrink per (dist, axis).
 # Solver refines it. No persistent shrink buffer is kept — reader.read_shrink
 # is called locally inside init_tp_from_shrink and freed after summing.
 cl.init_tp_from_shrink(reader)

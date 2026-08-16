@@ -1,6 +1,8 @@
 import glob
 import math
 import os
+import re
+import time
 import h5py
 import numpy as np
 import cupy as cp
@@ -82,25 +84,48 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta, angle_ramp=False):
     return shrink_nd.astype('float32')
 
 
-def load_shrink_total(path, pfile, ndist, ntheta):
-    """Shrink accumulated by the END of one scan, (2,) = (v, h).
+def load_shrink_profile(path, pfile, ndist, ntheta):
+    """How one scan's shrink is spread over its distances (planes).
 
-    The value ``load_shrink_from_mats`` would report for the last frame the
-    scan took — last projection of the last plane — which is where the next
-    scan of the same sample starts from. Not the same as ``shrink_nd[-1, -1]``:
-    under Peter's convention (``angle_ramp=False``) that is the mid-scan value
-    of the last plane, half an increment short of the end. Taken from the mats
-    directly so it is exact under either convention.
+    Returns ``(start, total)``, both relative to the scan's own first frame and
+    both ``(v, h)`` on the last axis:
 
-    Zero if neither shapp.mat nor shrink_list.mat is there.
+        start : (ndist, 2) — shrink already accumulated when each plane began,
+                so ``start[0]`` is zero.
+        total : (2,)       — shrink at the END of the last plane, i.e. where a
+                             later scan of the same sample starts from.
+
+    Together they say how fast the sample was shrinking during each plane,
+    which is what lets several scans be put on one timeline (see the shrink
+    baseline block of the mosaic ``steps15.py``).
+
+    ``total`` is not ``load_shrink_from_mats(...)[-1, -1]``: under Peter's
+    convention (``angle_ramp=False``) that is the mid-scan value of the last
+    plane, half an increment short of the end. Both are taken from the mats
+    directly so they are exact under either convention.
+
+    Zeros if neither shapp.mat nor shrink_list.mat is there.
     """
     kind, val = _read_shrink_mats(path, pfile, ndist, ntheta)
     if kind is None:
-        return np.zeros(2, dtype='float32')
+        return np.zeros((ndist, 2), dtype='float32'), np.zeros(2, dtype='float32')
+
     if kind == 'shapp':
-        return val[-1, -1].astype('float32')
+        raw = val                                          # (ntheta, ndist, 2)
+        if ntheta > 1 and np.abs(raw[-1] - raw[0]).max() > 0:
+            # Per-projection values: a plane starts at its first projection.
+            return raw[0].astype('float32'), raw[-1, -1].astype('float32')
+        # One constant per plane, which under Peter's convention is the
+        # mid-scan value cum[k] + inc[k]/2. Unwrap it back to the plane starts:
+        # cum[0] = 0 and cum[k+1] = 2*c[k] - cum[k].
+        c     = raw[0]                                     # (ndist, 2)
+        start = np.zeros_like(c)
+        for k in range(ndist - 1):
+            start[k + 1] = 2 * c[k] - start[k]
+        return start.astype('float32'), (2 * c[-1] - start[-1]).astype('float32')
+
     cum, inc = val
-    return (cum[-1] + inc[-1]).astype('float32')
+    return cum.astype('float32'), (cum[-1] + inc[-1]).astype('float32')
 
 
 def _read_shrink_mats(path, pfile, ndist, ntheta):
@@ -144,6 +169,107 @@ def _read_shrink_mats(path, pfile, ndist, ntheta):
     inc = np.stack([inc_v, inc_h], axis=-1)                                   # (ndist, 2)
     cum = np.concatenate([np.zeros((1, 2)), np.cumsum(inc, axis=0)])[:ndist]  # (ndist, 2)
     return 'list', (cum, inc)
+
+
+def read_info(info_path):
+    """Parse an ID16A ``.info`` file (``key= value`` lines) into a dict.
+
+    Values are kept as strings; callers cast as needed. Blank lines and
+    section markers (``[SECTION]``) are ignored.
+    """
+    d = {}
+    with open(info_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('['):
+                continue
+            m = re.match(r'([A-Za-z_][\w]*)\s*=\s*(.+)$', line)
+            if m:
+                d[m.group(1)] = m.group(2).strip()
+    return d
+
+
+def load_scan_infos(path, pfile):
+    """The parsed ``.info`` of every distance of one scan, in distance order.
+
+    One ``{path}/{pfile}_{k+1}_/`` directory per distance, each holding a single
+    ``.info``. Raises rather than returning short: a missing distance means the
+    geometry read from these files would silently not be the scan's.
+    """
+    dist_dirs = sorted(glob.glob(f'{path}/{pfile}_[0-9]_/'))
+    if not dist_dirs:
+        raise FileNotFoundError(f'No distance dirs found for {pfile}: '
+                                f'pattern {path}/{pfile}_[0-9]_/')
+    infos = []
+    for d in dist_dirs:
+        info_files = sorted(glob.glob(f'{d}/*.info'))
+        if not info_files:
+            raise FileNotFoundError(f'No .info file in {d}')
+        infos.append(read_info(info_files[0]))
+    return infos
+
+
+def scan_times(infos, where=''):
+    """When each distance was acquired, in epoch seconds, from ``Date=``.
+
+    ``infos`` as returned by ``load_scan_infos``. The ID16A format is
+    ``Date= Sat Apr 18 07:47:10 2026``. Returns ``None``, with a warning naming
+    ``where``, if any of them is missing or in another format — the caller then
+    has no acquisition order and must be told rather than left guessing one.
+
+    The order matters because the sample keeps shrinking for the whole session
+    while each scan's shrink starts from zero, and the tiles of a mosaic are not
+    necessarily acquired in mosaic order — nor even one at a time (YY037A's
+    ``left`` and ``right`` alternate, one distance each).
+    """
+    times = []
+    for inf in infos:
+        try:
+            times.append(time.mktime(
+                time.strptime(inf['Date'], '%a %b %d %H:%M:%S %Y')))
+        except (KeyError, ValueError) as e:
+            if _mpi_rank == 0:
+                logger.warning(f'{where}: cannot read the acquisition time from '
+                               f'Date={inf.get("Date")!r} ({e}); the scans '
+                               f'cannot be put in order')
+            return None
+    return times
+
+
+def shrink_sequence(scans):
+    """Chain every distance's shrink along the order the distances were taken.
+
+    ``scans[key] = (times, start, total)`` describes one scan: ``times``
+    ``(ndist,)`` when each distance began (``scan_times``), and ``start``
+    ``(ndist, 2)`` / ``total`` ``(2,)`` its own shrink profile relative to its
+    first frame (``load_shrink_profile``).
+
+    The shrink is measured per distance, and nothing deforms between one
+    acquisition and the next, so the sample's whole history is just the
+    distances laid end to end in the order they ran: each contributes its own
+    increment and starts from everything contributed before it. The unit is one
+    (scan, distance) acquisition, NOT one scan — interleaved tiles hand the
+    accumulation back and forth distance by distance, e.g.
+
+        left d1, right d1, left d2, right d2, ...
+
+    where ``left``'s d2 has to start after ``right``'s d1, which ``left``'s own
+    profile knows nothing about.
+
+    Returns ``(begins, total)``: ``begins[key]`` is ``(ndist, 2)``, the shrink
+    already accumulated when each of that scan's distances began, counted from
+    the very first frame of the session; ``total`` is where it all ends up.
+    Subtract the scan's own ``start`` to get what to add to its shrink array.
+    """
+    inc = {k: np.diff(np.concatenate([st, tot[None]]), axis=0)
+           for k, (_t, st, tot) in scans.items()}
+    begins = {k: np.zeros_like(inc[k]) for k in scans}
+    run = np.zeros(2, dtype='float64')
+    for _t, key, i in sorted((t, key, i) for key, (ts, _s, _o) in scans.items()
+                             for i, t in enumerate(ts)):
+        begins[key][i] = run
+        run = run + inc[key][i]
+    return begins, run
 
 
 def read_nxtomo_meta(nx_path):

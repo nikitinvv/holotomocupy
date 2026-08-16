@@ -306,11 +306,13 @@ def parse_args_steps15(config_file):
         # Mosaic-tile fields. Empty tiles → single-tile mode (backward compatible).
         args.tiles           = get_list(cfg, "tiles", str)
         args.scan_suffix     = cfg.get("scan_suffix", fallback="").strip()
-        # The order the tiles were ACQUIRED in, which is not the left-to-right
-        # `tiles` order. The sample keeps shrinking for the whole session, so a
-        # tile's shrink starts where the previously acquired tile's ended; this
-        # is what says which tile that was. Must be a permutation of `tiles`.
-        # Empty → no accumulation, each tile's shapp.mat taken as it stands.
+        # Manual OVERRIDE for the order the tiles were ACQUIRED in, which is not
+        # the left-to-right `tiles` order. The sample keeps shrinking for the
+        # whole session, so a tile's shrink starts where the previously acquired
+        # tile's ended. Normally steps15 reads that order from the `Date=` line
+        # of each distance's .info; set this only when the dates are missing or
+        # wrong. Must then be a permutation of `tiles`, and being a flat list it
+        # cannot express tiles acquired interleaved — leave it empty for those.
         # steps15 only: step 6 reads the accumulated result from
         # /exchange/shrink and refines it, so it needs no order of its own.
         args.tile_order      = get_list(cfg, "tile_order", str)

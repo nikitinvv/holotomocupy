@@ -49,7 +49,7 @@ import fabio
 logging.getLogger('fabio').setLevel(logging.ERROR)
 import glob
 import os
-import re
+import time
 import numpy as np
 import cupy as cp
 import cupyx.scipy.ndimage as ndimage
@@ -61,7 +61,8 @@ from holotomocupy.mpi_functions import MPIClass, get_local_chunk
 from holotomocupy.logger_config import logger, set_log_level
 from holotomocupy.config import parse_args_steps15
 from holotomocupy.reader import (load_octave_text_mat, load_shrink_from_mats,
-                                 load_shrink_total)
+                                 load_shrink_profile, load_scan_infos,
+                                 scan_times, shrink_sequence)
 from holotomocupy.utils import *
 
 args = parse_args_steps15(sys.argv[1])
@@ -135,24 +136,6 @@ cp.cuda.Device(rank % ngpus).use()
 # ---------------------------------------------------------------------------
 # Helpers — ID16A .info + angles_file.txt
 # ---------------------------------------------------------------------------
-
-def read_info(info_path):
-    """Parse an ID16A ``.info`` file (``key= value`` lines) into a dict.
-
-    Values are kept as strings; callers cast as needed. Blank lines and
-    section markers (``[SECTION]``) are ignored.
-    """
-    d = {}
-    with open(info_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#') or line.startswith('['):
-                continue
-            m = re.match(r'([A-Za-z_][\w]*)\s*=\s*(.+)$', line)
-            if m:
-                d[m.group(1)] = m.group(2).strip()
-    return d
-
 
 def _pfile_tile(tile):
     """Compose the per-tile prefix used to build directory / file names."""
@@ -308,65 +291,166 @@ shrink_all = [None] * len(tiles)
 # ---------------------------------------------------------------------------
 # Shrinkage baseline across tiles
 #
-# The sample shrinks for as long as the beam is on it, not just for as long as
+# The sample shrinks for as long as the session lasts, not just for as long as
 # one tile takes: by the time the last tile is acquired the sample is already
-# smaller than it was for the first. Each tile's shapp.mat measures only its
-# own scan and starts from zero, so on its own it describes a sample that
-# resets between tiles.
+# smaller than it was for the first. Each tile's shapp.mat measures only its own
+# scan and starts from zero, so on its own it describes a sample that resets
+# between tiles. Every tile therefore gets an offset — what the sample had
+# already shrunk before it — which lifts its curve without touching its shape,
+# and the shape stays the direct measurement.
 #
-# `tile_order` is the order the tiles were ACQUIRED in (for YY037A: center,
-# left, right, farleft, farright) as opposed to `tiles`, which is left to right
-# on the mosaic. Every tile is offset by the running total of the end-of-scan
-# shrink of the tiles taken before it. The offset is constant over a tile's own
-# angles and distances, so it shifts that tile's whole shrink curve up without
-# touching its shape.
+# The shrink is measured PER DISTANCE, and nothing deforms between one
+# acquisition and the next, so the whole history is just the distances laid end
+# to end in the order they ran, each contributing its own increment. The unit is
+# one (tile, distance) acquisition, not one tile. That distinction matters here
+# because the tiles were not acquired one at a time — from the `Date=` line of
+# every distance's .info, i.e. from the data rather than a hand-written list:
+#
+#     center    Apr 18  07:47  07:55  08:03  08:11
+#     left      Apr 18  18:34  18:42  18:50  18:58   <- interleaved: one distance
+#     right     Apr 18  18:38  18:46  18:54  19:02      of left, one of right
+#     farright  Apr 19  09:12  09:22  09:32  09:42
+#     farleft   Apr 19  10:07  10:18  10:29  10:37
+#
+# so the real order is center 1-4, then left 1, right 1, left 2, right 2, ... ,
+# then farright 1-4, then farleft 1-4 — which no list of tile names can express.
+# For the interleaved pair the offset is therefore not one constant per tile:
+# left's distance 2 has to start after right's distance 1, which left's own
+# profile knows nothing about. `shrink_base[t]` is consequently (ndist, 2), one
+# offset per distance; for a tile acquired in one go it is the same value ndist
+# times, i.e. the plain chained sum.
 #
 # Applied to `shrink_nd` inside the loop, i.e. before Step 4 resamples with it
 # and before Step 3 writes /exchange/shrink — so step 6 reads the accumulated
 # values too, and its `tp` fit starts from the right offset.
+#
+# The time between acquisitions counts for nothing, by assumption: the sample
+# only deforms while it is being scanned. The assumption is doing real work
+# here — the gaps are long (~10 h between center and left, ~14 h between right
+# and farright) — so how much of the session was idle is logged too.
+#
+# `tile_order` (config) stays as a manual override for when the dates are
+# missing or wrong. Being a flat list it can only chain whole tiles, so it
+# cannot describe an interleaved pair.
 # ---------------------------------------------------------------------------
 
-def _tile_scan_shape(pfile_t):
-    """(ndist, ntheta) for one tile, from its .info files."""
-    dist_dirs = sorted(glob.glob(f'{path}/{pfile_t}_[0-9]_/'))
-    if not dist_dirs:
-        raise FileNotFoundError(f'No distance dirs found for {pfile_t}: '
-                                f'pattern {path}/{pfile_t}_[0-9]_/')
-    info_files = sorted(glob.glob(f'{dist_dirs[0]}/*.info'))
-    if not info_files:
-        raise FileNotFoundError(f'No .info file in {dist_dirs[0]}')
-    return len(dist_dirs), int(read_info(info_files[0])['TOMO_N'])
+shrink_base = [np.zeros((1, 2), dtype='float32') for _ in tiles]
+if len(tiles) > 1:
+    _scans  = {}   # tile index -> (distance times, own start profile, own total)
+    _totals = {}   # tile index -> (2,) shrink accumulated by the end of the scan
+    for _t, _tl in enumerate(tiles):
+        _pf      = _pfile_tile(_tl)
+        _infos   = load_scan_infos(path, _pf)
+        _nd, _nt = len(_infos), int(_infos[0]['TOMO_N'])
+        _ts      = scan_times(_infos, where=_pf)
+        _start, _totals[_t] = load_shrink_profile(path, _pf, _nd, _nt)
+        if _ts is not None:
+            _scans[_t] = (np.asarray(sorted(_ts), dtype='float64'),
+                          _start, _totals[_t])
 
+    def _log_sequence(begins=None):
+        """Print the (tile, distance) sequence the .info dates give.
 
-shrink_base = [np.zeros(2, dtype='float32') for _ in tiles]
-if tile_order:
-    if sorted(tile_order) != sorted(tiles):
-        raise SystemExit(
-            f'tile_order={tile_order} must be a permutation of tiles={tiles} '
-            f'— it is the same tiles in acquisition order, so every tile has '
-            f'to appear exactly once.')
-    _running = np.zeros(2, dtype='float32')
-    for _tl in tile_order:
-        _t = tiles.index(_tl)
-        shrink_base[_t] = _running.copy()
-        _nd, _nt = _tile_scan_shape(_pfile_tile(_tl))
-        _running = _running + load_shrink_total(path, _pfile_tile(_tl), _nd, _nt)
-    if rank == 0:
-        logger.info('=' * 74)
-        logger.info(f'Shrink accumulated over the tiles, acquisition order '
-                    f'{tile_order}:')
+        One line per acquisition, in the order they ran, with the gap from the
+        previous one — interleaving shows up as alternating tile names. Pass
+        ``begins`` (from ``shrink_sequence``) to print the shrink each one
+        started from. A wrong order here quietly biases everything after it, so
+        the sequence is printed in full rather than summarised.
+        """
+        _seq  = sorted((_ts[_k], _u, _k) for _u, (_ts, _s, _o) in _scans.items()
+                       for _k in range(len(_ts)))
+        _prev = None
+        for _tt, _u, _k in _seq:
+            _gap  = '' if _prev is None else f'   +{(_tt - _prev)/60:.0f} min'
+            _prev = _tt
+            _val  = ''
+            if begins is not None:
+                _sv  = begins[_u][_k]
+                _val = f'   starts from v={_sv[0]:+.6f} h={_sv[1]:+.6f}'
+            logger.info(f'  {time.strftime("%a %H:%M", time.localtime(_tt))}  '
+                        f'{tiles[_u]:<10s} dist {_k + 1}{_val}{_gap}')
+
+    if tile_order:
+        # Manual override: chain whole tiles in the order listed.
+        if sorted(tile_order) != sorted(tiles):
+            raise SystemExit(
+                f'tile_order={tile_order} must be a permutation of tiles={tiles} '
+                f'— it is the same tiles in acquisition order, so every tile has '
+                f'to appear exactly once.')
+        _running = np.zeros(2, dtype='float32')
         for _tl in tile_order:
             _t = tiles.index(_tl)
-            logger.info(f'  {_tl:<10s} starts at v={shrink_base[_t][0]:+.6f} '
-                        f'h={shrink_base[_t][1]:+.6f}')
-        logger.info(f'  end of session   v={_running[0]:+.6f} '
-                    f'h={_running[1]:+.6f}')
-        logger.info('=' * 74)
-elif len(tiles) > 1 and rank == 0:
-    logger.warning('tile_order is not set, so each tile\'s shrink starts from '
-                   'zero — i.e. the sample is treated as resetting between '
-                   'tiles. Set tile_order= (acquisition order) to accumulate.')
-
+            shrink_base[_t] = _running.copy()[None]
+            _running = _running + _totals[_t]
+        if rank == 0:
+            logger.warning(f'tile_order={tile_order} overrides the .info dates; '
+                           f'clear it in the config to use them instead.')
+            logger.info('=' * 78)
+            if _scans:
+                logger.info('Acquisition sequence from the .info dates (NOT '
+                            'used — tile_order overrides it):')
+                _log_sequence()
+                logger.info('-' * 78)
+            logger.info('Shrink chained over the tiles, order from the config:')
+            for _tl in tile_order:
+                _t = tiles.index(_tl)
+                logger.info(f'  {_tl:<10s} baseline v={shrink_base[_t][0, 0]:+.6f} '
+                            f'h={shrink_base[_t][0, 1]:+.6f}   own total '
+                            f'v={_totals[_t][0]:+.6f} h={_totals[_t][1]:+.6f}')
+            logger.info(f'  end of session       v={_running[0]:+.6f} '
+                        f'h={_running[1]:+.6f}')
+            logger.info('=' * 78)
+    elif len(_scans) == len(tiles):
+        _begins, _end = shrink_sequence(_scans)
+        for _t in range(len(tiles)):
+            # What to add to this tile's own profile to put it on the session's
+            # clock: where each of its distances really started, minus where its
+            # own profile thinks it did.
+            shrink_base[_t] = (_begins[_t] - _scans[_t][1]).astype('float32')
+        if rank == 0:
+            logger.info('=' * 78)
+            logger.info('Acquisition sequence from the .info dates, with the '
+                        'shrink each distance started from:')
+            _log_sequence(_begins)
+            logger.info('-' * 78)
+            for _t in sorted(range(len(tiles)), key=lambda _u: _scans[_u][0][0]):
+                _off = shrink_base[_t]
+                # A tile taken in one go gets the same offset for every
+                # distance, but only to rounding: the running sum reaches it
+                # from a non-zero base while the tile's own profile starts at
+                # zero, so the two disagree in the last bits.
+                _rng = ('' if np.abs(_off - _off[0]).max()
+                        <= 1e-6 * np.abs(_off).max() else
+                        f' .. v={_off[-1, 0]:+.6f} h={_off[-1, 1]:+.6f}'
+                        f' (grows across the distances: interleaved)')
+                logger.info(f'  {tiles[_t]:<10s} offset v={_off[0, 0]:+.6f} '
+                            f'h={_off[0, 1]:+.6f}{_rng}   own total '
+                            f'v={_totals[_t][0]:+.6f} h={_totals[_t][1]:+.6f}')
+            logger.info(f'  end of session       v={_end[0]:+.6f} '
+                        f'h={_end[1]:+.6f}')
+            # Time between acquisitions contributes nothing, by the
+            # no-deformation-between-scans assumption. Worth stating how much of
+            # the session that was. The .info dates only the START of each
+            # acquisition, so take its duration as the time to the next one
+            # anywhere, capped by its own tile's typical distance-to-distance
+            # spacing (which is the duration when nothing is interleaved).
+            _all  = sorted((_tt, _u) for _u, (_ts, _s, _o) in _scans.items()
+                           for _tt in _ts)
+            _typ  = {_u: float(np.median(np.diff(_ts)))
+                     for _u, (_ts, _s, _o) in _scans.items()}
+            _busy = sum(min(_typ[_u], _nxt - _tt)
+                        for (_tt, _u), (_nxt, _) in zip(_all, _all[1:]))
+            _busy += _typ[_all[-1][1]]
+            _span = _all[-1][0] + _typ[_all[-1][1]] - _all[0][0]
+            logger.info(f'  {(_span - _busy)/3600:.1f} h of the {_span/3600:.1f} h '
+                        f'session had no scan running; assumed no deformation '
+                        f'there, so it adds nothing')
+            logger.info('=' * 78)
+    elif rank == 0:
+        logger.warning(
+            'Neither usable .info dates nor tile_order, so each tile\'s shrink '
+            'starts from zero — i.e. the sample is treated as resetting between '
+            'tiles. Set tile_order= (acquisition order) in the config.')
 
 for tile_idx, tile in enumerate(tiles):
     pfile   = _pfile_tile(tile)
@@ -379,20 +463,8 @@ for tile_idx, tile in enumerate(tiles):
         logger.info('=' * 74)
 
     # ---- Geometry from .info files (one per distance dir) -----------------
-    dist_dirs = sorted(glob.glob(f'{path}/{pfile}_[0-9]_/'))
-    if not dist_dirs:
-        raise FileNotFoundError(
-            f'No distance dirs found for tile {tile!r}: pattern '
-            f'{path}/{pfile}_[0-9]_/'
-        )
-    ndist = len(dist_dirs)
-
-    infos = []
-    for k, d in enumerate(dist_dirs):
-        info_files = sorted(glob.glob(f'{d}/*.info'))
-        if not info_files:
-            raise FileNotFoundError(f'No .info file in {d}')
-        infos.append(read_info(info_files[0]))
+    infos = load_scan_infos(path, pfile)
+    ndist = len(infos)
 
     ntheta = int(infos[0]['TOMO_N'])
     energy = float(infos[0]['Energy'])                              # keV
@@ -434,9 +506,10 @@ for tile_idx, tile in enumerate(tiles):
                        f'ours {np.array2string(voxelsizes * 1e9, precision=3)} nm vs '
                        f'{np.array2string(_esrf * 1e9, precision=3)} nm')
 
-    # Offset by everything the sample had already shrunk before this tile was
-    # acquired (see the tile_order block above); zero for the first acquired
-    # tile, and zero everywhere when tile_order is unset.
+    # Offset by everything the sample had already shrunk before each of this
+    # tile's distances was acquired (see the block above). Broadcasts over the
+    # angles: (ntheta, ndist, 2) + (ndist, 2). Zero for the tile acquired first,
+    # and zero everywhere when the acquisition order is unknown.
     shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta,
                                       angle_ramp=args.shrink_angle_ramp)
     shrink_nd = shrink_nd + shrink_base[tile_idx]
@@ -1153,15 +1226,16 @@ else:
         for _t, _tl in enumerate(tiles):
             _s = shrink_tiles[_t]
             logger.info(f'  {_tl or "(single)":<10s} base '
-                        f'v {shrink_base[_t][0]:+.3e} h {shrink_base[_t][1]:+.3e}'
+                        f'v {shrink_base[_t][0, 0]:+.3e} '
+                        f'h {shrink_base[_t][0, 1]:+.3e}'
                         f'   shrink v '
                         f'{_s[..., 0].min():+.3e}..{_s[..., 0].max():+.3e}  h '
                         f'{_s[..., 1].min():+.3e}..{_s[..., 1].max():+.3e}')
         if spread > 1e-3:
             _why = ('mostly the acquisition baseline, which is expected'
-                    if tile_order else
-                    'and tile_order is unset, so none of it is the acquisition '
-                    'baseline')
+                    if np.abs(np.stack(shrink_base)).max() > 0 else
+                    'and the acquisition baseline is zero everywhere, so none '
+                    'of it is that')
             logger.warning(f'Step 5: the tiles differ in shrink by up to '
                            f'{spread:.3e}, i.e. {spread*nobj_tile:.1f} px over '
                            f'a tile width ({_why}) — the mosaic Paganin uses '

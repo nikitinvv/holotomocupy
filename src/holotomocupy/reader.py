@@ -2,7 +2,6 @@ import glob
 import math
 import os
 import re
-import time
 import h5py
 import numpy as np
 import cupy as cp
@@ -209,69 +208,6 @@ def load_scan_infos(path, pfile):
     return infos
 
 
-def scan_times(infos, where=''):
-    """When each distance was acquired, in epoch seconds, from ``Date=``.
-
-    ``infos`` as returned by ``load_scan_infos``. The ID16A format is
-    ``Date= Sat Apr 18 07:47:10 2026``. Returns ``None``, with a warning naming
-    ``where``, if any of them is missing or in another format — the caller then
-    has no acquisition order and must be told rather than left guessing one.
-
-    The order matters because the sample keeps shrinking for the whole session
-    while each scan's shrink starts from zero, and the tiles of a mosaic are not
-    necessarily acquired in mosaic order — nor even one at a time (YY037A's
-    ``left`` and ``right`` alternate, one distance each).
-    """
-    times = []
-    for inf in infos:
-        try:
-            times.append(time.mktime(
-                time.strptime(inf['Date'], '%a %b %d %H:%M:%S %Y')))
-        except (KeyError, ValueError) as e:
-            if _mpi_rank == 0:
-                logger.warning(f'{where}: cannot read the acquisition time from '
-                               f'Date={inf.get("Date")!r} ({e}); the scans '
-                               f'cannot be put in order')
-            return None
-    return times
-
-
-def shrink_sequence(scans):
-    """Chain every distance's shrink along the order the distances were taken.
-
-    ``scans[key] = (times, start, total)`` describes one scan: ``times``
-    ``(ndist,)`` when each distance began (``scan_times``), and ``start``
-    ``(ndist, 2)`` / ``total`` ``(2,)`` its own shrink profile relative to its
-    first frame (``load_shrink_profile``).
-
-    The shrink is measured per distance, and nothing deforms between one
-    acquisition and the next, so the sample's whole history is just the
-    distances laid end to end in the order they ran: each contributes its own
-    increment and starts from everything contributed before it. The unit is one
-    (scan, distance) acquisition, NOT one scan — interleaved tiles hand the
-    accumulation back and forth distance by distance, e.g.
-
-        left d1, right d1, left d2, right d2, ...
-
-    where ``left``'s d2 has to start after ``right``'s d1, which ``left``'s own
-    profile knows nothing about.
-
-    Returns ``(begins, total)``: ``begins[key]`` is ``(ndist, 2)``, the shrink
-    already accumulated when each of that scan's distances began, counted from
-    the very first frame of the session; ``total`` is where it all ends up.
-    Subtract the scan's own ``start`` to get what to add to its shrink array.
-    """
-    inc = {k: np.diff(np.concatenate([st, tot[None]]), axis=0)
-           for k, (_t, st, tot) in scans.items()}
-    begins = {k: np.zeros_like(inc[k]) for k in scans}
-    run = np.zeros(2, dtype='float64')
-    for _t, key, i in sorted((t, key, i) for key, (ts, _s, _o) in scans.items()
-                             for i, t in enumerate(ts)):
-        begins[key][i] = run
-        run = run + inc[key][i]
-    return begins, run
-
-
 def read_nxtomo_meta(nx_path):
     """Read geometry and scan metadata from an ESRF NXtomo (.nx) file.
 
@@ -377,9 +313,29 @@ class Reader:
             self.z1                      = fid['/exchange/z1'][:ndist]
             self.energy                  = fid['/exchange/energy'][0]
             ntheta0 = len(fid['/exchange/theta'])
-            # FIX: clip to exactly ntheta to avoid float-step off-by-one
+            # Which rows of the file this run uses. EVERY per-angle read goes
+            # through self.ids — theta, data, cshifts_final, shrink — so asking
+            # for ntheta < ntheta0 thins all of them the same way and they stay
+            # aligned. ntheta0/ntheta need not be an integer; the ids are clipped
+            # to exactly ntheta to avoid a float-step off-by-one.
             ids = np.arange(start_theta, ntheta0, ntheta0 / ntheta)
             self.ids   = ids[:ntheta].astype('int')
+            if len(self.ids) != ntheta:
+                # arange stops at ntheta0, so a non-zero start_theta runs out of
+                # rows and would leave every per-angle array short — which shows
+                # up much later as a shape mismatch, if at all.
+                raise ValueError(
+                    f'ntheta={ntheta} angles starting at start_theta='
+                    f'{start_theta} do not fit in the {ntheta0} angles of '
+                    f'{in_file}: only {len(self.ids)} available. Use '
+                    f'start_theta=0, or lower ntheta to '
+                    f'{int((ntheta0 - start_theta) / (ntheta0 / ntheta))}.')
+            if self.rank == 0 and ntheta != ntheta0:
+                logger.warning(
+                    f'using {ntheta} of the {ntheta0} angles in the file, every '
+                    f'{self.ids[1] - self.ids[0] if ntheta > 1 else 1}th '
+                    f'({self.ids[0]}..{self.ids[-1]}) — data, cshifts_final and '
+                    f'shrink are all read on these same indices')
             self.theta = -fid['/exchange/theta'][:, 0][self.ids] / 180 * np.pi
             self.detector_pixelsize *= 2**self.bin
             

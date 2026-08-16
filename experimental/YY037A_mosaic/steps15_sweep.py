@@ -61,8 +61,7 @@ from holotomocupy.mpi_functions import MPIClass, get_local_chunk
 from holotomocupy.logger_config import logger, set_log_level
 from holotomocupy.config import parse_args_steps15
 from holotomocupy.reader import (load_octave_text_mat, load_shrink_from_mats,
-                                 load_shrink_profile, load_scan_infos,
-                                 scan_times, shrink_sequence)
+                                 load_shrink_profile, load_scan_infos)
 from holotomocupy.utils import *
 
 args = parse_args_steps15(sys.argv[1])
@@ -299,158 +298,59 @@ shrink_all = [None] * len(tiles)
 # already shrunk before it — which lifts its curve without touching its shape,
 # and the shape stays the direct measurement.
 #
-# The shrink is measured PER DISTANCE, and nothing deforms between one
-# acquisition and the next, so the whole history is just the distances laid end
-# to end in the order they ran, each contributing its own increment. The unit is
-# one (tile, distance) acquisition, not one tile. That distinction matters here
-# because the tiles were not acquired one at a time — from the `Date=` line of
-# every distance's .info, i.e. from the data rather than a hand-written list:
+# The tiles were acquired one at a time — every distance of a tile before the
+# next tile started — so the offset is one constant per tile: the running sum of
+# the tiles' own totals, taken in ACQUISITION order. That order is not the
+# mosaic order and is not reliably recoverable from the files, so it is a plain
+# config parameter:
 #
-#     center    Apr 18  07:47  07:55  08:03  08:11
-#     left      Apr 18  18:34  18:42  18:50  18:58   <- interleaved: one distance
-#     right     Apr 18  18:38  18:46  18:54  19:02      of left, one of right
-#     farright  Apr 19  09:12  09:22  09:32  09:42
-#     farleft   Apr 19  10:07  10:18  10:29  10:37
-#
-# so the real order is center 1-4, then left 1, right 1, left 2, right 2, ... ,
-# then farright 1-4, then farleft 1-4 — which no list of tile names can express.
-# For the interleaved pair the offset is therefore not one constant per tile:
-# left's distance 2 has to start after right's distance 1, which left's own
-# profile knows nothing about. `shrink_base[t]` is consequently (ndist, 2), one
-# offset per distance; for a tile acquired in one go it is the same value ndist
-# times, i.e. the plain chained sum.
+#     tile_order=center,left,right,farright,farleft        (YY037A)
 #
 # Applied to `shrink_nd` inside the loop, i.e. before Step 4 resamples with it
 # and before Step 3 writes /exchange/shrink — so step 6 reads the accumulated
 # values too, and its `tp` fit starts from the right offset.
 #
-# The time between acquisitions counts for nothing, by assumption: the sample
-# only deforms while it is being scanned. The assumption is doing real work
-# here — the gaps are long (~10 h between center and left, ~14 h between right
-# and farright) — so how much of the session was idle is logged too.
-#
-# `tile_order` (config) stays as a manual override for when the dates are
-# missing or wrong. Being a flat list it can only chain whole tiles, so it
-# cannot describe an interleaved pair.
+# The time between tiles counts for nothing, by assumption: the sample only
+# deforms while it is being scanned, so the (long) idle gaps add nothing.
 # ---------------------------------------------------------------------------
 
-shrink_base = [np.zeros((1, 2), dtype='float32') for _ in tiles]
+shrink_base = [np.zeros(2, dtype='float32') for _ in tiles]
 if len(tiles) > 1:
-    _scans  = {}   # tile index -> (distance times, own start profile, own total)
-    _totals = {}   # tile index -> (2,) shrink accumulated by the end of the scan
-    for _t, _tl in enumerate(tiles):
-        _pf      = _pfile_tile(_tl)
-        _infos   = load_scan_infos(path, _pf)
-        _nd, _nt = len(_infos), int(_infos[0]['TOMO_N'])
-        _ts      = scan_times(_infos, where=_pf)
-        _start, _totals[_t] = load_shrink_profile(path, _pf, _nd, _nt)
-        if _ts is not None:
-            _scans[_t] = (np.asarray(sorted(_ts), dtype='float64'),
-                          _start, _totals[_t])
+    if not tile_order:
+        raise SystemExit(
+            'tile_order= is empty. With more than one tile every tile\'s shrink '
+            'has to be offset by what the sample had already shrunk before it, '
+            'which needs the order the tiles were ACQUIRED in — not the mosaic '
+            f'order tiles={tiles}. For YY037A: '
+            'tile_order=center,left,right,farright,farleft')
+    if sorted(tile_order) != sorted(tiles):
+        raise SystemExit(
+            f'tile_order={tile_order} must be a permutation of tiles={tiles} — '
+            f'it is the same tiles in acquisition order, so every tile has to '
+            f'appear exactly once.')
 
-    def _log_sequence(begins=None):
-        """Print the (tile, distance) sequence the .info dates give.
-
-        One line per acquisition, in the order they ran, with the gap from the
-        previous one — interleaving shows up as alternating tile names. Pass
-        ``begins`` (from ``shrink_sequence``) to print the shrink each one
-        started from. A wrong order here quietly biases everything after it, so
-        the sequence is printed in full rather than summarised.
-        """
-        _seq  = sorted((_ts[_k], _u, _k) for _u, (_ts, _s, _o) in _scans.items()
-                       for _k in range(len(_ts)))
-        _prev = None
-        for _tt, _u, _k in _seq:
-            _gap  = '' if _prev is None else f'   +{(_tt - _prev)/60:.0f} min'
-            _prev = _tt
-            _val  = ''
-            if begins is not None:
-                _sv  = begins[_u][_k]
-                _val = f'   starts from v={_sv[0]:+.6f} h={_sv[1]:+.6f}'
-            logger.info(f'  {time.strftime("%a %H:%M", time.localtime(_tt))}  '
-                        f'{tiles[_u]:<10s} dist {_k + 1}{_val}{_gap}')
-
-    if tile_order:
-        # Manual override: chain whole tiles in the order listed.
-        if sorted(tile_order) != sorted(tiles):
-            raise SystemExit(
-                f'tile_order={tile_order} must be a permutation of tiles={tiles} '
-                f'— it is the same tiles in acquisition order, so every tile has '
-                f'to appear exactly once.')
-        _running = np.zeros(2, dtype='float32')
-        for _tl in tile_order:
-            _t = tiles.index(_tl)
-            shrink_base[_t] = _running.copy()[None]
-            _running = _running + _totals[_t]
-        if rank == 0:
-            logger.warning(f'tile_order={tile_order} overrides the .info dates; '
-                           f'clear it in the config to use them instead.')
-            logger.info('=' * 78)
-            if _scans:
-                logger.info('Acquisition sequence from the .info dates (NOT '
-                            'used — tile_order overrides it):')
-                _log_sequence()
-                logger.info('-' * 78)
-            logger.info('Shrink chained over the tiles, order from the config:')
-            for _tl in tile_order:
-                _t = tiles.index(_tl)
-                logger.info(f'  {_tl:<10s} baseline v={shrink_base[_t][0, 0]:+.6f} '
-                            f'h={shrink_base[_t][0, 1]:+.6f}   own total '
-                            f'v={_totals[_t][0]:+.6f} h={_totals[_t][1]:+.6f}')
-            logger.info(f'  end of session       v={_running[0]:+.6f} '
-                        f'h={_running[1]:+.6f}')
-            logger.info('=' * 78)
-    elif len(_scans) == len(tiles):
-        _begins, _end = shrink_sequence(_scans)
-        for _t in range(len(tiles)):
-            # What to add to this tile's own profile to put it on the session's
-            # clock: where each of its distances really started, minus where its
-            # own profile thinks it did.
-            shrink_base[_t] = (_begins[_t] - _scans[_t][1]).astype('float32')
-        if rank == 0:
-            logger.info('=' * 78)
-            logger.info('Acquisition sequence from the .info dates, with the '
-                        'shrink each distance started from:')
-            _log_sequence(_begins)
-            logger.info('-' * 78)
-            for _t in sorted(range(len(tiles)), key=lambda _u: _scans[_u][0][0]):
-                _off = shrink_base[_t]
-                # A tile taken in one go gets the same offset for every
-                # distance, but only to rounding: the running sum reaches it
-                # from a non-zero base while the tile's own profile starts at
-                # zero, so the two disagree in the last bits.
-                _rng = ('' if np.abs(_off - _off[0]).max()
-                        <= 1e-6 * np.abs(_off).max() else
-                        f' .. v={_off[-1, 0]:+.6f} h={_off[-1, 1]:+.6f}'
-                        f' (grows across the distances: interleaved)')
-                logger.info(f'  {tiles[_t]:<10s} offset v={_off[0, 0]:+.6f} '
-                            f'h={_off[0, 1]:+.6f}{_rng}   own total '
-                            f'v={_totals[_t][0]:+.6f} h={_totals[_t][1]:+.6f}')
-            logger.info(f'  end of session       v={_end[0]:+.6f} '
-                        f'h={_end[1]:+.6f}')
-            # Time between acquisitions contributes nothing, by the
-            # no-deformation-between-scans assumption. Worth stating how much of
-            # the session that was. The .info dates only the START of each
-            # acquisition, so take its duration as the time to the next one
-            # anywhere, capped by its own tile's typical distance-to-distance
-            # spacing (which is the duration when nothing is interleaved).
-            _all  = sorted((_tt, _u) for _u, (_ts, _s, _o) in _scans.items()
-                           for _tt in _ts)
-            _typ  = {_u: float(np.median(np.diff(_ts)))
-                     for _u, (_ts, _s, _o) in _scans.items()}
-            _busy = sum(min(_typ[_u], _nxt - _tt)
-                        for (_tt, _u), (_nxt, _) in zip(_all, _all[1:]))
-            _busy += _typ[_all[-1][1]]
-            _span = _all[-1][0] + _typ[_all[-1][1]] - _all[0][0]
-            logger.info(f'  {(_span - _busy)/3600:.1f} h of the {_span/3600:.1f} h '
-                        f'session had no scan running; assumed no deformation '
-                        f'there, so it adds nothing')
-            logger.info('=' * 78)
-    elif rank == 0:
-        logger.warning(
-            'Neither usable .info dates nor tile_order, so each tile\'s shrink '
-            'starts from zero — i.e. the sample is treated as resetting between '
-            'tiles. Set tile_order= (acquisition order) in the config.')
+    _running = np.zeros(2, dtype='float32')
+    _report  = []
+    for _tl in tile_order:
+        _t     = tiles.index(_tl)
+        _pf    = _pfile_tile(_tl)
+        _infos = load_scan_infos(path, _pf)
+        _, _total = load_shrink_profile(path, _pf, len(_infos),
+                                        int(_infos[0]['TOMO_N']))
+        shrink_base[_t] = _running.copy()
+        _running        = _running + _total
+        _report.append((_tl, shrink_base[_t], _total))
+    if rank == 0:
+        logger.info('=' * 78)
+        logger.info(f'Shrink chained over the tiles in acquisition order '
+                    f'{",".join(tile_order)}:')
+        for _tl, _base, _total in _report:
+            logger.info(f'  {_tl:<10s} baseline v={_base[0]:+.6f} '
+                        f'h={_base[1]:+.6f}   own total '
+                        f'v={_total[0]:+.6f} h={_total[1]:+.6f}')
+        logger.info(f'  end of session       v={_running[0]:+.6f} '
+                    f'h={_running[1]:+.6f}')
+        logger.info('=' * 78)
 
 for tile_idx, tile in enumerate(tiles):
     pfile   = _pfile_tile(tile)
@@ -506,10 +406,9 @@ for tile_idx, tile in enumerate(tiles):
                        f'ours {np.array2string(voxelsizes * 1e9, precision=3)} nm vs '
                        f'{np.array2string(_esrf * 1e9, precision=3)} nm')
 
-    # Offset by everything the sample had already shrunk before each of this
-    # tile's distances was acquired (see the block above). Broadcasts over the
-    # angles: (ntheta, ndist, 2) + (ndist, 2). Zero for the tile acquired first,
-    # and zero everywhere when the acquisition order is unknown.
+    # Offset by everything the sample had already shrunk before this tile was
+    # acquired (see the block above). Broadcasts over angles and distances:
+    # (ntheta, ndist, 2) + (2,). Zero for the tile acquired first.
     shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta,
                                       angle_ramp=args.shrink_angle_ramp)
     shrink_nd = shrink_nd + shrink_base[tile_idx]

@@ -95,6 +95,9 @@ MPI="mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth 
 # that the skip check would then trust forever. 11 errors x 5 tiles is 55 runs,
 # so budget accordingly or raise the walltime at the top of this file.
 #
+#   sweep                      # every tile in the config
+#   sweep center               # just one
+#   sweep center left          # a couple
 #   SWEEP_OUT=...  ERR_LO=-5 ERR_HI=5 ERR_STEP=1  SWEEP_BUDGET=<seconds>
 sweep() {
     local out=${SWEEP_OUT:-${DATA_ROOT}/tmp/YY037A_sweep}
@@ -102,12 +105,17 @@ sweep() {
     local budget=${SWEEP_BUDGET:-9000}
     local conf="${CFG}/config_steps15.conf"
 
-    # Tiles from the config itself, so the sweep and the run cannot drift apart.
+    # Tiles named on the call, else every tile in the config — so a whole-mosaic
+    # sweep and the run itself cannot drift apart, and a single tile is one word.
     local tiles
-    mapfile -t tiles < <(sed -n 's/^[[:space:]]*tiles[[:space:]]*=[[:space:]]*//p' "${conf}" \
-                         | head -1 | cut -d'#' -f1 | tr ',' '\n' \
-                         | sed 's/[[:space:]]//g' | grep .)
-    [ ${#tiles[@]} -gt 0 ] || { echo "sweep: no tiles= in ${conf}"; return 1; }
+    if [ $# -gt 0 ]; then
+        tiles=("$@")
+    else
+        mapfile -t tiles < <(sed -n 's/^[[:space:]]*tiles[[:space:]]*=[[:space:]]*//p' "${conf}" \
+                             | head -1 | cut -d'#' -f1 | tr ',' '\n' \
+                             | sed 's/[[:space:]]//g' | grep .)
+    fi
+    [ ${#tiles[@]} -gt 0 ] || { echo "sweep: no tiles given and no tiles= in ${conf}"; return 1; }
 
     local errs; errs=$(seq "${lo}" "${step}" "${hi}")
     local nrun=$(( ${#tiles[@]} * $(wc -w <<< "${errs}") ))
@@ -155,8 +163,9 @@ sweep() {
     echo "sweep: ${i} runs in $(( SECONDS - t0 ))s"
     ls -1 "${out}"/fbp_*.tiff 2>/dev/null | wc -l | xargs echo "tiffs in ${out}:"
 }
-# sweep
+sweep center
+# sweep farright
 
 # --- Step 6: full BH reconstruction of the mosaic, coarse to fine ------------
-${MPI} "${SCRIPT_DIR}/step6.py" "${CFG}/config_step6_bin3.conf"
+# ${MPI} "${SCRIPT_DIR}/step6.py" "${CFG}/config_step6_bin3.conf"
 # ${MPI} "${SCRIPT_DIR}/step6.py" "${CFG}/config_step6_bin2.conf"

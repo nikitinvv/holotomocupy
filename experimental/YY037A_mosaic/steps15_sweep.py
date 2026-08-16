@@ -1125,8 +1125,8 @@ else:
         for _t, _tl in enumerate(tiles):
             _s = shrink_tiles[_t]
             logger.info(f'  {_tl or "(single)":<10s} base '
-                        f'v {shrink_base[_t][0, 0]:+.3e} '
-                        f'h {shrink_base[_t][0, 1]:+.3e}'
+                        f'v {shrink_base[_t][0]:+.3e} '
+                        f'h {shrink_base[_t][1]:+.3e}'
                         f'   shrink v '
                         f'{_s[..., 0].min():+.3e}..{_s[..., 0].max():+.3e}  h '
                         f'{_s[..., 1].min():+.3e}..{_s[..., 1].max():+.3e}')

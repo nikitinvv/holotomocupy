@@ -132,6 +132,12 @@ class Rec(RecShrink):
         so each rank holds only the sum over its own projections."""
         super().gradients(vars, grads)
         grads['pos'][:] = cp.array(self.allreduce(grads['pos'].get()))
+        # Gauge fix: pin the centre tile's distance 0. A shift common to all
+        # (tile, distance) is degenerate with shifting the object, so one entry
+        # has to stay put. Zeroing the gradient is enough — etas['pos'] starts
+        # at zero and is only ever updated as eta <- beta*eta - grad, so this
+        # row's eta stays zero and apply_step never moves it.
+        grads['pos'][self.tiles.index('center') * self.ndist_tile] = 0
 
     @timer
     def gradients_cascade(self, vars, grads):

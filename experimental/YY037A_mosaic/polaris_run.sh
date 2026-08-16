@@ -73,6 +73,90 @@ MPI="mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth 
 # /exchange/tile_offsets and {pfile}_mosaic_obj.h5, which step 6 needs.
 # ${MPI} "${SCRIPT_DIR}/steps15.py" "${CFG}/config_steps15.conf"
 
+# --- TEMPORARY: tile placement-error sweep -----------------------------------
+# The Polaris counterpart of run.sh. For each tile, nudge it horizontally by
+# ERR_LO..ERR_HI object px on the finest grid, on top of whatever step 5
+# measured, and keep the middle FBP slice as a tiff. The tile whose series is
+# best centred on 0 is correctly placed; a lopsided one is off by the amount of
+# its minimum. One mpiexec per (tile, error) pair, run one after another inside
+# this job — each needs all the ranks, so they cannot overlap.
+#
+# steps15_sweep.py rather than steps15.py: it pins the placement AFTER writing
+# /exchange/tile_offsets, so a sweep run varies only the deliberate error and
+# what lands on disk stays the real measurement.
+#
+# Wants a single-bin config (start_level_rec == nlevels-1, as config_steps15.conf
+# has it): `offsets` carries across bins, so on a multi-bin run the error would
+# both accumulate and be measured away again by the next bin's estimate_overlap.
+#
+# Restartable: a pair whose tiff already exists is skipped, so re-queueing
+# carries on from where the walltime cut it off. SWEEP_BUDGET stops it launching
+# a run it cannot finish — one killed mid-write would leave a truncated tiff
+# that the skip check would then trust forever. 11 errors x 5 tiles is 55 runs,
+# so budget accordingly or raise the walltime at the top of this file.
+#
+#   SWEEP_OUT=...  ERR_LO=-5 ERR_HI=5 ERR_STEP=1  SWEEP_BUDGET=<seconds>
+sweep() {
+    local out=${SWEEP_OUT:-${DATA_ROOT}/tmp/YY037A_sweep}
+    local lo=${ERR_LO:--5} hi=${ERR_HI:-5} step=${ERR_STEP:-1}
+    local budget=${SWEEP_BUDGET:-9000}
+    local conf="${CFG}/config_steps15.conf"
+
+    # Tiles from the config itself, so the sweep and the run cannot drift apart.
+    local tiles
+    mapfile -t tiles < <(sed -n 's/^[[:space:]]*tiles[[:space:]]*=[[:space:]]*//p' "${conf}" \
+                         | head -1 | cut -d'#' -f1 | tr ',' '\n' \
+                         | sed 's/[[:space:]]//g' | grep .)
+    [ ${#tiles[@]} -gt 0 ] || { echo "sweep: no tiles= in ${conf}"; return 1; }
+
+    local errs; errs=$(seq "${lo}" "${step}" "${hi}")
+    local nrun=$(( ${#tiles[@]} * $(wc -w <<< "${errs}") ))
+    mkdir -p "${out}/logs"
+    echo "sweep: ${#tiles[@]} tiles [${tiles[*]}] x errors [${lo}..${hi} step ${step}]"
+    echo "       = ${nrun} runs -> ${out}, budget ${budget}s"
+
+    local i=0 t0=${SECONDS} per=0 tag s rc
+    for tile in "${tiles[@]}"; do
+        for e in ${errs}; do
+            i=$(( i + 1 ))
+            # same %g formatting steps15_sweep.py uses, so this skip check matches
+            tag="${tile}_$(awk -v e="${e}" 'BEGIN{printf "%g", e + 100}')"
+            if [ -f "${out}/fbp_${tag}.tiff" ]; then
+                echo "[${i}/${nrun}] ${tag}  already done, skipping"
+                continue
+            fi
+            if [ $(( SECONDS - t0 + per )) -gt "${budget}" ]; then
+                echo "sweep: budget reached with ${tag} next — re-queue to carry on"
+                return 0
+            fi
+            echo "[${i}/${nrun}] ${tag}  ($(( SECONDS - t0 ))s elapsed)"
+            s=${SECONDS}
+            # Written out rather than reusing ${MPI}: the three HOLO_ variables
+            # have to reach the ranks, and --env is the only way to be sure of
+            # that regardless of how the launcher forwards its environment.
+            mpiexec -n "${NTOTRANKS}" --ppn "${NRANKS}" --depth="${NDEPTH}" \
+                    --cpu-bind depth --env OMP_NUM_THREADS="${NTHREADS}" \
+                    --env HOLO_TILE_ERR="${e}" \
+                    --env HOLO_TILE_PROC="${tile}" \
+                    --env HOLO_TILE_ERR_DIR="${out}" \
+                    "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python \
+                    "${SCRIPT_DIR}/steps15_sweep.py" "${conf}" \
+                    > "${out}/logs/${tag}.log" 2>&1
+            rc=$?
+            per=$(( SECONDS - s ))
+            if [ ${rc} -ne 0 ]; then
+                echo "    FAILED (exit ${rc}) — see ${out}/logs/${tag}.log"
+                tail -5 "${out}/logs/${tag}.log" | sed 's/^/    /'
+            elif [ ! -f "${out}/fbp_${tag}.tiff" ]; then
+                echo "    ran but wrote no tiff — see ${out}/logs/${tag}.log"
+            fi
+        done
+    done
+    echo "sweep: ${i} runs in $(( SECONDS - t0 ))s"
+    ls -1 "${out}"/fbp_*.tiff 2>/dev/null | wc -l | xargs echo "tiffs in ${out}:"
+}
+# sweep
+
 # --- Step 6: full BH reconstruction of the mosaic, coarse to fine ------------
 ${MPI} "${SCRIPT_DIR}/step6.py" "${CFG}/config_step6_bin3.conf"
 # ${MPI} "${SCRIPT_DIR}/step6.py" "${CFG}/config_step6_bin2.conf"

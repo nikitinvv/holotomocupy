@@ -92,16 +92,16 @@ MPI="mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth 
 # Restartable: a pair whose tiff already exists is skipped, so re-queueing
 # carries on from where the walltime cut it off. SWEEP_BUDGET stops it launching
 # a run it cannot finish — one killed mid-write would leave a truncated tiff
-# that the skip check would then trust forever. 11 errors x 5 tiles is 55 runs,
-# so budget accordingly or raise the walltime at the top of this file.
+# that the skip check would then trust forever. The default -10..10 is 21 runs
+# per tile, so budget accordingly or raise the walltime at the top of this file.
 #
 #   sweep                      # every tile in the config
 #   sweep center               # just one
 #   sweep center left          # a couple
-#   SWEEP_OUT=...  ERR_LO=-5 ERR_HI=5 ERR_STEP=1  SWEEP_BUDGET=<seconds>
+#   SWEEP_OUT=...  ERR_LO=-10 ERR_HI=10 ERR_STEP=1  SWEEP_BUDGET=<seconds>
 sweep() {
     local out=${SWEEP_OUT:-${DATA_ROOT}/tmp/YY037A_sweep}
-    local lo=${ERR_LO:--5} hi=${ERR_HI:-5} step=${ERR_STEP:-1}
+    local lo=${ERR_LO:--10} hi=${ERR_HI:-10} step=${ERR_STEP:-1}
     local budget=${SWEEP_BUDGET:-9000}
     local conf="${CFG}/config_steps15.conf"
 

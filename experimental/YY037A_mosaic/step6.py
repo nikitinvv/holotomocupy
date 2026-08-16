@@ -26,13 +26,22 @@ Shrinkage is on, matching what ``steps15.py`` applies in Steps 4-5: this is
 with a least-squares fit to each tile's stored ``/exchange/shrink``, and the
 solver refines it. ``rho`` therefore needs a 4th entry (the tp step scale).
 
+Set ``pos_per_dist = True`` in the config to swap the position model for
+``rec_mpi_shrink_posdist.Rec``: the measured per-angle shifts from
+``cshifts_final`` are then held FIXED, and the solver refines a single (y, x)
+shift per (tile x distance) — ``ndist*2`` unknowns instead of
+``ntheta*ndist*2``. Checkpoints keep the same ``(ntheta, ndist, 2)`` ``/pos``
+dataset (base + refined offset), so they remain interchangeable with a
+per-projection run.
+
 Checkpoints are written periodically to ``path_out``; if one exists the run
 resumes from the latest saved iteration.
 """
 
 import sys
 from mpi4py import MPI
-from holotomocupy.rec_mpi_shrink import Rec
+from holotomocupy.rec_mpi_shrink import Rec as RecPosTheta
+from holotomocupy.rec_mpi_shrink_posdist import Rec as RecPosDist
 from holotomocupy.config import parse_args
 from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.reader import MosaicReader, find_latest_checkpoint
@@ -136,13 +145,24 @@ if rank == 0:
     logger.info(f"  paganin              : {args.paganin}")
     logger.info(f"  mask                 : {args.mask}")
     logger.info(f"  n MPI ranks          : {comm.Get_size()}")
+    logger.info(f"  position unknowns    : "
+                + (f"{args.ndist} x 2  (one shift per tile x distance, "
+                   f"per-angle shifts held fixed)" if args.pos_per_dist else
+                   f"{args.ntheta} x {args.ndist} x 2  (one shift per projection)"))
     logger.info(f"  pfile                : {args.pfile}")
     logger.info(f"  path_out             : {args.path_out}")
     logger.info("=" * 60)
 
 # --- Initialise the reconstruction class --------------------------------
+# pos_per_dist swaps the position model: instead of one refined shift per
+# (projection, distance), the measured per-angle shifts stay fixed in
+# `cl.pos_base` and a single (y, x) shift per (tile, distance) is refined.
+# Every read below therefore targets `pos_target`, which is `cl.pos_base` in
+# that mode and `cl.vars['pos']` otherwise — both are (local_ntheta, ndist, 2).
+Rec = RecPosDist if args.pos_per_dist else RecPosTheta
 logger.info("Create class")
 cl = Rec(args)
+pos_target = cl.pos_base if args.pos_per_dist else cl.vars['pos']
 logger.info(f"obj-range [{cl.st_obj}:{cl.end_obj}), local size: {cl.end_obj-cl.st_obj} x {cl.nobj} x {cl.nobj}")
 logger.info(f"projt-range [{cl.st_theta}:{cl.end_theta}), local size: {cl.end_theta-cl.st_theta} x {cl.nzobj} x {cl.nobj}")
 
@@ -164,17 +184,17 @@ logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
-    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'],
+    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=pos_target,
                            out_prb=cl.vars['prb'], out_tp=cl.vars['tp'])
 else:
     reader.read_obj(out=cl.vars['obj'])
-    reader.read_pos(out=cl.vars['pos'])
+    reader.read_pos(out=pos_target)
     if args.prb_file:
         logger.info(f"Loading probes from: {args.prb_file}")
     reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 if args.pos_checkpoint:
     logger.info(f"Overriding positions from: {args.pos_checkpoint}")
-    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=pos_target)
 
 # A wrong tile placement is the one failure mode that produces a plausible but
 # meaningless result, so print, before the first iteration: the tile_offsets as
@@ -190,7 +210,7 @@ if rank == 0 and reader.tile_offsets is not None:
         logger.warning(f"    {tl:<10s} v={o[0]:+9.4f} h={o[1]:+11.4f}   "
                        f"-> bin {args.bin}: v={o[0]*scale:+8.3f} "
                        f"h={o[1]*scale:+10.3f}")
-    pos0 = cp.asnumpy(cl.vars['pos'][0])
+    pos0 = cp.asnumpy(pos_target[0])
     logger.warning(f"  tile window centres at angle {args.start_theta} "
                    f"(x = (nobj-1)/2 - pos[...,1], nobj={args.nobj}):")
     for t, tl in enumerate(args.tiles):

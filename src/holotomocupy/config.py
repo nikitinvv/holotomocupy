@@ -94,6 +94,12 @@ def parse_args(config_file):
         args.method = cfg.getint("method", fallback=0)
         args.start_method = cfg.getint("start_method", fallback=1)
         args.shift_type = cfg.get("shift_type", fallback="cubic").strip().lower()
+        # False (default) → rec_mpi_shrink: one refined shift per (projection,
+        # distance). True → rec_mpi_shrink_posdist: the measured per-angle
+        # shifts are held fixed and only ONE (y, x) shift per (tile, distance)
+        # is refined, i.e. ndist*2 unknowns instead of ntheta*ndist*2. On a
+        # mosaic run ndist is already the flattened ntiles*ndist_tile axis.
+        args.pos_per_dist = cfg.getboolean("pos_per_dist", fallback=False)
         _pos_chk            = cfg.get("pos_checkpoint", fallback=None)
         args.pos_checkpoint = os.path.join(_path, _pos_chk) if _pos_chk else None
         _prb                = cfg.get("prb_file", fallback=None)

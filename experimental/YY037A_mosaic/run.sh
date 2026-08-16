@@ -31,8 +31,8 @@ PY=${PY:-/home/beams2/VNIKITIN/miniforge3/envs/holotomocupy/bin/python}
 MPIRUN=/local/vnikitin/hpc_sdk_multi/Linux_x86_64/26.3/comm_libs/13.1/hpcx/hpcx-2.25.1/ompi/bin/mpirun
 OUT=${HOLO_TILE_ERR_DIR:-/data2/vnikitin/tmp}
 
-ERR_LO=${ERR_LO:--5}
-ERR_HI=${ERR_HI:-5}
+ERR_LO=${ERR_LO:--10}
+ERR_HI=${ERR_HI:-10}
 ERR_STEP=${ERR_STEP:-1}
 
 # Tiles: whatever was asked for on the command line, else the config's own list,

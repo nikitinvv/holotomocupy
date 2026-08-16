@@ -47,6 +47,8 @@ and by ``rec_mpi_shrink`` itself. A resumed run therefore loads the total into
 Requires args.rho to have 4 entries, as rec_mpi_shrink does:
 [rho_obj, rho_prb, rho_pos, rho_demag]."""
 
+import os
+
 import numpy as np
 import cupy as cp
 import nvtx
@@ -345,17 +347,62 @@ class Rec(RecShrink):
     # Reporting
     # ------------------------------------------------------------------
     def error_debug(self, vars, i):
-        """Parent error/shrink logging, plus the ndist*2 refined shifts — small
-        enough to print in full, unlike the per-projection variant."""
+        """Parent error/shrink logging, plus the full position report."""
         super().error_debug(vars, i)
         if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
             return
         if self.rank != 0:
             return
-        p = cp.asnumpy(vars['pos'] - self.pos_init)
-        parts = "  ".join(f"d{j}: y={p[j, 0]:+.4f} x={p[j, 1]:+.4f}"
-                          for j in range(self.ndist))
-        logger.warning(f"iter={i}: pos shift [px]  {parts}")
+        self._log_pos_stats(vars['pos'], i)
+
+    def _log_pos_stats(self, pos, i):
+        """Print every refined (tile, distance) offset at each error checkpoint.
+
+        `pos` is the correction sitting on top of the measured per-angle shifts
+        held in pos_base, so it IS the position error of the encoder / tile
+        placement, in detector pixels at the current binning. There are only
+        ndist*2 of them, so unlike the per-projection parent they can be dumped
+        in full: one line per tile, plus a header with the extremes and how far
+        the offsets moved since the previous checkpoint (that step size going to
+        zero is the signal that the position block has converged).
+
+        Also appended to {path_out}/pos.csv — one row per checkpoint, columns
+        y0,x0,y1,x1,... in the same tile-major order as ndist — for plotting the
+        trajectory afterwards. Rank 0 only; pos is global.
+        """
+        p = cp.asnumpy(pos - self.pos_init).astype('float64')      # (ndist, 2)
+        prev = getattr(self, '_pos_last', None)
+        step = p - prev if prev is not None else np.zeros_like(p)
+        self._pos_last = p.copy()
+
+        mag = np.sqrt((p ** 2).sum(1))
+        logger.warning(
+            f"iter={i}: pos error [px]  max|dy|={np.abs(p[:, 0]).max():.3f}  "
+            f"max|dx|={np.abs(p[:, 1]).max():.3f}  max|d|={mag.max():.3f}  "
+            f"mean|d|={mag.mean():.3f}  max step={np.abs(step).max():.4f}")
+
+        # Mosaic runs flatten (tile, distance) tile-major into ndist, so the
+        # rows below are tiles. Single-tile runs fall back to one row.
+        nd_tile = getattr(self, 'ndist_tile', None) or self.ndist
+        tiles = list(getattr(self, 'tiles', None) or [])
+        for t in range(max(self.ndist // nd_tile, 1)):
+            label = tiles[t] if t < len(tiles) else f"tile{t}"
+            row = "   ".join(
+                f"d{k}: {p[t * nd_tile + k, 0]:+.3f},{p[t * nd_tile + k, 1]:+.3f}"
+                for k in range(nd_tile) if t * nd_tile + k < self.ndist)
+            logger.warning(f"    {label:>9}  (y,x)  {row}")
+
+        if not hasattr(self, 'path_out'):
+            return
+        name = f"{self.path_out}/pos.csv"
+        os.makedirs(os.path.dirname(name), exist_ok=True)
+        write_header = not os.path.exists(name)
+        with open(name, 'a') as f:
+            if write_header:
+                cols = ",".join(f"{a}{j}" for j in range(self.ndist)
+                                for a in ('y', 'x'))
+                f.write(f"iter,{cols}\n")
+            f.write(f"{i}," + ",".join(f"{v:.6f}" for v in p.reshape(-1)) + "\n")
 
     def vis_debug(self, vars, i, writer=None):
         """Per-iter checkpoint write. The writer is handed the TOTAL

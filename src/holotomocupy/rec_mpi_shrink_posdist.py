@@ -115,12 +115,12 @@ class Rec(RecShrink):
         """
         with nvtx.annotate(":::BH:calc_alpha"):
             top = -self.linear_redot_batch(etas['obj'], grads['obj'], beta, -1) \
-                  / (self.rho_sq['obj'] + 1e-10)
+                  / (self.rho_sq['obj'] + 1e-14)
             dots = {v: self.linear_redot_batch(etas[v], grads[v], beta, -1)
                     for v in self.GLOBAL_VARS}
             if self.rank == 0:
                 for v, d in dots.items():
-                    top -= d / (self.rho_sq[v] + 1e-10)
+                    top -= d / (self.rho_sq[v] + 1e-14)
             self.linear_batch(etas['proj'], grads['proj'], beta, -1)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)

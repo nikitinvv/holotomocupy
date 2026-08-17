@@ -342,14 +342,14 @@ class Rec:
         with nvtx.annotate(":::BH:calc_alpha"):
             top = 0
             for v in ("obj", "pos"):
-                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / (self.rho_sq[v]+1e-10)
+                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / (self.rho_sq[v]+1e-14)
             # prb and tp are shared across ranks (global); only rank 0 contributes to
             # the sum so allreduce doesn't double-count.
             dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
             dot_tp  = self.linear_redot_batch(etas['tp'],  grads['tp'],  beta, -1)
             if self.rank == 0:
-                top -= dot_prb / (self.rho_sq['prb']+1e-10)
-                top -= dot_tp  / (self.rho_sq['tp']+1e-10)
+                top -= dot_prb / (self.rho_sq['prb']+1e-14)
+                top -= dot_tp  / (self.rho_sq['tp']+1e-14)
             self.linear_batch(etas['proj'], grads['proj'], beta, -1)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)

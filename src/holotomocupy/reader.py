@@ -819,7 +819,9 @@ class MosaicReader(Reader):
     The tile's place on the mosaic rides in the position, not in a paste
     origin: ``pos = (cshifts_final + tile_offsets[t]) / 2**bin``, plus the usual
     rotation-centre term. ``tile_offsets`` is what step 5's ``estimate_overlap``
-    measured, stored next to ``cshifts_final`` in every tile file.
+    measured, stored next to ``cshifts_final`` in every tile file. The optional
+    ``tile_shift`` adds a manual (dy, dx) per named tile, in the same finest-grid
+    px, on top of that — for testing a placement, not for production.
 
     Shrinkage is applied exactly as in the single-tile reader: every tile file
     carries its own ``/exchange/shrink`` (step 3 of ``steps15.py``), and both
@@ -832,7 +834,7 @@ class MosaicReader(Reader):
                  st_theta, end_theta, ntheta,
                  ndist_tile, nz, n, obj_dtype,
                  paganin, rotation_center_shift, start_theta, bin,
-                 tiles=None):
+                 tiles=None, tile_shift=None):
         # Scalar acquisition parameters are read from the first tile; they are
         # identical across tiles (same optics, same energy, same angles) and
         # _check_tiles below verifies that rather than assuming it.
@@ -851,6 +853,18 @@ class MosaicReader(Reader):
         if len(self.tiles) != self.ntiles:
             raise ValueError(f'{len(self.tiles)} tile names for '
                              f'{self.ntiles} tile files')
+
+        # Manual per-tile placement offset, {tile name: (dy, dx)} in object px
+        # on the FINEST grid — the same units as /exchange/tile_offsets, which
+        # it is added to in read_pos, before the 1/2**bin scaling. For
+        # deliberately mis-placing a tile to map out how the objective
+        # responds; empty in every production run.
+        self.tile_shift = np.zeros((self.ntiles, 2), dtype='float32')
+        for name, (dy, dx) in (tile_shift or {}).items():
+            if name not in self.tiles:
+                raise ValueError(f'tile_shift names tile {name!r}, which is not '
+                                 f'in {self.tiles}')
+            self.tile_shift[self.tiles.index(name)] = (dy, dx)
 
         z1_tile = np.asarray(self.z1, dtype='float64').copy()
         self._check_tiles(z1_tile)
@@ -977,7 +991,11 @@ class MosaicReader(Reader):
                 cs       = np.asarray(fid['/exchange/cshifts_final'][ids, :nd],
                                       dtype='float32')
                 offs[t]  = self._tile_offset(fid, t, path)
-            pos[:, t * nd:(t + 1) * nd] = cs + offs[t][None, None, :]
+            # The manual placement offset is in the same finest-grid px as the
+            # measured tile_offsets, and goes on beside it, before the scaling.
+            # Zero unless the config asked for it.
+            pos[:, t * nd:(t + 1) * nd] = (cs + offs[t][None, None, :]
+                                           + self.tile_shift[t][None, None, :])
 
         scale = np.float32(1.0 / 2**self.bin)
         pos *= scale
@@ -994,6 +1012,17 @@ class MosaicReader(Reader):
                             f'v={offs[t, 0]:+9.4f} h={offs[t, 1]:+11.4f} '
                             f'finest-grid px  ->  v={offs[t, 0] * scale:+8.3f} '
                             f'h={offs[t, 1] * scale:+10.3f} bin px')
+            if self.tile_shift.any():
+                logger.warning('read_pos: MANUAL tile_shift applied on top of '
+                               'the measured offsets:')
+                for t in range(self.ntiles):
+                    s = self.tile_shift[t]
+                    if s.any():
+                        logger.warning(f'    {self.tiles[t]:<10s} '
+                                       f'dy={s[0]:+9.4f} dx={s[1]:+11.4f} '
+                                       f'finest-grid px  ->  '
+                                       f'dy={s[0] * scale:+8.3f} '
+                                       f'dx={s[1] * scale:+10.3f} bin px')
 
         if out is None:
             return cp.array(pos)

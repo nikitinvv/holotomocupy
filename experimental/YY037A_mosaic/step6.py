@@ -106,7 +106,7 @@ reader = MosaicReader(
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
     args.ndist_tile, args.nz, args.n, args.obj_dtype,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
-    tiles=args.tiles,
+    tiles=args.tiles, tile_shift=args.tile_shift,
 )
 writer = Writer(
     args.path_out, comm,
@@ -184,6 +184,11 @@ logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
+    if args.tile_shift and rank == 0:
+        logger.warning(f"tile_shift={args.tile_shift} is NOT re-applied on a "
+                       f"resume — the checkpoint positions already carry "
+                       f"whatever shift the run that wrote them used. Point a "
+                       f"new tile_shift at an empty path_out.")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=pos_target,
                            out_prb=cl.vars['prb'], out_tp=cl.vars['tp'])
 else:
@@ -207,9 +212,12 @@ if rank == 0 and reader.tile_offsets is not None:
                    f"tile files (object px on the finest grid):")
     for t, tl in enumerate(args.tiles):
         o = reader.tile_offsets[t]
+        s = reader.tile_shift[t]
+        extra = (f"   + tile_shift dy={s[0]:+.3f} dx={s[1]:+.3f} bin px"
+                 if s.any() else "")
         logger.warning(f"    {tl:<10s} v={o[0]:+9.4f} h={o[1]:+11.4f}   "
                        f"-> bin {args.bin}: v={o[0]*scale:+8.3f} "
-                       f"h={o[1]*scale:+10.3f}")
+                       f"h={o[1]*scale:+10.3f}{extra}")
     pos0 = cp.asnumpy(pos_target[0])
     logger.warning(f"  tile window centres at angle {args.start_theta} "
                    f"(x = (nobj-1)/2 - pos[...,1], nobj={args.nobj}):")

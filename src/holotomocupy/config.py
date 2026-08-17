@@ -62,6 +62,28 @@ def parse_args(config_file):
         else:
             args.tile_files  = None
             args.mosaic_file = None
+        # Manual extra offset applied to one or more tiles on top of the
+        # measured /exchange/tile_offsets, for testing a tile placement:
+        #
+        #   tile_shift = farright:0:-8, left:1.5:0
+        #
+        # is `name:dy:dx` per tile, comma separated, in OBJECT PIXELS ON THE
+        # FINEST GRID — the same units as /exchange/tile_offsets, which it is
+        # added to before the 1/2**bin scaling, so a value here means the same
+        # displacement whatever bin the run uses. Sign follows tile_offsets:
+        # +dx moves the tile window centre to SMALLER x, since
+        # x = (nobj-1)/2 - pos[...,1].
+        # Tiles not named are unshifted. Empty → nothing happens, and the run
+        # is bit-identical to one without the key.
+        args.tile_shift = {}
+        for _e in get_list(cfg, "tile_shift", str):
+            _p = [x.strip() for x in _e.split(":")]
+            if len(_p) != 3:
+                raise ValueError(f"tile_shift entry {_e!r} is not name:dy:dx")
+            if args.tiles and _p[0] not in args.tiles:
+                raise ValueError(f"tile_shift names tile {_p[0]!r}, which is not "
+                                 f"in tiles={args.tiles}")
+            args.tile_shift[_p[0]] = (float(_p[1]), float(_p[2]))
         args.ntheta = cfg.getint("ntheta")
         args.start_theta = cfg.getint("start_theta")
         args.nz = cfg.getint("nz")

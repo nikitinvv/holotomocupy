@@ -31,15 +31,21 @@
 # WALLTIME: niter=1025 at ntheta=1800, six times over, will not fit in one job.
 # Cut RHOS down and queue several, or lower niter in the sweep configs:
 #
-#   RHOS="0 1e-5 1e-4" qsub polaris_run_posdist_rhosweep.sh
-#   RHOS="1e-3 1e-2 1e-1" qsub polaris_run_posdist_rhosweep.sh
+#   RHOS="0 1e-6 3e-6" qsub polaris_run_posdist_rhosweep.sh
+#   RHOS="1e-5 3e-5 1e-4" qsub polaris_run_posdist_rhosweep.sh
 #
 # The runs checkpoint every 32 iters and step6.py resumes from the latest one,
 # so re-queueing the same RHOS carries on where the walltime cut it off.
 #
-# Configs exist for  0  1e-5  1e-4  1e-3  1e-2  1e-1.
+# Configs exist for  0  1e-6  3e-6  1e-5  3e-5  1e-4.
+#
+# The range stops at 1e-4 on purpose. The first attempt swept up to 1e-1 and
+# rho_tp=1e-3 multiplied the shrink by ~25x in one BH step (2.6e-2 -> 6.5e-1 on
+# the last distance of every tile), pushing the demagnified sampling
+# coordinates off the object grid; the next gradient cascade died with
+# cudaErrorIllegalAddress (job 7486034). Anything larger fails the same way.
 
-RHOS=${RHOS:-"0 1e-5 1e-4 1e-3 1e-2 1e-1"}
+RHOS=${RHOS:-"0 1e-6 3e-6 1e-5 3e-5 1e-4"}
 
 NNODES=$(wc -l < $PBS_NODEFILE)
 NRANKS=4

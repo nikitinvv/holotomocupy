@@ -12,6 +12,14 @@ each writing its own ``.h5`` file:
     4  binned data: multi-distance alignment + amplitude correction
        → pdata{k}_{bin}, pref_{bin}   (tile-local object grid, nobj_tile)
 
+Steps 1, 2 and 4 also carry the post-scan return frames — the rows of
+``angles_file.txt`` past ``TOMO_N``, where the stage drives back to 0, 90, ...
+and re-acquires — through the same conversion, preprocessing and binning, as
+``data_extra{k}`` → ``pdata_extra{k}[_{bin}]`` plus ``pref_end[_{bin}]`` from
+``refHST{TOMO_N}``. They are the whole scan's shrinkage measured directly, and
+``estimate_shrink.py`` registers them against the first pass at the same angle.
+Everything else still sees exactly ``ntheta`` projections.
+
 Step 5 then runs ONCE over all tiles: each tile is stitched across distances
 on its own object grid, the results are composited onto one wide mosaic grid
 (nzobj x nobj), Paganin phase retrieval runs on the wide grid, and FBP
@@ -467,13 +475,30 @@ for tile_idx, tile in enumerate(tiles):
         if rank == 0:
             logger.info(f'[{tile}] Step 1: converting EDF files to HDF5...')
 
-        # Angles from angles_file.txt (first ntheta rows; extras at end are
-        # return-to-start frames we discard). Sign convention matches y350c:
+        # Angles from angles_file.txt. The first ntheta rows are the scan;
+        # the rows after them are the post-scan return frames (the stage drives
+        # back to 0, 90, ... and re-acquires). Sign convention matches y350c:
         # we store the raw values and negate at read time (see reader.py).
-        ang_path = f'{dname0}/angles_file.txt'
+        ang_path   = f'{dname0}/angles_file.txt'
+        theta_all  = -np.loadtxt(ang_path, dtype='float32').ravel()
+        theta_vals = theta_all[:ntheta]
+
+        # The return frames carry the shrinkage accumulated over the whole
+        # scan, which is exactly what estimate_shrink.py measures by
+        # registering them against the first pass at the same angle. They go
+        # into their own data_extra{k} so steps 3-5 keep seeing exactly ntheta
+        # projections and nothing downstream has to know about them.
+        extra_ids = [i for i in range(ntheta, len(theta_all))
+                     if os.path.exists(f'{dname0}/{pfile}_1_{i:04}.edf')]
+        nextra    = len(extra_ids)
         if rank == 0:
-            theta_vals = np.loadtxt(ang_path, dtype='float32')[:ntheta]
-            theta_vals = -theta_vals   # match y350c_new/steps15.py:230
+            if nextra:
+                logger.info(f'[{tile}] step1: {nextra} post-scan return frames, '
+                            f'angles {np.round(theta_all[extra_ids], 3)}')
+            elif len(theta_all) > ntheta:
+                logger.warning(f'[{tile}] step1: angles_file.txt has '
+                               f'{len(theta_all) - ntheta} rows past TOMO_N but '
+                               f'no matching EDF - no return frames stored')
 
         with h5py.File(fpath, 'w', driver='mpio', comm=comm) as fid:
             data_ds   = [fid.create_dataset(f'/exchange/data{k}',             shape=(ntheta, n, n), dtype='uint16') for k in range(ndist)]
@@ -481,6 +506,8 @@ for tile_idx, tile in enumerate(tiles):
             white1_ds = [fid.create_dataset(f'/exchange/data_white_end{k}',   shape=(nref,  n, n),  dtype='uint16') for k in range(ndist)]
             dark_ds   = [fid.create_dataset(f'/exchange/data_dark{k}',        shape=(ndark, n, n),  dtype='uint16') for k in range(ndist)]
             theta_ds  = fid.create_dataset('/exchange/theta',  shape=(ntheta, ndist), dtype='float32')
+            extra_ds  = [fid.create_dataset(f'/exchange/data_extra{k}',       shape=(nextra, n, n), dtype='uint16') for k in range(ndist)] if nextra else None
+            thetae_ds = fid.create_dataset('/exchange/theta_extra', shape=(nextra,), dtype='float32') if nextra else None
             vs_ds     = fid.create_dataset('/exchange/voxelsize',             shape=voxelsizes.shape, dtype='float32')
             z1_ds     = fid.create_dataset('/exchange/z1',                    shape=z1.shape,         dtype='float32')
             dpx_ds    = fid.create_dataset('/exchange/detector_pixelsize',    shape=(1,),             dtype='float32')
@@ -494,17 +521,32 @@ for tile_idx, tile in enumerate(tiles):
                 en_ds[:]    = [energy]
                 fdd_ds[:]   = [focustodetectordistance]
                 theta_ds[:] = theta_vals[:, None]
+                if nextra:
+                    thetae_ds[:] = theta_all[extra_ids]
 
             for k in range(ndist):
                 dname = f'{path}/{pfile}_{k + 1}_'
 
                 if rank == 0:
-                    # refHST is the averaged flat at each angle position
-                    # (0 and ntheta) — one file per position.
+                    # refHST is the averaged flat at each angle position —
+                    # one file per position, named by the projection index it
+                    # follows. The last one is the end-of-scan flat: usually
+                    # refHST{ntheta}, but a scan with return frames may park it
+                    # past them, so take the highest-numbered one if that name
+                    # is not there.
                     white0_ds[k][0] = fabio.open(f'{dname}/refHST0000.edf').data[sty:endy, stx:endx]
-                    white1_ds[k][0] = fabio.open(f'{dname}/refHST{ntheta:04d}.edf').data[sty:endy, stx:endx]
+                    fend = f'{dname}/refHST{ntheta:04d}.edf'
+                    if not os.path.exists(fend):
+                        cands = sorted(glob.glob(f'{dname}/refHST[0-9]*.edf'))
+                        fend = cands[-1] if cands else f'{dname}/refHST0000.edf'
+                        logger.warning(f'[{tile}] step1: no refHST{ntheta:04d}.edf, '
+                                       f'end flat taken from {os.path.basename(fend)}')
+                    white1_ds[k][0] = fabio.open(fend).data[sty:endy, stx:endx]
                     for id in range(ndark):
                         dark_ds[k][id] = fabio.open(f'{dname}/dark{id:04d}.edf').data[sty:endy, stx:endx]
+                    for ii, id in enumerate(extra_ids):
+                        extra_ds[k][ii] = fabio.open(
+                            f'{dname}/{pfile}_{k + 1}_{id:04}.edf').data[sty:endy, stx:endx]
 
                 norms = np.empty(len(local_ids), dtype='float64')
                 for ii, id in enumerate(local_ids):
@@ -605,11 +647,48 @@ for tile_idx, tile in enumerate(tiles):
                 if '/exchange/pref' in fid:
                     del fid['/exchange/pref']
                 fid.create_dataset('/exchange/pref', data=ref)
-                if '/exchange/pref_end' in fid:
-                    del fid['/exchange/pref_end']
                 for k in range(ndist):
                     if f'/exchange/pdata{k}' in fid:
                         del fid[f'/exchange/pdata{k}']
+
+                # End-of-scan flat and the post-scan return frames, put through
+                # exactly the same preprocessing as pref / pdata: pref is each
+                # distance's flat scaled to mean 1, pdata is each frame scaled
+                # to mean_data_ref[k]. So pdata_extra{k}/pref_end and
+                # pdata{k}/pref are on the same footing and can be registered
+                # against each other (estimate_shrink.py).
+                if '/exchange/pref_end' in fid:
+                    del fid['/exchange/pref_end']
+                if all(f'/exchange/data_white_end{k}' in fid for k in range(ndist)):
+                    _end = np.empty([nref, ndist, n, n], dtype='float32')
+                    for k in range(ndist):
+                        _end[:, k] = fid[f'/exchange/data_white_end{k}'][:, :n, :n]
+                    _e = cp.array(np.mean(_end, axis=0)) - dark_gpu
+                    _e[_e < 0] = 1e-3
+                    _e[:] = remove_outliers(_e, radius, threshold)
+                    _e /= _e.mean(axis=(1, 2), keepdims=True)
+                    fid.create_dataset('/exchange/pref_end', data=_e.get())
+                    del _e, _end
+
+                for k in range(ndist):
+                    if f'/exchange/pdata_extra{k}' in fid:
+                        del fid[f'/exchange/pdata_extra{k}']
+                    if f'/exchange/data_extra{k}' not in fid:
+                        continue
+                    _d = cp.array(fid[f'/exchange/data_extra{k}'][:, :n, :n].astype('float32'))
+                    _d -= dark_gpu[k]
+                    _d[_d < 0] = 0
+                    _d[:] = remove_outliers(_d, radius, threshold)
+                    _m = _d.mean(axis=(1, 2), keepdims=True)
+                    _m[_m == 0] = 1
+                    _d *= float(mean_data_ref[k]) / _m
+                    _d[~cp.isfinite(_d)] = 1
+                    fid.create_dataset(f'/exchange/pdata_extra{k}', data=_d.get())
+                    logger.info(f'[{tile}] step2: pdata_extra{k} '
+                                f'{_d.shape[0]} return frames, mean='
+                                f'{float(_d.mean()):.4f}')
+                    del _d
+                cp.get_default_memory_pool().free_all_blocks()
         comm.Barrier()
 
         with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
@@ -784,6 +863,25 @@ for tile_idx, tile in enumerate(tiles):
                     fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
                     ref0 = 0.5 * (ref0[..., ::2]    + ref0[..., 1::2])
                     ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
+
+                # Same binning for the end flat and the return frames, so every
+                # level has a matching pair. No amplitude correction on these:
+                # they are only ever registered, never reconstructed.
+                _extras = {}
+                if '/exchange/pref_end' in fid:
+                    _extras['pref_end'] = fid['/exchange/pref_end'][:, :n, :n].astype('float32')
+                for k in range(ndist):
+                    if f'/exchange/pdata_extra{k}' in fid:
+                        _extras[f'pdata_extra{k}'] = \
+                            fid[f'/exchange/pdata_extra{k}'][:, :n, :n].astype('float32')
+                for _name, _arr in _extras.items():
+                    for bin in range(nlevels):
+                        if f'/exchange/{_name}_{bin}' in fid:
+                            del fid[f'/exchange/{_name}_{bin}']
+                        fid.create_dataset(f'/exchange/{_name}_{bin}', data=_arr)
+                        _arr = 0.5 * (_arr[..., ::2]    + _arr[..., 1::2])
+                        _arr = 0.5 * (_arr[..., ::2, :] + _arr[..., 1::2, :])
+                del _extras
         comm.Barrier()
 
         cl_shift = Shift(n, nobj_tile, n, nobj_tile, 'complex64')

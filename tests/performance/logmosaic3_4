@@ -1,0 +1,135 @@
+2026-08-19 20:29:29 [rank=0] writing log to logmosaic3_4
+2026-08-19 20:29:29 [rank=0] machine: CPU=Intel(R) Xeon(R) Gold 6334 CPU @ 3.60GHz (32 logical cores)
+2026-08-19 20:29:29 [rank=0] machine: RAM total=4029.1 GB
+2026-08-19 20:29:29 [rank=0] machine: GPU=NVIDIA A100-SXM4-40GB  memory=39.5 GB  count_visible=1  (this rank uses dev 0)
+2026-08-19 20:29:29 [rank=0] job: ranks=4 hosts=1 gpus_used=4
+2026-08-19 20:29:29 [rank=0] job: host=tomo5.xray.aps.anl.gov  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-08-19 20:29:29 [rank=0] job: rank=0  host=tomo5.xray.aps.anl.gov  dev=0
+2026-08-19 20:29:29 [rank=0] job: rank=1  host=tomo5.xray.aps.anl.gov  dev=1
+2026-08-19 20:29:29 [rank=0] job: rank=2  host=tomo5.xray.aps.anl.gov  dev=2
+2026-08-19 20:29:29 [rank=0] job: rank=3  host=tomo5.xray.aps.anl.gov  dev=3
+2026-08-19 20:29:29 [rank=0] perf-test: mosaic 2x5 tiles x 4 dist -> ndist=40  bin=3
+2026-08-19 20:29:29 [rank=0] perf-test: n=256 nz=256 nobj=1536 nzobj=768 ntheta=750 ndist=40 nchunk=16 niter=2 nranks=4 obj_dtype=complex64
+2026-08-19 20:29:29 [rank=0] perf-test: voxel=800.001 nm  tile_step=250.0 px  jitter=3.75 det px
+2026-08-19 20:29:29 [rank=0] perf-test: predicted pinned host 18.62 GB/rank, GPU ~3.22 GB/rank
+2026-08-19 20:29:29 [rank=0] Allocate [192, 1536, 1536] complex64: 3.375 GB
+2026-08-19 20:29:31 [rank=0] Allocate [192, 1536, 1536] complex64: 3.375 GB
+2026-08-19 20:29:32 [rank=0] Allocate [40, 188, 2] float32: 0.000 GB
+2026-08-19 20:29:32 [rank=0] Allocate [40, 256, 256] complex64: 0.020 GB
+2026-08-19 20:29:32 [rank=0] Allocate [188, 768, 1536] complex64: 1.652 GB
+2026-08-19 20:29:33 [rank=0] Allocate [40, 188, 256, 256] float32: 1.836 GB
+2026-08-19 20:29:33 [rank=0] Allocate [192, 1536, 1536] complex64: 3.375 GB
+2026-08-19 20:29:34 [rank=0] Allocate [40, 188, 2] float32: 0.000 GB
+2026-08-19 20:29:34 [rank=0] Allocate [188, 768, 1536] complex64: 1.652 GB
+2026-08-19 20:29:35 [rank=0] Allocate [192, 1536, 1536] complex64: 3.375 GB
+2026-08-19 20:29:36 [rank=0] Allocate [40, 188, 2] float32: 0.000 GB
+2026-08-19 20:29:36 [rank=0] Allocate [188, 768, 1536] complex64: 1.652 GB
+2026-08-19 20:29:37 [rank=0] Allocate [40, 256, 256] complex64: 0.020 GB
+2026-08-19 20:29:37 [rank=0] Allocate [40, 256, 256] complex64: 0.020 GB
+2026-08-19 20:29:37 [rank=0] Allocate [750, 192, 1536] complex64: 1.648 GB
+2026-08-19 20:29:37 [rank=0] synthesize positions
+2026-08-19 20:29:37 [rank=0] synthesize data
+2026-08-19 20:29:38 [rank=0] perf-test: tile windows at angle 0 (x = (nobj-1)/2 - pos[1], nobj=1536):
+2026-08-19 20:29:38 [rank=0] perf-test:   0_0    offset v= +1000.00 h=  +4000.00 finest px  -> pos=( +122.59,  +500.90)  y=  260.91  x=   266.60
+2026-08-19 20:29:38 [rank=0] perf-test:   0_1    offset v= +1000.00 h=  +2000.00 finest px  -> pos=( +123.76,  +252.50)  y=  259.74  x=   515.00
+2026-08-19 20:29:38 [rank=0] perf-test:   0_2    offset v= +1000.00 h=     +0.00 finest px  -> pos=( +127.62,    -0.07)  y=  255.88  x=   767.57
+2026-08-19 20:29:38 [rank=0] perf-test:   0_3    offset v= +1000.00 h=  -2000.00 finest px  -> pos=( +121.41,  -246.95)  y=  262.09  x=  1014.45
+2026-08-19 20:29:38 [rank=0] perf-test:   0_4    offset v= +1000.00 h=  -4000.00 finest px  -> pos=( +124.02,  -500.00)  y=  259.48  x=  1267.50
+2026-08-19 20:29:38 [rank=0] perf-test:   1_0    offset v= -1000.00 h=  +4000.00 finest px  -> pos=( -126.44,  +499.84)  y=  509.94  x=   267.66
+2026-08-19 20:29:38 [rank=0] perf-test:   1_1    offset v= -1000.00 h=  +2000.00 finest px  -> pos=( -122.19,  +248.24)  y=  505.69  x=   519.26
+2026-08-19 20:29:38 [rank=0] perf-test:   1_2    offset v= -1000.00 h=     +0.00 finest px  -> pos=( -125.83,    +2.70)  y=  509.33  x=   764.80
+2026-08-19 20:29:38 [rank=0] perf-test:   1_3    offset v= -1000.00 h=  -2000.00 finest px  -> pos=( -127.91,  -248.11)  y=  511.41  x=  1015.61
+2026-08-19 20:29:38 [rank=0] perf-test:   1_4    offset v= -1000.00 h=  -4000.00 finest px  -> pos=( -125.99,  -503.56)  y=  509.49  x=  1271.06
+2026-08-19 20:29:40 [rank=0] fwd_tomo: 0.2401 sec, process memory 19.31 GB, GPU memory 4.16 GB
+2026-08-19 20:29:41 [rank=0] redist: 0.5074 sec, process memory 19.32 GB, GPU memory 4.16 GB
+2026-08-19 20:29:44 [rank=0] allreduce: 0.0438 sec, process memory 19.32 GB, GPU memory 5.01 GB
+2026-08-19 20:29:44 [rank=0] min: 3.3417 sec, process memory 19.32 GB, GPU memory 5.01 GB
+2026-08-19 20:29:44 [rank=0] Initial err=4.17278e-03 
+2026-08-19 20:29:52 [rank=0] gradients_cascade: 8.1921 sec, process memory 19.32 GB, GPU memory 5.85 GB
+2026-08-19 20:29:55 [rank=0] redist: 2.1750 sec, process memory 19.32 GB, GPU memory 5.85 GB
+2026-08-19 20:29:55 [rank=0] adj_tomo: 0.7769 sec, process memory 19.32 GB, GPU memory 6.69 GB
+2026-08-19 20:29:55 [rank=0] gradient: 0.0342 sec, process memory 19.32 GB, GPU memory 6.69 GB
+2026-08-19 20:29:55 [rank=0] allreduce: 0.0108 sec, process memory 19.32 GB, GPU memory 6.69 GB
+2026-08-19 20:29:56 [rank=0] fwd_tomo: 0.2083 sec, process memory 19.32 GB, GPU memory 6.69 GB
+2026-08-19 20:29:56 [rank=0] redist: 0.5165 sec, process memory 19.32 GB, GPU memory 6.69 GB
+2026-08-19 20:29:57 [rank=0] linear_redot_batch: 0.3849 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:29:57 [rank=0] linear_redot_batch: 0.0011 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:29:57 [rank=0] linear_redot_batch: 0.0029 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:29:57 [rank=0] linear_batch: 0.1895 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:06 [rank=0] hessian_cascade: 9.3927 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:06 [rank=0] hessian: 0.0359 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:06 [rank=0] allreduce2: 0.2822 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:07 [rank=0] linear_batch: 0.3891 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:07 [rank=0] linear_batch: 0.0028 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:07 [rank=0] linear_batch: 0.0006 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:07 [rank=0] linear_batch: 0.1914 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:10 [rank=0] allreduce: 0.1706 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:10 [rank=0] min: 3.4805 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:10 [rank=0] iter=0: 26.2717sec (-min=22.7911sec) err=8.49925e-04 
+2026-08-19 20:30:10 [rank=0] iter=0: coeff_cache    hits=1920 misses=2400
+2026-08-19 20:30:10 [rank=0] iter=0: apply_F_cache  hits=960 misses=4320
+2026-08-19 20:30:19 [rank=0] gradients_cascade: 8.2249 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:21 [rank=0] redist: 2.1463 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:22 [rank=0] adj_tomo: 0.7495 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:22 [rank=0] gradient: 0.0314 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:22 [rank=0] allreduce: 0.0083 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:22 [rank=0] fwd_tomo: 0.2083 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:22 [rank=0] redist: 0.5178 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:32 [rank=0] hessian_cascade: 9.6691 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:32 [rank=0] hessian: 0.0341 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:41 [rank=0] hessian_cascade: 9.3415 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:41 [rank=0] hessian: 0.0340 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:42 [rank=0] allreduce2: 0.3778 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:42 [rank=0] linear_redot_batch: 0.3890 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:42 [rank=0] linear_redot_batch: 0.0010 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:42 [rank=0] linear_redot_batch: 0.0029 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:42 [rank=0] linear_batch: 0.1898 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:52 [rank=0] hessian_cascade: 9.4077 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:52 [rank=0] hessian: 0.0340 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:52 [rank=0] allreduce2: 0.2495 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:53 [rank=0] linear_batch: 0.3890 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:53 [rank=0] linear_batch: 0.0027 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:53 [rank=0] linear_batch: 0.0006 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:53 [rank=0] linear_batch: 0.1923 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:56 [rank=0] allreduce: 0.2022 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:56 [rank=0] min: 3.4800 sec, process memory 19.32 GB, GPU memory 8.38 GB
+2026-08-19 20:30:56 [rank=0] iter=1: 45.6873sec (-min=42.2072sec) err=8.49226e-04 
+2026-08-19 20:30:56 [rank=0] iter=1: coeff_cache    hits=5280 misses=4320
+2026-08-19 20:30:56 [rank=0] iter=1: apply_F_cache  hits=960 misses=2880
+2026-08-19 20:30:57 [rank=0] perf-test: peak GPU during BH  8.38 GB in use of 39.49 GB  (cupy pool 7.90 GB, baseline before the run 0.42 GB)
+2026-08-19 20:30:57 [rank=0] perf-test: peak GPU during setup 3.75 GB in use  (cupy pool 3.27 GB)
+2026-08-19 20:30:57 [rank=0] perf-test: peak host RSS  setup 21.00 GB, BH 19.32 GB  (worst rank; predicted pinned 18.62 GB)
+2026-08-19 20:30:57 [rank=0] BH done: 2 iters in 78.672 s (39336.1 ms/iter)  [nranks=4, bin=3, n=256, nobj=1536, nzobj=768, ntheta=750, ndist=40, nchunk=16]
+
+=== logmosaic3_4 ===
+max process memory: 19.320 GB
+max GPU memory    : 8.380 GB
+iters seen        : [-1, 0, 1]
+
+── iter 1: per-function summary ────────────────────────
+function                  calls     total[s]     mean[ms]     pct
+hessian_cascade               3      28.4183     9472.767   61.9%
+gradients_cascade             1       8.2249     8224.900   17.9%
+min                           1       3.4800     3480.000    7.6%
+redist                        2       2.6641     1332.050    5.8%
+linear_batch                  5       0.7744      154.880    1.7%
+adj_tomo                      1       0.7495      749.500    1.6%
+allreduce2                    2       0.6273      313.650    1.4%
+linear_redot_batch            3       0.3929      130.967    0.9%
+allreduce                     2       0.2105      105.250    0.5%
+fwd_tomo                      1       0.2083      208.300    0.5%
+hessian                       3       0.1021       34.033    0.2%
+gradient                      1       0.0314       31.400    0.1%
+TOTAL (timed)                25      45.8837
+TOTAL - min                          42.4037
+
+── iter 1: grouped categories ──────────────────────────
+category          calls     total[s]     pct  members
+gradient              3       9.1827   20.0%  ['adj_tomo', 'fwd_tomo', 'gradients_cascade']
+hessian1              1       9.6691   21.1%  ['hessian_cascade']
+hessian2              1       9.3415   20.4%  ['hessian_cascade']
+hessian3              1       9.4077   20.5%  ['hessian_cascade']
+redist                2       2.6641    5.8%  ['redist']
+linear_batch          8       1.1673    2.5%  ['linear_batch', 'linear_redot_batch']
+allreduce             4       0.8378    1.8%  ['allreduce', 'allreduce2']
+other                 5       3.6135    7.9%  ['gradient', 'hessian', 'min']

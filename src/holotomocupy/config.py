@@ -53,6 +53,21 @@ def parse_args(config_file):
         _init_vol           = cfg.get("init_vol",        fallback=None)
         args.init_vol       = _init_vol.strip() if _init_vol and _init_vol.strip() else None
         args.init_vol_scale = cfg.getfloat("init_vol_scale", fallback=1.0)
+        # Mosaic: one .h5 per tile, {path_out}/{pfile}_{tile}.h5.  Empty tiles=
+        # is single-tile mode and leaves everything below None.  mosaic_file is
+        # a NAME, not a file that has to exist: MosaicReader only uses it to
+        # find the shared initial object {pfile}_obj.h5, exactly as step6 of
+        # the YY037A pipeline uses {pfile}_mosaic.h5.
+        args.tiles = get_list(cfg, "tiles", str)
+        if args.tiles:
+            if not args.pfile:
+                raise ValueError("tiles= requires pfile=")
+            args.tile_files  = [f"{args.path_out}/{args.pfile}_{t}.h5"
+                                for t in args.tiles]
+            args.mosaic_file = args.in_file
+        else:
+            args.tile_files  = None
+            args.mosaic_file = None
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
 
@@ -117,6 +132,10 @@ def parse_args_steps15(config_file):
     with open(config_file, "r", encoding="utf-8") as f:
         parser.read_string("[DEFAULT]\n" + f.read())
     cfg = parser["DEFAULT"]
+    here = os.path.dirname(os.path.abspath(config_file))
+
+    def _rel(p):
+        return p if os.path.isabs(p) else os.path.join(here, p)
 
     try:
         args = SimpleNamespace()
@@ -136,6 +155,84 @@ def parse_args_steps15(config_file):
         args.n        = _n    if _n    > 0 else None
         args.nobj     = _nobj if _nobj > 0 else None
         args.log_level = cfg.get("log_level", fallback="INFO")
+
+        # --- synthetic mosaic (tests/mosaic_brain/steps15.py) ---------------
+        # All optional: the experimental single-tile steps15 scripts do not set
+        # them and keep working off the fallbacks above.
+        args.tiles      = get_list(cfg, "tiles", str)
+        args.nzobj      = cfg.getint("nzobj",     fallback=0)
+        args.bin        = cfg.getint("bin",       fallback=0)
+        args.ntheta_rec = cfg.getint("ntheta_rec", fallback=0)
+        args.nobj_tile  = cfg.getint("nobj_tile", fallback=0)
+        args.mask       = cfg.getfloat("mask",      fallback=0.9)
+        args.ntile_h    = cfg.getint("ntile_h", fallback=1)
+        args.ntile_v    = cfg.getint("ntile_v", fallback=1)
+        args.tile_step_h = cfg.getfloat("tile_step_h", fallback=0.0)
+        args.tile_step_v = cfg.getfloat("tile_step_v", fallback=0.0)
+        _sd             = cfg.get("shift_dir", fallback="")
+        args.shift_dir  = _rel(_sd.strip()) if _sd and _sd.strip() else None
+        args.tile_file  = (os.path.join(args.shift_dir, "tile_offsets.txt")
+                           if args.shift_dir else None)
+    except configparser.NoOptionError as e:
+        raise ValueError(f"Missing required field in {config_file}: {e}") from e
+
+    return args
+
+
+def parse_args_gen(config_file):
+    """Parse config for the synthetic mosaic generator (gen_data.py / make_geometry.py).
+
+    Paths given relative to the config file are resolved against its directory,
+    so the scripts can be launched from anywhere.
+    """
+    parser = configparser.ConfigParser(inline_comment_prefixes=("#",), interpolation=None)
+    with open(config_file, "r", encoding="utf-8") as f:
+        parser.read_string("[DEFAULT]\n" + f.read())
+    cfg = parser["DEFAULT"]
+    here = os.path.dirname(os.path.abspath(config_file))
+
+    def _rel(p):
+        return p if os.path.isabs(p) else os.path.join(here, p)
+
+    try:
+        args = SimpleNamespace()
+        args.path_out = cfg.get("path_out").rstrip('/')
+        args.pfile    = cfg.get("pfile")
+        args.out_file = os.path.join(args.path_out, f"{args.pfile}.h5")
+
+        args.energy                  = cfg.getfloat("energy")
+        args.focustodetectordistance = cfg.getfloat("focustodetectordistance")
+        args.z1                      = get_list(cfg, "z1", float)
+        args.detector_pixelsize      = cfg.getfloat("detector_pixelsize")
+        args.ndet                    = cfg.getint("ndet")
+
+        args.ntheta      = cfg.getint("ntheta")
+        args.theta_range = cfg.getfloat("theta_range", fallback=180.0)
+        args.bin         = cfg.getint("bin")
+
+        args.ntile_h     = cfg.getint("ntile_h")
+        args.ntile_v     = cfg.getint("ntile_v")
+        args.tile_step_h = cfg.getfloat("tile_step_h")
+        args.tile_step_v = cfg.getfloat("tile_step_v")
+        args.shift_dir   = _rel(cfg.get("shift_dir"))
+        args.tile_file   = os.path.join(args.shift_dir, "tile_offsets.txt")
+        args.nobj        = cfg.getint("nobj")
+        args.nzobj       = cfg.getint("nzobj")
+
+        args.shift_rand_px = cfg.getfloat("shift_rand_px", fallback=0.0)
+
+        args.prb_abs   = _rel(cfg.get("prb_abs"))
+        args.prb_phase = _rel(cfg.get("prb_phase"))
+
+        _vol                 = cfg.get("obj_vol", fallback="")
+        args.obj_vol         = _rel(_vol.strip()) if _vol and _vol.strip() else None
+        args.delta_beta      = cfg.getfloat("delta_beta",      fallback=100.0)
+        args.obj_span_px     = cfg.getfloat("obj_span_px",     fallback=0.0)
+
+        args.nchunk         = cfg.getint("nchunk", fallback=4)
+        args.paganin        = cfg.getint("paganin", fallback=40)
+        args.write_obj_init = cfg.getboolean("write_obj_init", fallback=True)
+        args.log_level      = cfg.get("log_level", fallback="INFO")
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e
 

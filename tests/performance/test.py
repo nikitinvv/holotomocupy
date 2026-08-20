@@ -55,6 +55,7 @@ start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                            # no cost computation in hot loop
 log_level       = 'DEBUG'
+shift_type ='cubic'
 
 # Physics (brain-Y350 style; values are illustrative — perf timing doesn't depend on them)
 energy                  = 17.1
@@ -175,6 +176,7 @@ args = SimpleNamespace(
     detector_pixelsize=detector_pixelsize,
     theta=np.linspace(0, np.pi, ntheta, endpoint=False).astype('float32'),
     mask=mask,
+    shift_type=shift_type,
     # MPI
     comm=comm,
 )
@@ -289,3 +291,22 @@ if rank == 0:
     per_iter = elapsed / max(niter, 1)
     logger.warning(f"BH done: {niter} iters in {elapsed:.3f} s  "
                    f"[nranks={size}, n={n}, nobj={nobj}, ntheta={ntheta}, ndist={ndist}, nchunk={nchunk}]")
+
+
+# ── Append the parsed summary to the log ───────────────────────────────────
+# The log is now complete, so parse it and write the breakdown at its end --
+# one file carries both the raw @timer lines and the summary of the iteration
+# that matters (the last one, i.e. after the JIT warmup).
+if rank == 0 and log_path:
+    for _h in logger.handlers:
+        _h.flush()
+    try:
+        import sys as _sys
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        from parse_perf_log import report
+        with open(log_path, 'a') as _fh:
+            _fh.write('\n')
+            report(log_path, max(niter - 1, 0), out=_fh,
+                   show_info=False, show_header=True)
+    except Exception as e:                      # never let this kill a finished run
+        logger.warning(f"could not append the parsed summary: {e}")

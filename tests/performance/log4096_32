@@ -1,0 +1,411 @@
+2026-05-28 22:17:29 [rank=0] writing log to log4096_32
+2026-05-28 22:17:33 [rank=0] machine: CPU=AMD EPYC 7543P 32-Core Processor (64 logical cores)
+2026-05-28 22:17:33 [rank=0] machine: RAM total=503.2 GB
+2026-05-28 22:17:33 [rank=0] machine: RAM modules=unavailable (needs root for dmidecode and /sys/firmware/dmi/tables/DMI not readable)
+2026-05-28 22:17:33 [rank=0] machine: GPU=NVIDIA A100-SXM4-40GB  memory=39.5 GB  count_visible=1  (this rank uses dev 0)
+2026-05-28 22:17:33 [rank=0] job: ranks=256 hosts=64 gpus_used=256
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s13b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s19b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s19b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s1b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s25b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s31b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s31b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s37b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s37b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s7b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3006c0s7b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s13b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s13b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s19b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s25b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s31b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s31b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s37b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s37b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s7b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3007c0s7b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s13b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s13b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s19b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s19b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s1b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3008c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s1b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s25b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s31b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s31b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s37b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s37b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s7b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3012c0s7b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s13b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s13b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s19b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s19b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s1b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s25b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s31b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s31b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s37b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s37b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s7b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3013c0s7b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s13b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s13b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s19b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s19b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s1b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s1b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s25b0n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: host=x3014c0s25b1n0  ranks=4  gpus_used=4  devs=[0, 1, 2, 3]
+2026-05-28 22:17:33 [rank=0] job: rank=0  host=x3006c0s13b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=1  host=x3006c0s13b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=2  host=x3006c0s13b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=3  host=x3006c0s13b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=4  host=x3006c0s19b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=5  host=x3006c0s19b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=6  host=x3006c0s19b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=7  host=x3006c0s19b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=8  host=x3006c0s19b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=9  host=x3006c0s19b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=10  host=x3006c0s19b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=11  host=x3006c0s19b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=12  host=x3006c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=13  host=x3006c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=14  host=x3006c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=15  host=x3006c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=16  host=x3006c0s1b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=17  host=x3006c0s1b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=18  host=x3006c0s1b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=19  host=x3006c0s1b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=20  host=x3006c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=21  host=x3006c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=22  host=x3006c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=23  host=x3006c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=24  host=x3006c0s25b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=25  host=x3006c0s25b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=26  host=x3006c0s25b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=27  host=x3006c0s25b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=28  host=x3006c0s31b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=29  host=x3006c0s31b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=30  host=x3006c0s31b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=31  host=x3006c0s31b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=32  host=x3006c0s31b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=33  host=x3006c0s31b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=34  host=x3006c0s31b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=35  host=x3006c0s31b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=36  host=x3006c0s37b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=37  host=x3006c0s37b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=38  host=x3006c0s37b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=39  host=x3006c0s37b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=40  host=x3006c0s37b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=41  host=x3006c0s37b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=42  host=x3006c0s37b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=43  host=x3006c0s37b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=44  host=x3006c0s7b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=45  host=x3006c0s7b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=46  host=x3006c0s7b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=47  host=x3006c0s7b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=48  host=x3006c0s7b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=49  host=x3006c0s7b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=50  host=x3006c0s7b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=51  host=x3006c0s7b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=52  host=x3007c0s13b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=53  host=x3007c0s13b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=54  host=x3007c0s13b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=55  host=x3007c0s13b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=56  host=x3007c0s13b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=57  host=x3007c0s13b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=58  host=x3007c0s13b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=59  host=x3007c0s13b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=60  host=x3007c0s19b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=61  host=x3007c0s19b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=62  host=x3007c0s19b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=63  host=x3007c0s19b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=64  host=x3007c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=65  host=x3007c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=66  host=x3007c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=67  host=x3007c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=68  host=x3007c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=69  host=x3007c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=70  host=x3007c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=71  host=x3007c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=72  host=x3007c0s25b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=73  host=x3007c0s25b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=74  host=x3007c0s25b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=75  host=x3007c0s25b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=76  host=x3007c0s31b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=77  host=x3007c0s31b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=78  host=x3007c0s31b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=79  host=x3007c0s31b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=80  host=x3007c0s31b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=81  host=x3007c0s31b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=82  host=x3007c0s31b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=83  host=x3007c0s31b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=84  host=x3007c0s37b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=85  host=x3007c0s37b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=86  host=x3007c0s37b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=87  host=x3007c0s37b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=88  host=x3007c0s37b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=89  host=x3007c0s37b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=90  host=x3007c0s37b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=91  host=x3007c0s37b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=92  host=x3007c0s7b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=93  host=x3007c0s7b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=94  host=x3007c0s7b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=95  host=x3007c0s7b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=96  host=x3007c0s7b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=97  host=x3007c0s7b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=98  host=x3007c0s7b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=99  host=x3007c0s7b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=100  host=x3008c0s13b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=101  host=x3008c0s13b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=102  host=x3008c0s13b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=103  host=x3008c0s13b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=104  host=x3008c0s13b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=105  host=x3008c0s13b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=106  host=x3008c0s13b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=107  host=x3008c0s13b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=108  host=x3008c0s19b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=109  host=x3008c0s19b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=110  host=x3008c0s19b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=111  host=x3008c0s19b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=112  host=x3008c0s19b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=113  host=x3008c0s19b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=114  host=x3008c0s19b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=115  host=x3008c0s19b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=116  host=x3008c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=117  host=x3008c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=118  host=x3008c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=119  host=x3008c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=120  host=x3008c0s1b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=121  host=x3008c0s1b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=122  host=x3008c0s1b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=123  host=x3008c0s1b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=124  host=x3008c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=125  host=x3008c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=126  host=x3008c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=127  host=x3008c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=128  host=x3012c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=129  host=x3012c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=130  host=x3012c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=131  host=x3012c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=132  host=x3012c0s1b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=133  host=x3012c0s1b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=134  host=x3012c0s1b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=135  host=x3012c0s1b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=136  host=x3012c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=137  host=x3012c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=138  host=x3012c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=139  host=x3012c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=140  host=x3012c0s25b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=141  host=x3012c0s25b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=142  host=x3012c0s25b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=143  host=x3012c0s25b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=144  host=x3012c0s31b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=145  host=x3012c0s31b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=146  host=x3012c0s31b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=147  host=x3012c0s31b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=148  host=x3012c0s31b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=149  host=x3012c0s31b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=150  host=x3012c0s31b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=151  host=x3012c0s31b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=152  host=x3012c0s37b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=153  host=x3012c0s37b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=154  host=x3012c0s37b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=155  host=x3012c0s37b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=156  host=x3012c0s37b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=157  host=x3012c0s37b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=158  host=x3012c0s37b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=159  host=x3012c0s37b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=160  host=x3012c0s7b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=161  host=x3012c0s7b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=162  host=x3012c0s7b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=163  host=x3012c0s7b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=164  host=x3012c0s7b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=165  host=x3012c0s7b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=166  host=x3012c0s7b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=167  host=x3012c0s7b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=168  host=x3013c0s13b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=169  host=x3013c0s13b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=170  host=x3013c0s13b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=171  host=x3013c0s13b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=172  host=x3013c0s13b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=173  host=x3013c0s13b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=174  host=x3013c0s13b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=175  host=x3013c0s13b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=176  host=x3013c0s19b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=177  host=x3013c0s19b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=178  host=x3013c0s19b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=179  host=x3013c0s19b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=180  host=x3013c0s19b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=181  host=x3013c0s19b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=182  host=x3013c0s19b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=183  host=x3013c0s19b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=184  host=x3013c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=185  host=x3013c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=186  host=x3013c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=187  host=x3013c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=188  host=x3013c0s1b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=189  host=x3013c0s1b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=190  host=x3013c0s1b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=191  host=x3013c0s1b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=192  host=x3013c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=193  host=x3013c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=194  host=x3013c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=195  host=x3013c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=196  host=x3013c0s25b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=197  host=x3013c0s25b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=198  host=x3013c0s25b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=199  host=x3013c0s25b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=200  host=x3013c0s31b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=201  host=x3013c0s31b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=202  host=x3013c0s31b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=203  host=x3013c0s31b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=204  host=x3013c0s31b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=205  host=x3013c0s31b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=206  host=x3013c0s31b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=207  host=x3013c0s31b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=208  host=x3013c0s37b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=209  host=x3013c0s37b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=210  host=x3013c0s37b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=211  host=x3013c0s37b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=212  host=x3013c0s37b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=213  host=x3013c0s37b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=214  host=x3013c0s37b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=215  host=x3013c0s37b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=216  host=x3013c0s7b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=217  host=x3013c0s7b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=218  host=x3013c0s7b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=219  host=x3013c0s7b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=220  host=x3013c0s7b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=221  host=x3013c0s7b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=222  host=x3013c0s7b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=223  host=x3013c0s7b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=224  host=x3014c0s13b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=225  host=x3014c0s13b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=226  host=x3014c0s13b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=227  host=x3014c0s13b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=228  host=x3014c0s13b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=229  host=x3014c0s13b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=230  host=x3014c0s13b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=231  host=x3014c0s13b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=232  host=x3014c0s19b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=233  host=x3014c0s19b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=234  host=x3014c0s19b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=235  host=x3014c0s19b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=236  host=x3014c0s19b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=237  host=x3014c0s19b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=238  host=x3014c0s19b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=239  host=x3014c0s19b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=240  host=x3014c0s1b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=241  host=x3014c0s1b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=242  host=x3014c0s1b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=243  host=x3014c0s1b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=244  host=x3014c0s1b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=245  host=x3014c0s1b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=246  host=x3014c0s1b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=247  host=x3014c0s1b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=248  host=x3014c0s25b0n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=249  host=x3014c0s25b0n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=250  host=x3014c0s25b0n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=251  host=x3014c0s25b0n0  dev=0
+2026-05-28 22:17:33 [rank=0] job: rank=252  host=x3014c0s25b1n0  dev=3
+2026-05-28 22:17:33 [rank=0] job: rank=253  host=x3014c0s25b1n0  dev=2
+2026-05-28 22:17:33 [rank=0] job: rank=254  host=x3014c0s25b1n0  dev=1
+2026-05-28 22:17:33 [rank=0] job: rank=255  host=x3014c0s25b1n0  dev=0
+2026-05-28 22:17:33 [rank=0] perf-test: n=4096 nz=4096 nobj=6528 nzobj=6528 ntheta=3600 ndist=4 nchunk=1 niter=2 nranks=256 obj_dtype=complex64
+2026-05-28 22:17:38 [rank=0] Allocate [30, 6528, 6528] complex64: 9.525 GB
+2026-05-28 22:17:43 [rank=0] Allocate [30, 6528, 6528] complex64: 9.525 GB
+2026-05-28 22:17:50 [rank=0] Allocate [4, 15, 2] float32: 0.000 GB
+2026-05-28 22:17:50 [rank=0] Allocate [4, 4096, 4096] complex64: 0.500 GB
+2026-05-28 22:17:50 [rank=0] Allocate [15, 6528, 6528] complex64: 4.763 GB
+2026-05-28 22:17:53 [rank=0] Allocate [4, 15, 4096, 4096] float32: 3.750 GB
+2026-05-28 22:17:55 [rank=0] Allocate [26, 6528, 6528] complex64: 8.255 GB
+2026-05-28 22:17:59 [rank=0] Allocate [4, 15, 2] float32: 0.000 GB
+2026-05-28 22:17:59 [rank=0] Allocate [15, 6528, 6528] complex64: 4.763 GB
+2026-05-28 22:18:02 [rank=0] Allocate [26, 6528, 6528] complex64: 8.255 GB
+2026-05-28 22:18:06 [rank=0] Allocate [4, 15, 2] float32: 0.000 GB
+2026-05-28 22:18:06 [rank=0] Allocate [15, 6528, 6528] complex64: 4.763 GB
+2026-05-28 22:18:09 [rank=0] Allocate [4, 4096, 4096] complex64: 0.500 GB
+2026-05-28 22:18:09 [rank=0] Allocate [4, 4096, 4096] complex64: 0.500 GB
+2026-05-28 22:18:11 [rank=0] Allocate [3600, 26, 6528] complex64: 4.552 GB
+2026-05-28 22:18:57 [rank=0] fwd_tomo: 0.6719 sec, process memory 52.01 GB, GPU memory 11.02 GB
+2026-05-28 22:18:59 [rank=0] redist: 1.9719 sec, process memory 52.30 GB, GPU memory 11.02 GB
+2026-05-28 22:19:05 [rank=0] fwd_tomo: 0.6657 sec, process memory 52.30 GB, GPU memory 13.48 GB
+2026-05-28 22:19:06 [rank=0] redist: 1.9230 sec, process memory 52.30 GB, GPU memory 13.48 GB
+2026-05-28 22:19:14 [rank=0] allreduce: 1.3370 sec, process memory 52.45 GB, GPU memory 15.20 GB
+2026-05-28 22:19:14 [rank=0] min: 7.2237 sec, process memory 52.45 GB, GPU memory 15.20 GB
+2026-05-28 22:19:14 [rank=0] Initial err=4.55973e-02 
+2026-05-28 22:19:17 [rank=0] gradients_cascade: 3.0847 sec, process memory 52.45 GB, GPU memory 17.80 GB
+2026-05-28 22:19:19 [rank=0] redist: 1.9102 sec, process memory 52.45 GB, GPU memory 17.80 GB
+2026-05-28 22:19:21 [rank=0] adj_tomo: 2.1257 sec, process memory 52.45 GB, GPU memory 17.80 GB
+2026-05-28 22:19:23 [rank=0] gradient: 2.6318 sec, process memory 52.45 GB, GPU memory 18.44 GB
+2026-05-28 22:19:24 [rank=0] gradient: 0.2034 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:24 [rank=0] allreduce: 0.6355 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:25 [rank=0] fwd_tomo: 0.6495 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:27 [rank=0] redist: 2.0460 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:28 [rank=0] linear_redot_batch: 0.8798 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:28 [rank=0] linear_redot_batch: 0.0014 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:28 [rank=0] linear_redot_batch: 0.0589 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:28 [rank=0] linear_batch: 0.5142 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:31 [rank=0] hessian_cascade: 2.9635 sec, process memory 52.45 GB, GPU memory 18.69 GB
+2026-05-28 22:19:32 [rank=0] hessian: 0.1600 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:34 [rank=0] allreduce: 0.0016 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:34 [rank=0] hessian: 2.4782 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:34 [rank=0] allreduce2: 0.0001 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:35 [rank=0] linear_batch: 0.8799 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:35 [rank=0] linear_batch: 0.0588 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:35 [rank=0] linear_batch: 0.0008 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:36 [rank=0] linear_batch: 0.5142 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:39 [rank=0] allreduce: 0.0001 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:39 [rank=0] min: 3.1307 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:39 [rank=0] iter=0: 24.9310sec err=5.85437e-04 
+2026-05-28 22:19:39 [rank=0] iter=0: coeff_cache    hits=240 misses=360
+2026-05-28 22:19:39 [rank=0] iter=0: apply_F_cache  hits=120 misses=720
+2026-05-28 22:19:42 [rank=0] gradients_cascade: 3.0688 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:44 [rank=0] redist: 1.8867 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:46 [rank=0] adj_tomo: 2.1184 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:48 [rank=0] gradient: 2.5869 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:49 [rank=0] gradient: 0.2012 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:49 [rank=0] allreduce: 0.6229 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:50 [rank=0] fwd_tomo: 0.6491 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:52 [rank=0] redist: 2.0551 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:55 [rank=0] hessian_cascade: 3.4957 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:56 [rank=0] hessian: 0.1577 sec, process memory 52.45 GB, GPU memory 18.81 GB
+2026-05-28 22:19:58 [rank=0] allreduce: 0.0016 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:19:58 [rank=0] hessian: 2.5428 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:01 [rank=0] hessian_cascade: 2.9171 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:01 [rank=0] hessian: 0.1577 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:04 [rank=0] allreduce: 0.0001 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:04 [rank=0] hessian: 2.4781 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:04 [rank=0] allreduce2: 0.0001 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:05 [rank=0] linear_redot_batch: 0.8799 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:05 [rank=0] linear_redot_batch: 0.0013 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:05 [rank=0] linear_redot_batch: 0.0589 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:05 [rank=0] linear_batch: 0.5142 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:08 [rank=0] hessian_cascade: 2.9170 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:08 [rank=0] hessian: 0.1577 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:11 [rank=0] allreduce: 0.0001 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:11 [rank=0] hessian: 2.4782 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:11 [rank=0] allreduce2: 0.0001 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:12 [rank=0] linear_batch: 0.8799 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:12 [rank=0] linear_batch: 0.0588 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:12 [rank=0] linear_batch: 0.0008 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:12 [rank=0] linear_batch: 0.5142 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:15 [rank=0] allreduce: 0.0001 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:15 [rank=0] min: 3.1315 sec, process memory 52.45 GB, GPU memory 19.13 GB
+2026-05-28 22:20:15 [rank=0] iter=1: 36.5356sec err=1.05246e-04 
+2026-05-28 22:20:15 [rank=0] iter=1: coeff_cache    hits=660 misses=540
+2026-05-28 22:20:15 [rank=0] iter=1: apply_F_cache  hits=120 misses=360
+2026-05-28 22:20:16 [rank=0] BH done: 2 iters in 74.795 s  [nranks=256, n=4096, nobj=6528, ntheta=3600, ndist=4, nchunk=1]

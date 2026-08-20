@@ -29,6 +29,16 @@ def make_pinned(shape, dtype):
     return np.frombuffer(buf, dtype=dtype, count=n).reshape(shape, copy=False)
 
 
+def free_pinned():
+    """Hand freed pinned blocks back to the OS.
+
+    CuPy's pinned-memory pool keeps every block it has ever allocated on a free
+    list, so dropping a reference to a make_pinned array does not lower RSS --
+    and pinned pages cannot be swapped.  Call this after dropping a large one.
+    """
+    cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
 def mshow(a, show=False, figsize=(6, 6), **args):
     if show:
         if isinstance(a, cp.ndarray):

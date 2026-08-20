@@ -8,6 +8,9 @@ that summarises one BH iteration.
 | file | purpose |
 |------|---------|
 | `test.py`              | the benchmark — generates phantom, probe, positions, runs `Rec.BH()`, writes a perf log |
+| `test_mosaic.py`       | the same benchmark for a MOSAIC scan (2 × 5 tiles × 4 distances = 40 distances over one wide object) |
+| `run_mosaic.sh`        | drives `test_mosaic.py` over a list of binning levels, then parses each log |
+| `peak_mem.py`          | background sampler for peak GPU / host memory, used by both benchmarks |
 | `set_affinity_gpu.sh`  | per-rank GPU pinning (`CUDA_VISIBLE_DEVICES = local_rank % ngpus`) |
 | `parse_perf_log.py`    | reads the perf log; reports per-iter timing breakdown + max process / GPU memory |
 | `log512`               | example log from a `--n 512 --ntheta 450 --nchunk 4` run on 8 ranks × 4 GPUs |
@@ -46,11 +49,131 @@ The synthesised inputs (probe, object slab, positions) are deterministic
 across machines and rank counts — seeded from a single `MASTER_SEED` via
 `numpy.SeedSequence.spawn()` per global slice/distance/theta index.
 
+## Mosaic benchmark — `test_mosaic.py`
+
+Emulates a reconstruction of the mosaic scan implemented in
+`tests/mosaic_brain` (`gen_data.py` → `steps15.py` → `step6.py`), without any
+data on disk. The tiles are flattened onto the distance axis exactly as
+`mosaic_reader.MosaicReader` presents them to the solver:
+
+```
+ndist = ntiles * ndist_tile,   flat index = tile*ndist_tile + k
+z1    = tile(z1_tile, ntiles)
+```
+
+so the default 2 × 5 tiles × 4 distances give `ndist = 40` over one wide object
+grid, and each tile's place on the mosaic lives in `vars['pos']`.
+
+Nothing is forward-modelled — the point is the cost of one BH iteration at this
+size, and BH runs a fixed number of iterations regardless of the values:
+
+| input | value |
+|-------|-------|
+| `prb`  | `1` (flat probe, as a from-scratch `step6` starts) |
+| `ref`  | `\|D·prb\|`, so the probe-fit regularizer has something to fit |
+| `data` | random, positive (one random frame per distance × a per-angle scale) |
+| `pos`  | tile offset + random per-angle encoder jitter (±30 detector px) |
+| `obj`  | `0` — a from-scratch start, as `step6` with `write_obj_init=true` |
+
+Sizes follow the detector: at `ndet = 2048` the scan has 6000 angles (the
+`ntheta` of `mosaic_brain/config_gen.conf`), and both scale with the binning
+level, so `--bin b` gives
+
+```
+n = nz = 2048 >> b      ntheta = 6000 >> b      nobj, nzobj = mosaic >> b
+```
+
+The object grid is derived from the tile layout itself — outermost tile offset
++ jitter + the half-FOV of the least-magnified distance, rounded up — so it
+always holds the whole mosaic. For the default layout that is
+`6144 × 12288 × 12288` at bin 0. Acquisition geometry, tile pitch, jitter,
+`mask`, `rho` and `lam_prbfit` are copied from
+`tests/mosaic_brain/config_gen.conf` + `config_step6.conf`, so the two are
+directly comparable.
+
+### Plan first — host memory is the limit
+
+```bash
+python test_mosaic.py --bin 2 --nchunk 8 --nranks 8 --plan
+```
+
+prints the pinned-host and (approximate) GPU footprint per rank without
+allocating anything or touching a GPU. Rough pinned-host totals over all ranks
+(`obj` + `proj` + `proj_tmp` + `data`):
+
+| bin | detector | angles | object | host total | GPU/rank (`nchunk=4`) |
+|-----|----------|--------|--------|------------|------------------------|
+| 3   | 256      | 750    | 768 × 1536²   | 74 GB  | 0.8 GB |
+| 2   | 512      | 1500   | 1536 × 3072²  | 594 GB | 3.3 GB |
+| 1   | 1024     | 3000   | 3072 × 6144²  | 4.6 TB | 13.0 GB |
+| 0   | 2048     | 6000   | 6144 × 12288² | 37 TB  | 51.9 GB |
+
+The GPU side is comfortable by comparison up to bin 1, so the rank count is set
+by RAM, not by the devices.
+
+### Running
+
+```bash
+NP=8 BINS="3 2" ./run_mosaic.sh          # run + parse each bin
+NP=8 BINS="3 2 1" ./run_mosaic.sh --plan # sizes only
+```
+
+or directly:
+
+```bash
+mpirun -np 8 ./set_affinity_gpu.sh \
+    python test_mosaic.py --bin 2 --nchunk 8 --log logmosaic2_8
+python parse_perf_log.py logmosaic2_8 --iter 1
+```
+
+The log format is identical to `test.py`'s, so `parse_perf_log.py` works
+unchanged. Before iterating, rank 0 logs where every tile window lands on the
+object grid — the same placement check `mosaic_brain/step6.py` prints.
+
+### Peak memory
+
+`@timer` only reports what it happens to see at the end of each timed call, so
+transient peaks (cuFFT work areas, the scratch inside `Shift`/`Tomo`) and the
+whole allocation phase are invisible to it. `peak_mem.py` polls instead, on a
+background thread at 20 Hz, and the run ends with the worst rank's maxima:
+
+```
+perf-test: peak GPU during BH  6.41 GB in use of 47.27 GB  (cupy pool 5.98 GB, baseline before the run 1.33 GB)
+perf-test: peak GPU during setup 2.10 GB in use  (cupy pool 1.74 GB)
+perf-test: peak host RSS  setup 52.1 GB, BH 52.4 GB  (worst rank; predicted pinned 50.9 GB)
+```
+
+`in use` comes from `cudaMemGetInfo` and is device-wide — on a shared GPU it
+counts other processes too, which is what `baseline` (usage before the sampler
+started) is there to show. `cupy pool` is everything CuPy took from the driver,
+free-list included. Compare either against the `--plan` prediction.
+
+### `test_mosaic.py` CLI
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--bin`        | **required** | `n = nz = 2048>>bin`, `ntheta = 6000>>bin` |
+| `--nchunk`     | `4`   | theta chunk size — main perf knob |
+| `--ntile-h`    | `5`   | tiles per row |
+| `--ntile-v`    | `2`   | tile rows |
+| `--ndist-tile` | `4`   | distances per tile (max 4) |
+| `--niter`      | `2`   | BH iterations (iter 0 is warmup) |
+| `--ntheta`     | auto  | override the `6000>>bin` angle count |
+| `--nobj` / `--nzobj` | auto | override the object grid (binned px) |
+| `--plan`       | off   | print sizes + memory and exit |
+| `--nranks`     | MPI size | rank count to assume in `--plan` |
+| `--log`        | `perf_mosaic.log` | log path on rank 0 |
+
 ## `parse_perf_log.py`
 
 ```bash
 python parse_perf_log.py [LOG] [--iter N]
 ```
+
+Both benchmarks call this on their own log when they finish, so **every log
+already ends with its own summary** — for the last iteration, i.e. the one after
+the JIT warmup. Running it by hand is only needed for a different `--iter` or
+for an older log.
 
 Reads the perf log and prints:
 
@@ -70,8 +193,15 @@ Reads the perf log and prints:
    | `allreduce`    | `allreduce + allreduce2`                               |
    | `other`        | any remaining timed functions                          |
 
-   Iter boundaries are detected from `error_debug`'s `iter=N: ...` lines,
-   so the perf log needs `error_step ≥ 1` (default in `test.py`).
+   Iter boundaries are detected from `error_debug`'s `iter=N: <t>sec ...` lines,
+   so the perf log needs `error_step ≥ 1` (default in `test.py`). The `<t>sec`
+   anchor matters: `rec_mpi` also logs `iter=N: coeff_cache hits=…` right after
+   that line, and matching those too used to reopen the bucket and leave the
+   last iteration empty ("no timer calls recorded").
+
+The same report is available as `report(path, iter_no, out=..., show_info=...,
+show_header=...)` — that is what the benchmarks call to append
+their own summary.
 
 ## What goes into the log
 

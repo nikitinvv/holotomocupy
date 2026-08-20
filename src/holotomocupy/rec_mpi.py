@@ -129,7 +129,17 @@ class Rec:
         return int(2.1 * max(candidates))   # ×2 double-buffering + 10% slack for pos/eff_demag
 
     def alloc_arrays(self):
-        """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction."""
+        """Allocate all pinned CPU and CuPy GPU buffers used during reconstruction.
+
+        args.alloc_mode = 'gen' (gen_data.py) skips the gradient and
+        conjugate-direction buffers entirely: generation only ever touches
+        vars / data / proj_tmp.  Allocating grads/etas and clearing the dicts
+        afterwards still peaks at 3 obj-slabs + 3 proj-slabs of pinned memory,
+        two thirds of which is never used -- at bin 1 that peak is 4.2 TiB
+        against 1.8 TiB for what generation actually needs.  'full' (default)
+        allocates everything, so reconstruction is unaffected.
+        """
+        gen = getattr(self, 'alloc_mode', 'full') == 'gen'
         prb_shape = [self.ndist, self.nz, self.n]
         obj_shape = [self.local_nzobj, self.nobj, self.nobj]
         # vars['obj'] / etas['obj'] alias the padded scratch owned by cl_lap_term when
@@ -139,7 +149,10 @@ class Rec:
             etas_obj = self.cl_lap_term.etas_view
         else:
             obj_buf  = make_pinned(obj_shape, dtype=self.obj_dtype); obj_buf[:]  = 0
-            etas_obj = make_pinned(obj_shape, dtype=self.obj_dtype); etas_obj[:] = 0
+            # etas['obj'] is a gradient-side buffer: not allocated in gen mode.
+            etas_obj = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
+            if etas_obj is not None:
+                etas_obj[:] = 0
 
         # reconstruction variables. prb / pos are pinned CPU (uploaded once per
         # gpu_batch call by the chunking auto-cp.asarray on non-proper inputs).
@@ -159,18 +172,19 @@ class Rec:
             self.ref = self.cl_prb_term.ref
         else:
             self.ref = cp.empty([self.ndist, self.nz, self.n], dtype='float32')
-        # gradient and conjugate-direction buffers
+        # gradient and conjugate-direction buffers (reconstruction only)
         self.grads, self.etas = {}, {}
-        for ge in self.grads, self.etas:
-            ge["obj"]  = make_pinned(obj_shape, dtype=self.obj_dtype)
-            ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
-            ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
-        # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
-        # staging buffer to accumulate y[0]*rho_sq across theta chunks for one dist,
-        # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
-        self.grads["prb"] = make_pinned(prb_shape, dtype='complex64')
-        self.etas["prb"]  = make_pinned(prb_shape, dtype='complex64')
-        self.etas["obj"] = etas_obj
+        if not gen:
+            for ge in self.grads, self.etas:
+                ge["obj"]  = make_pinned(obj_shape, dtype=self.obj_dtype)
+                ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
+                ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
+            # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
+            # staging buffer to accumulate y[0]*rho_sq across theta chunks for one dist,
+            # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
+            self.grads["prb"] = make_pinned(prb_shape, dtype='complex64')
+            self.etas["prb"]  = make_pinned(prb_shape, dtype='complex64')
+            self.etas["obj"] = etas_obj
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
         self.shrink_nd = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')

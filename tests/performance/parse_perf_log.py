@@ -24,7 +24,11 @@ TIMER_RE = re.compile(
     r'\[rank=\d+\]\s+(\w+):\s+([\d.]+)\s+sec,\s+process\s+memory\s+([\d.]+)\s+GB,'
     r'\s+GPU\s+memory\s+([\d.]+)\s+GB'
 )
-ITER_RE = re.compile(r'\[rank=\d+\]\s+iter=(-?\d+):')
+# Only error_debug's timing line closes an iter bucket: rec_mpi also logs
+# "iter=N: coeff_cache hits=..." / "iter=N: apply_F_cache hits=..." right after
+# it, and without the "<float>sec" anchor those would re-open bucket N and
+# overwrite it with the (empty) list of calls seen since.
+ITER_RE = re.compile(r'\[rank=\d+\]\s+iter=(-?\d+):\s+[\d.]+sec')
 INIT_RE = re.compile(r'\[rank=\d+\]\s+Initial\s+err=')
 INFO_RE = re.compile(r'\[rank=\d+\]\s+(machine|job|perf-test|BH done):\s*(.+)')
 
@@ -110,58 +114,64 @@ def split_hessians(calls):
     return instances
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('log', nargs='?', default='perf.log',
-                    help='path to the perf log file (default: perf.log)')
-    ap.add_argument('--iter', type=int, default=1,
-                    help='which BH iter to break down (default: 1 — second iter, post-JIT warmup)')
-    args = ap.parse_args()
+def report(path, iter_no=1, out=None, show_info=True, show_header=True):
+    """Write the summary of `path` to `out`; return a shell-style exit code.
+
+    Split out of main() so a benchmark can append its own summary to the log it
+    just wrote (test.py / test_mosaic.py do that) without shelling out.
+    show_info=False drops the machine/job block, which is already in the log.
+    """
+    out = sys.stdout if out is None else out
+    def p(*a, **kw):
+        kw.setdefault('file', out)
+        print(*a, **kw)
 
     try:
-        max_proc, max_gpu, iters, info_lines = parse(args.log)
+        max_proc, max_gpu, iters, info_lines = parse(path)
     except FileNotFoundError:
-        print(f"log not found: {args.log}", file=sys.stderr); sys.exit(1)
+        print(f"log not found: {path}", file=sys.stderr)
+        return 1
 
-    print(f"=== {args.log} ===")
-    if info_lines:
-        print("── machine / job ───────────────────────────────────────")
+    if show_header:
+        p(f"=== {path} ===")
+    if info_lines and show_info:
+        p("── machine / job ───────────────────────────────────────")
         for label, text in info_lines:
-            print(f"{label}: {text}")
-        print()
-    print(f"max process memory: {max_proc:.3f} GB")
-    print(f"max GPU memory    : {max_gpu:.3f} GB")
-    print(f"iters seen        : {sorted(iters)}")
+            p(f"{label}: {text}")
+        p()
+    p(f"max process memory: {max_proc:.3f} GB")
+    p(f"max GPU memory    : {max_gpu:.3f} GB")
+    p(f"iters seen        : {sorted(iters)}")
 
-    if args.iter not in iters:
-        print(f"\niter={args.iter} not in log (available: {sorted(iters)})", file=sys.stderr)
-        sys.exit(2)
+    if iter_no not in iters:
+        p(f"\niter={iter_no} not in log (available: {sorted(iters)})")
+        return 2
 
-    calls = iters[args.iter]
+    calls = iters[iter_no]
     if not calls:
-        print(f"\niter={args.iter}: no timer calls recorded "
-              f"(was log_level=DEBUG when the run started?)")
-        sys.exit(3)
+        p(f"\niter={iter_no}: no timer calls recorded "
+          f"(was log_level=DEBUG when the run started?)")
+        return 3
+
 
     by_fn = summarise_iter(calls)
     total = sum(t for _, t in by_fn.values())
 
-    print(f"\n── iter {args.iter}: per-function summary ────────────────────────")
-    print(f"{'function':<24} {'calls':>6} {'total[s]':>12} {'mean[ms]':>12} {'pct':>7}")
+    p(f"\n── iter {iter_no}: per-function summary ────────────────────────")
+    p(f"{'function':<24} {'calls':>6} {'total[s]':>12} {'mean[ms]':>12} {'pct':>7}")
     for fn in sorted(by_fn, key=lambda k: -by_fn[k][1]):
         cnt, tot = by_fn[fn]
         mean_ms  = (tot / cnt) * 1e3
         pct      = 100 * tot / total if total else 0
-        print(f"{fn:<24} {cnt:>6} {tot:>12.4f} {mean_ms:>12.3f} {pct:>6.1f}%")
-    print(f"{'TOTAL (timed)':<24} {sum(c for c, _ in by_fn.values()):>6} {total:>12.4f}")
+        p(f"{fn:<24} {cnt:>6} {tot:>12.4f} {mean_ms:>12.3f} {pct:>6.1f}%")
+    p(f"{'TOTAL (timed)':<24} {sum(c for c, _ in by_fn.values()):>6} {total:>12.4f}")
     min_time = by_fn.get('min', (0, 0.0))[1]
-    print(f"{'TOTAL - min':<24} {'':>6} {total - min_time:>12.4f}")
+    p(f"{'TOTAL - min':<24} {'':>6} {total - min_time:>12.4f}")
 
-    print(f"\n── iter {args.iter}: grouped categories ──────────────────────────")
+    p(f"\n── iter {iter_no}: grouped categories ──────────────────────────")
     seen = set()
     hessian_instances = split_hessians(calls)
-    print(f"{'category':<16} {'calls':>6} {'total[s]':>12} {'pct':>7}  members")
+    p(f"{'category':<16} {'calls':>6} {'total[s]':>12} {'pct':>7}  members")
     for cat, members in CATEGORIES.items():
         if cat == 'hessian':
             # split into hessian1, hessian2, … (one per BH hessian() invocation)
@@ -170,7 +180,7 @@ def main():
                 tot = sum(t for _, t in inst)
                 pct = 100 * tot / total if total else 0
                 present = sorted({fn for fn, _ in inst})
-                print(f"{'hessian' + str(k):<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
+                p(f"{'hessian' + str(k):<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
             seen.update(members & set(by_fn))
             continue
         cnt = sum(c for fn, (c, _) in by_fn.items() if fn in members)
@@ -178,13 +188,25 @@ def main():
         pct = 100 * tot / total if total else 0
         present = sorted(members & set(by_fn))
         seen.update(present)
-        print(f"{cat:<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
+        p(f"{cat:<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
     other_fns = sorted(set(by_fn) - seen)
     if other_fns:
         cnt = sum(by_fn[fn][0] for fn in other_fns)
         tot = sum(by_fn[fn][1] for fn in other_fns)
         pct = 100 * tot / total if total else 0
-        print(f"{'other':<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {other_fns}")
+        p(f"{'other':<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {other_fns}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('log', nargs='?', default='perf.log',
+                    help='path to the perf log file (default: perf.log)')
+    ap.add_argument('--iter', type=int, default=1,
+                    help='which BH iter to break down (default: 1 — second iter, post-JIT warmup)')
+    args = ap.parse_args()
+    sys.exit(report(args.log, args.iter))
 
 
 if __name__ == '__main__':

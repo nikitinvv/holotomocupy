@@ -231,6 +231,130 @@ mpirun -np 32 --map-by ppr:8:node ./set_affinity_gpu.sh \
 Each run writes its log on rank 0 and **appends its own parsed summary to the
 end of that log**, so the log file alone is the deliverable — send those back.
 
+Both drivers take `LAUNCH` if `mpirun` is not how your site starts ranks:
+
+```bash
+LAUNCH="srun -n" ./run_mosaic.sh        # SLURM-only site
+```
+
+### Copy-paste: complete job scripts
+
+Everything below is for **8 × H100 80 GB + 2 TB RAM per node, 1 rank per GPU**.
+Adjust only the `module load` / `activate` lines, which are site-specific.
+
+**Step 0 — sanity check on a login node.** Allocates nothing and touches no
+device (CuPy still has to import, so the CUDA libraries must be visible), and
+catches a bad `nchunk` before it costs you an allocation:
+
+```bash
+./run_mosaic.sh --plan                  # every bin, 1x5
+TILES=2x5 ./run_mosaic.sh --plan        # every bin, 2x5
+./run.sh --plan                         # every size
+```
+
+Compare the `TOTAL` lines against the tables below. Remember the GPU total is a
+lower bound — budget **3×** it.
+
+**Job 1 — mosaic, both tile shapes, bins 3 and 2 (1 node).**
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=htc-mosaic-small
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=02:00:00
+#SBATCH --output=%x-%j.out
+
+module load cuda openmpi                    # site-specific
+source /path/to/venv/bin/activate           # site-specific
+
+cd "$SLURM_SUBMIT_DIR"
+export LAUNCH="srun -n"                     # drop this line if mpirun works
+export NP=$(( SLURM_JOB_NUM_NODES * 8 ))
+export NITER=2                              # iter 0 is the JIT warmup
+
+# nchunk from the tables below; the driver's built-in defaults are tuned for a
+# small box and would leave throughput on the table here.
+for TILES in 1x5 2x5; do
+    TILES=$TILES BINS="3" NCHUNK=23 ./run_mosaic.sh
+    TILES=$TILES BINS="2" NCHUNK=29 ./run_mosaic.sh
+done
+```
+
+**Job 2 — mosaic, bin 1 (host-memory bound; 4 nodes minimum, 8 comfortable).**
+Same header with `--nodes=8`, then:
+
+```bash
+for TILES in 1x5 2x5; do
+    TILES=$TILES BINS="1" NCHUNK=7 ./run_mosaic.sh
+done
+```
+
+**Job 3 — mosaic, bin 0, the full production size (`--nodes=32` minimum for
+both shapes; 64 halves the per-node RAM).** This one only tolerates
+`nchunk = 1`, so treat it as a feasibility run, not a throughput number:
+
+```bash
+for TILES in 1x5 2x5; do
+    TILES=$TILES BINS="0" NCHUNK=1 NITER=1 ./run_mosaic.sh
+done
+```
+
+At 32 nodes that is 793 GB/node (1×5) and 1227 GB/node (2×5) — both fit 2 TB,
+the second with less room to spare.
+
+**Job 4 — single tile, 512 / 1024 / 2048 (1 node).**
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=htc-single-small
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=04:00:00
+#SBATCH --output=%x-%j.out
+
+module load cuda openmpi
+source /path/to/venv/bin/activate
+
+cd "$SLURM_SUBMIT_DIR"
+export LAUNCH="srun -n"
+export NP=$(( SLURM_JOB_NUM_NODES * 8 ))
+export NITER=2
+
+NCHUNK=14 SIZES="512"  ./run.sh
+NCHUNK=28 SIZES="1024" ./run.sh
+NCHUNK=19 SIZES="2048" ./run.sh
+```
+
+n = 2048 sits at 1464 GB of 2 TB on one node — if the queue allows, give it
+`--nodes=2` and it drops to 735 GB (`nchunk` stays 19; GPU memory does not
+divide by node count).
+
+**Job 5 — single tile, 4096 (8 nodes) and 8192 (128 nodes).** 8192 is the
+awkward one: it is GPU-bound, not host-bound, and needs `--ndistchunk 2` to fit
+an 80 GB card at all. `run.sh` already sets that per size.
+
+```bash
+NCHUNK=4 SIZES="4096" NITER=2 ./run.sh          # --nodes=8
+NCHUNK=1 SIZES="8192" NITER=1 ./run.sh          # --nodes=128
+```
+
+If 128 nodes is out of reach, run 8192 with fewer angles —
+`python test.py --n 8192 --ntheta 1800 --nchunk 1 --ndistchunk 2 ...` — and say
+so in the report. The breakdown is still meaningful; the absolute time is just
+not comparable to the rest of the sweep.
+
+**Collecting the results.** Every run appends its own parsed summary to its own
+log, so:
+
+```bash
+tar czf perf-logs-$(hostname -s).tar.gz log* 
+```
+
 ### The two knobs
 
 |  | drives | scales with |

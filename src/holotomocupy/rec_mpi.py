@@ -76,6 +76,11 @@ class Rec:
     # pool is sized as before.
     hoist_dist_loop = True
 
+    # How often to log internal instrumentation (cache hit/miss counters).
+    # -1 = never. Overridden by args.debug_step when the config supplies one;
+    # declared here so callers that build args by hand need not set it.
+    debug_step = -1
+
     def __init__(self, args):
 
         # copy args to elements of the class
@@ -500,10 +505,11 @@ class Rec:
             self.error_debug(vars, i)
         with nvtx.annotate(":::BH:vis_debug", color='gray'):
             self.vis_debug(vars, i, writer)
-        # Cache hit/miss for this iter (reset for next).
-        if self.rank == 0:
-            ch, cm = self.cl_shift.coeff_cache_stats(reset=True)
-            ah, am = self.apply_F_cache_stats(reset=True)
+        # Cache hit/miss for this iter.  Always drained so the counts stay
+        # per-iteration rather than cumulative; only logged on debug_step.
+        ch, cm = self.cl_shift.coeff_cache_stats(reset=True)
+        ah, am = self.apply_F_cache_stats(reset=True)
+        if self.rank == 0 and self.debug_step != -1 and i % self.debug_step == 0:
             logger.info(f"iter={i}: coeff_cache    hits={ch} misses={cm}")
             logger.info(f"iter={i}: apply_F_cache  hits={ah} misses={am}")
 

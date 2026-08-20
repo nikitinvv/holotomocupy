@@ -49,6 +49,10 @@ def parse_args(config_file):
         args.ndistchunk = cfg.getint("ndistchunk", fallback=0)
         args.checkpoint_step = cfg.getint("checkpoint_step")
         args.error_step      = cfg.getint("error_step")
+        # Internal instrumentation (cache hit/miss counters and the like).
+        # -1 = never, the default: these numbers only matter when tuning the
+        # solver, not when running it.
+        args.debug_step      = cfg.getint("debug_step", fallback=-1)
         args.start_iter = cfg.getint("start_iter")
         args.rotation_center_shift = cfg.getfloat("rotation_center_shift")
         args.bin = cfg.getint("bin")

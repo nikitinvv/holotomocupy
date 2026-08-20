@@ -35,7 +35,6 @@ Usage
 
 import argparse
 import configparser
-import math
 
 GiB = 1024.0 ** 3
 C64 = 8      # complex64

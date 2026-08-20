@@ -238,6 +238,9 @@ def parse_args_gen(config_file):
         args.obj_vol         = _rel(_vol.strip()) if _vol and _vol.strip() else None
         args.delta_beta      = cfg.getfloat("delta_beta",      fallback=100.0)
         args.obj_span_px     = cfg.getfloat("obj_span_px",     fallback=0.0)
+        # Multiplies the loaded volume: the sample file has arbitrary grey
+        # levels, so this is what sets the projected phase excursion.
+        args.obj_scale       = cfg.getfloat("obj_scale",       fallback=1.0)
 
         args.nchunk         = cfg.getint("nchunk", fallback=4)
         args.paganin        = cfg.getint("paganin", fallback=40)

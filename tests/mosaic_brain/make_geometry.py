@@ -25,25 +25,12 @@ import sys
 import argparse
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', 'src'))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', 'src'))
+sys.path.insert(0, _HERE)
 from holotomocupy.config import parse_args_gen   # noqa: E402
-
-def build_tiles(args):
-    """[(name, v, h)] for the whole ntile_v x ntile_h grid, row-major.
-
-    Nominal placement: a regular grid of tile_step_v x tile_step_h object px
-    centred on the object grid, generated from the tile index alone.
-
-    The name is "{row}_{col}", both zero-based, ordered as the tile lands in the
-    composed mosaic: row 0 on top, column 0 on the left.  The offsets are sample
-    SHIFTS, so they run opposite to the object-grid axes -- a tile shifted by +h
-    appears at smaller x -- hence both steps count down from the centre.
-    """
-    v_rows = ((args.ntile_v - 1) / 2 - np.arange(args.ntile_v)) * args.tile_step_v
-    h_cols = ((args.ntile_h - 1) / 2 - np.arange(args.ntile_h)) * args.tile_step_h
-    return [(f'{r}_{c}', float(v_rows[r]), float(h_cols[c]))
-            for r in range(args.ntile_v) for c in range(args.ntile_h)]
+from mosaic_geometry import (build_tiles, write_tile_offsets,   # noqa: E402
+                             write_tile_shifts)
 
 
 def synth_shifts(args, ntiles, ndist, norm_mag):
@@ -106,24 +93,17 @@ def main():
 
     args  = parse_args_gen(opt.config)
     ndist = len(args.z1)
-    tiles = build_tiles(args)
+    tiles = build_tiles(args.ntile_v, args.ntile_h,
+                        args.tile_step_v, args.tile_step_h)
 
     mag      = args.focustodetectordistance / np.array(args.z1)
     norm_mag = mag / mag[0]
+    vox_nm   = args.detector_pixelsize / mag[0] * 1e9
 
     # --- shifts/tile_offsets.txt --------------------------------------------
     os.makedirs(args.shift_dir, exist_ok=True)
-    with open(args.tile_file, 'w') as f:
-        f.write('# Tile placement for the synthetic YY037A-like mosaic.\n')
-        f.write('# Object px on the FINEST grid (bin 0, 100.000 nm voxels).\n')
-        f.write(f'# {args.ntile_v} rows x {args.ntile_h} columns, row-major; the flat\n')
-        f.write(f'# distance index used in the HDF5 file is tile*{ndist} + k.\n')
-        f.write(f'# Nominal grid, {args.tile_step_v:g} x {args.tile_step_h:g} px steps.\n')
-        f.write('# name is "{row}_{col}", zero-based, as the tile lands in the\n')
-        f.write('# composed mosaic: row 0 on top, column 0 on the left.\n')
-        f.write('#\n# index  name       v            h\n')
-        for i, (name, v, h) in enumerate(tiles):
-            f.write(f'{i:5d}  {name:<8s} {v:12.4f} {h:12.4f}\n')
+    write_tile_offsets(args.tile_file, tiles, args.ntile_v, args.ntile_h,
+                       args.tile_step_v, args.tile_step_h, ndist, vox_nm)
     print(f'wrote {args.tile_file}  ({len(tiles)} tiles)')
 
     # --- shifts/<tile>.txt --------------------------------------------------
@@ -134,16 +114,8 @@ def main():
         shifts = synth_shifts(args, len(tiles), ndist, norm_mag)
         src = f'synthetic: {args.shift_rand_px} det px encoder jitter'
 
-    cols = ' '.join(f'v{k} h{k}' for k in range(ndist))
     for i, (name, _, _) in enumerate(tiles):
-        path = os.path.join(args.shift_dir, f'{name}.txt')
-        flat = shifts[i].reshape(args.ntheta, ndist * 2)
-        np.savetxt(path, flat, fmt='%12.5f',
-                   header=(f'Per-angle sample shift of tile {name}.\n'
-                           f'Object px on the FINEST grid (bin 0, 100.000 nm voxels),\n'
-                           f'same units and sign as /exchange/cshifts_final.\n'
-                           f'{args.ntheta} rows x {ndist*2} cols: {cols}\n'
-                           f'source: {src}'))
+        write_tile_shifts(args.shift_dir, name, shifts[i], ndist, vox_nm, src)
     print(f'wrote {len(tiles)} files in {args.shift_dir}/  ({src})')
 
     a = np.abs(shifts)

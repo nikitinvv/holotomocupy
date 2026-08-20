@@ -29,19 +29,21 @@ Checkpoints go to path_out; an existing one is resumed from automatically.
 
 import os
 import sys
-from mpi4py import MPI
-from holotomocupy.rec_mpi import Rec
-from holotomocupy.config import parse_args
-from holotomocupy.mpi_functions import MPIClass
-from holotomocupy.reader import find_latest_checkpoint
-from holotomocupy.writer import Writer
-from holotomocupy.logger_config import logger, set_log_level
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mosaic_reader import MosaicReader                      # noqa: E402
-
 import numpy as np
 import cupy as cp
+from mpi4py import MPI
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', 'src'))
+sys.path.insert(0, _HERE)
+from holotomocupy.rec_mpi import Rec                        # noqa: E402
+from holotomocupy.config import parse_args                  # noqa: E402
+from holotomocupy.mpi_functions import MPIClass             # noqa: E402
+from holotomocupy.reader import find_latest_checkpoint      # noqa: E402
+from holotomocupy.writer import Writer                      # noqa: E402
+from holotomocupy.logger_config import logger, set_log_level    # noqa: E402
+from mosaic_reader import MosaicReader                      # noqa: E402
+
 cp.cuda.set_pinned_memory_allocator(None)
 
 # --- Parse configuration file -------------------------------------------
@@ -155,15 +157,15 @@ if args.pos_checkpoint:
 # Where each tile's window lands on the object grid, before iterating.
 if rank == 0:
     pos0 = cp.asnumpy(cl.vars['pos'][:, 0])
-    logger.warning(f"  tile windows at angle {args.start_theta} "
-                   f"(x = (nobj-1)/2 - pos[1], nobj={args.nobj}):")
+    logger.info(f"  tile windows at angle {args.start_theta} "
+                f"(x = (nobj-1)/2 - pos[1], nobj={args.nobj}):")
     for t, tl in enumerate(tiles):
         o = tile_off[t] if len(tile_off) else np.zeros(2)
         p = pos0[t * ndist_tile]
-        logger.warning(f"    {tl:<6s} offset v={o[0]:+9.2f} h={o[1]:+10.2f} finest px"
-                       f"  -> pos=({p[0]:+8.2f},{p[1]:+9.2f})"
-                       f"  y={(args.nzobj-1)/2 - p[0]:8.2f}"
-                       f"  x={(args.nobj-1)/2 - p[1]:9.2f}")
+        logger.info(f"    {tl:<6s} offset v={o[0]:+9.2f} h={o[1]:+10.2f} finest px"
+                    f"  -> pos=({p[0]:+8.2f},{p[1]:+9.2f})"
+                    f"  y={(args.nzobj-1)/2 - p[0]:8.2f}"
+                    f"  x={(args.nobj-1)/2 - p[1]:9.2f}")
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

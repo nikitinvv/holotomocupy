@@ -26,9 +26,11 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import (Rectangle, Circle, Ellipse, Wedge,
                                 FancyArrowPatch)
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', 'src'))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', 'src'))
+sys.path.insert(0, _HERE)
 from holotomocupy.config import parse_args_gen   # noqa: E402
+from mosaic_geometry import read_tile_offsets    # noqa: E402
 
 # sample: cylinder, diameter x height in mm
 SAMPLE_D = 1.0
@@ -52,12 +54,11 @@ def main():
     ndist = len(z1)
 
     # tile_offsets.txt holds sample shifts; the tile lands at minus that.
-    off   = np.loadtxt(args.tile_file, usecols=(2, 3)) * vox * 1e3      # mm
+    names, off = read_tile_offsets(args.tile_file)
+    off = off * vox * 1e3                                               # mm
     # In the composed object, x index grows with -h and y index grows with -v,
     # so on screen (y up) the tile sits at x = -h, y = +v.
     ty, tx = off[:, 0], -off[:, 1]
-    names = [l.split()[1] for l in open(args.tile_file)
-             if l.strip() and not l.startswith('#')]
     fov      = args.ndet / nmag * vox * 1e3           # mm, per distance
     det_half = 0.5 * args.ndet * args.detector_pixelsize * 1e3          # mm
 

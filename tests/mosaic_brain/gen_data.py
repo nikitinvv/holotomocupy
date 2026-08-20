@@ -55,13 +55,14 @@ import h5py
 from types import SimpleNamespace
 from mpi4py import MPI
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', 'src'))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', 'src'))
+sys.path.insert(0, _HERE)
 from holotomocupy.rec_mpi import Rec                       # noqa: E402
-from holotomocupy.mpi_functions import MPIClass            # noqa: E402
 from holotomocupy.config import parse_args_gen             # noqa: E402
 from holotomocupy.logger_config import logger, set_log_level   # noqa: E402
 from holotomocupy.utils import read_tiff                   # noqa: E402
+from mosaic_geometry import read_tile_offsets, read_tile_shifts   # noqa: E402
 
 cp.cuda.set_pinned_memory_allocator(None)
 
@@ -235,17 +236,7 @@ norm_mag = mag / mag[0]
 voxelsize = args.detector_pixelsize / mag[0]
 
 # --- tiles --------------------------------------------------------------
-if not os.path.exists(args.tile_file):
-    raise SystemExit(f'{args.tile_file} not found — run make_geometry.py first')
-tile_names, tile_off = [], []
-with open(args.tile_file) as f:
-    for line in f:
-        if line.lstrip().startswith('#') or not line.strip():
-            continue
-        _, name, v, h = line.split()
-        tile_names.append(name)
-        tile_off.append([float(v), float(h)])
-tile_off = np.array(tile_off, dtype='float32')
+tile_names, tile_off = read_tile_offsets(args.tile_file)
 ntiles   = len(tile_names)
 ndist    = ntiles * ndist_t                  # flat distance axis
 
@@ -253,13 +244,8 @@ ndist    = ntiles * ndist_t                  # flat distance axis
 # cshifts_final[itheta, tile*ndist_t + k] = tile_offset[tile] + shift[itheta, k]
 cshifts = np.empty([args.ntheta, ndist, 2], dtype='float32')
 for t, name in enumerate(tile_names):
-    path = os.path.join(args.shift_dir, f'{name}.txt')
-    if not os.path.exists(path):
-        raise SystemExit(f'{path} not found — run make_geometry.py first')
-    s = np.loadtxt(path, dtype='float32').reshape(-1, ndist_t, 2)
-    if s.shape[0] < args.ntheta:
-        raise SystemExit(f'{path}: {s.shape[0]} angles, config asks for {args.ntheta}')
-    cshifts[:, t * ndist_t:(t + 1) * ndist_t] = s[:args.ntheta] + tile_off[t]
+    cshifts[:, t * ndist_t:(t + 1) * ndist_t] = (
+        read_tile_shifts(args.shift_dir, name, args.ntheta, ndist_t) + tile_off[t])
 
 # Positions on the generation grid, via exactly the transform Reader.read_pos
 # applies, so reading the file back at this bin reproduces them.
@@ -283,7 +269,7 @@ info(f'  object size          : {nzobj} x {nobj} x {nobj}')
 info(f'  mosaic               : {args.ntile_v} rows x {args.ntile_h} cols = {ntiles} tiles')
 info(f'  n distances          : {ndist} = {ntiles} tiles x {ndist_t}')
 info(f'  n angles             : {args.ntheta}')
-info(f'  shrinkage            : none')
+info('  shrinkage            : none')
 info(f'  sample               : {args.obj_vol or "zero (transmission 1)"}')
 info(f'  data on disk         : '
      f'{ndist*args.ntheta*n*n*4/2**30:.1f} GiB total, '
@@ -311,8 +297,6 @@ if '--plan' in sys.argv:
 # ---------------------------------------------------------------------------
 # Rec
 # ---------------------------------------------------------------------------
-cl_mpi = MPIClass(comm, nzobj, args.ntheta, nobj, 'complex64')
-
 rargs = SimpleNamespace(
     energy                  = args.energy,
     detector_pixelsize      = args.detector_pixelsize * 2**args.bin,
@@ -378,16 +362,23 @@ if args.obj_vol:
 else:
     cl.vars['obj'][:] = 0          # transmission exp(0) = 1 everywhere
 
-####SCALE
-cl.vars['obj'][:]*=15
+# obj_scale multiplies the whole volume.  The sample file carries arbitrary
+# grey levels, so this is what sets the projected phase excursion; the
+# "projected phase" line printed after gen_sqrt_data is the thing to tune it
+# against (a few rad to a few tens of rad is well conditioned).
+if args.obj_scale != 1.0:
+    info(f'scaling the object by {args.obj_scale:g}')
+    cl.vars['obj'][:] *= np.float32(args.obj_scale)
 # ---------------------------------------------------------------------------
 # Probe — the ID16A probe, one copy per tile
 # ---------------------------------------------------------------------------
 info(f'Reading probe from {args.prb_abs}')
-prb_abs   = read_tiff(args.prb_abs)[:ndist_t].astype('float32')
-prb_phase = read_tiff(args.prb_phase)[:ndist_t].astype('float32')
-if prb_abs.shape[0] < ndist_t:
-    raise SystemExit(f'probe has {prb_abs.shape[0]} distances, need {ndist_t}')
+prb_abs   = read_tiff(args.prb_abs).astype('float32')
+prb_phase = read_tiff(args.prb_phase).astype('float32')
+if prb_abs.shape[0] < ndist_t or prb_phase.shape[0] < ndist_t:
+    raise SystemExit(f'probe has {min(prb_abs.shape[0], prb_phase.shape[0])} '
+                     f'distances, need {ndist_t}')
+prb_abs, prb_phase = prb_abs[:ndist_t], prb_phase[:ndist_t]
 
 nz0, n0 = prb_abs.shape[1:]
 if nz0 != args.ndet or n0 != args.ndet:

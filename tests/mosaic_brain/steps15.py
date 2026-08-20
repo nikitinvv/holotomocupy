@@ -55,20 +55,21 @@ import cupy as cp
 import h5py
 from mpi4py import MPI
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', 'src'))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '..', 'src'))
+sys.path.insert(0, _HERE)
 from holotomocupy.config import parse_args_steps15         # noqa: E402
 from holotomocupy.shift import Shift                       # noqa: E402
 from holotomocupy.tomo import Tomo                         # noqa: E402
 from holotomocupy.chunking import Chunking                 # noqa: E402
 from holotomocupy.mpi_functions import MPIClass            # noqa: E402
 from holotomocupy.logger_config import logger, set_log_level   # noqa: E402
+from mosaic_geometry import read_tile_offsets, read_tile_shifts   # noqa: E402
 
 cp.cuda.set_pinned_memory_allocator(None)
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
-size = comm.Get_size()
 args = parse_args_steps15(sys.argv[1])
 set_log_level(args.log_level)
 
@@ -95,19 +96,12 @@ for p in tile_paths:
         raise SystemExit(f'{p} not found — run gen_data.py first')
 
 # tile placement, finest-grid object px, indexed by the config's tile order
-if not os.path.exists(args.tile_file):
-    raise SystemExit(f'{args.tile_file} not found — run make_geometry.py first')
-_off = {}
-with open(args.tile_file) as f:
-    for line in f:
-        if line.lstrip().startswith('#') or not line.strip():
-            continue
-        _, name, v, h = line.split()
-        _off[name] = (float(v), float(h))
-missing = [t for t in tiles if t not in _off]
+_names, _off = read_tile_offsets(args.tile_file)
+_by_name = dict(zip(_names, _off))
+missing = [t for t in tiles if t not in _by_name]
 if missing:
     raise SystemExit(f'{args.tile_file}: no offset for tile(s) {missing}')
-tile_off = np.array([_off[t] for t in tiles], dtype='float32')
+tile_off = np.array([_by_name[t] for t in tiles], dtype='float32')
 
 with h5py.File(tile_paths[0], 'r') as fid:
     energy           = float(fid['/exchange/energy'][0])
@@ -129,14 +123,7 @@ voxelsize           = abs(detector_pixelsize / magnifications[0])
 # per-angle sample shift, finest-grid object px: shifts[t, j, k, (v,h)]
 shifts = np.empty([ntiles, ntheta0, ndist_t, 2], dtype='float32')
 for t, name in enumerate(tiles):
-    sp = os.path.join(args.shift_dir, f'{name}.txt')
-    if not os.path.exists(sp):
-        raise SystemExit(f'{sp} not found — run make_geometry.py first')
-    flat = np.loadtxt(sp, dtype='float32')
-    if flat.shape != (ntheta0, ndist_t * 2):
-        raise SystemExit(f'{sp}: shape {flat.shape}, expected '
-                         f'{(ntheta0, ndist_t * 2)}')
-    shifts[t] = flat.reshape(ntheta0, ndist_t, 2)
+    shifts[t] = read_tile_shifts(args.shift_dir, name, ntheta0, ndist_t)
 
 # --- grids -----------------------------------------------------------------
 # nobj / nzobj / nobj_tile in the config are BINNED px, as in config_step6.conf.

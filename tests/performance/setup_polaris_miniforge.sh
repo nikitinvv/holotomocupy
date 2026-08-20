@@ -99,6 +99,16 @@ echo "=== nproc limit: soft=$(ulimit -Su) hard=$(ulimit -Hu); threads in use by 
 export CONDA_FETCH_THREADS=1
 export CONDA_NUMBER_CHANNEL_NOTICES=0
 
+# Same budget applies to the compile steps.  numpy's OpenBLAS opens one thread
+# per core (64 on a Milan login node) the moment it is imported -- h5py's
+# build_ext imports numpy -- and the failed pthread_create takes the build
+# process down with SIGSEGV.  RLIMIT_NPROC is huge here, so the ceiling is the
+# cgroup pid limit, not something ulimit can raise.  Build single-threaded.
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export MAKEFLAGS=-j1
+
 VENV_DIR=${VENV_DIR:-$HOME/venvs/$ENV_NAME}
 
 if [ -f "$VENV_DIR/bin/activate" ]; then
@@ -153,8 +163,13 @@ MPICC="cc -shared" pip install --no-cache-dir --force-reinstall \
 
 # --- h5py with parallel HDF5 ----------------------------------------------
 echo "=== building h5py with HDF5_MPI=ON"
+# --no-deps, NOT --force-reinstall: h5py built with MPI declares mpi4py as a
+# runtime dependency, and --force-reinstall re-resolves dependencies too --
+# which downloads the PyPI mpi4py manylinux wheel and overwrites the Cray build
+# from the previous step with one that speaks TCP instead of libfabric.  numpy
+# and mpi4py are already installed above, so there is nothing for pip to add.
 CC="cc -shared" HDF5_MPI=ON HDF5_DIR="$HDF5_PREFIX" \
-    pip install --no-cache-dir --force-reinstall \
+    pip install --no-cache-dir --no-deps \
     --no-binary=h5py --no-build-isolation h5py
 
 # --- cupy ------------------------------------------------------------------
@@ -168,6 +183,15 @@ pip install --no-cache-dir \
     scipy tifffile matplotlib matplotlib-scalebar pandas psutil nvtx dxchange
 
 pip install --no-cache-dir -e "$REPO"
+
+# Anything above could in principle have pulled a PyPI mpi4py wheel over the
+# Cray build.  Cheap to check, expensive to discover from a job that silently
+# runs over TCP.
+if ! python -c "from mpi4py import MPI; import sys; sys.exit(0 if 'CRAY' in MPI.Get_library_version().upper() else 1)" 2>/dev/null; then
+    echo "=== a PyPI mpi4py replaced the Cray build; rebuilding"
+    MPICC="cc -shared" pip install --no-cache-dir --force-reinstall \
+        --no-binary=mpi4py --no-build-isolation mpi4py
+fi
 
 # --- verify ----------------------------------------------------------------
 echo

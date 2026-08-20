@@ -95,7 +95,7 @@ size, and BH runs a fixed number of iterations regardless of the values:
 | `ref`  | `\|D·prb\|`, so the probe-fit regularizer has something to fit |
 | `data` | random, positive (one random frame per distance × a per-angle scale) |
 | `pos`  | tile offset + random per-angle encoder jitter (±30 detector px) |
-| `obj`  | `0` — a from-scratch start, as `step6` with `write_obj_init=true` |
+| `obj`  | `0` — a from-scratch start, as a production `step6` run does |
 
 Sizes follow the detector: at `ndet = 2048` the scan has 6000 angles (the
 `ntheta` of `mosaic_brain/config_gen.conf`), and both scale with the binning

@@ -405,7 +405,7 @@ def synth_data(out, st, end, ntheta_global, ss):
 
 
 # vars['obj'] is left at the zero alloc_arrays made: the reconstruction starts
-# from scratch, as a step6 run with write_obj_init=true does.  Nothing is
+# from scratch, as a production step6 run does.  Nothing is
 # forward-modelled, so there is no object to synthesize.
 logger.info("synthesize positions")
 cl.vars['pos'][:] = synth_pos(cl.st_theta, cl.end_theta, ntheta, _ss_pos)

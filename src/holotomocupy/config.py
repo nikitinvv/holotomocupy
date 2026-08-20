@@ -243,8 +243,6 @@ def parse_args_gen(config_file):
         args.obj_scale       = cfg.getfloat("obj_scale",       fallback=1.0)
 
         args.nchunk         = cfg.getint("nchunk", fallback=4)
-        args.paganin        = cfg.getint("paganin", fallback=40)
-        args.write_obj_init = cfg.getboolean("write_obj_init", fallback=True)
         args.log_level      = cfg.get("log_level", fallback="INFO")
     except configparser.NoOptionError as e:
         raise ValueError(f"Missing required field in {config_file}: {e}") from e

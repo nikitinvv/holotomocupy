@@ -17,9 +17,6 @@ YY037A scan -- each in exactly the layout holotomocupy.reader.Reader expects:
         /exchange/pdata{k}_{bin}         [ntheta, nz, n]  k = 0..ndist_tile-1
         /exchange attrs: tile, tile_index, tile_offset, tiles, ndist_tile, bin
 
-    {path_out}/{pfile}_obj.h5            zero obj_init, mosaic-sized, shared
-                                         (write_obj_init=true only; normally
-                                         steps15.py writes this file)
     {path_out}/{pfile}_prb.h5            the ground-truth probe (prb_file=),
                                          ndist entries, tile-major
 
@@ -441,18 +438,6 @@ if rank == 0:
                                f'index in the mosaic = {t}*{ndist_t} + k; '
                                f'cshifts_final already includes the tile offset')
     info(f'wrote {ntiles} tile files, {tile_file(tile_names[0])} ...')
-
-    # step6 needs an initial object.  Normally steps15.py produces it (mosaic
-    # stitch -> Paganin -> FBP); write_obj_init=true instead drops a ZERO one
-    # here so step6 can be run from scratch without steps15.py.  It is created
-    # but never written, so HDF5 leaves the space unallocated and the file costs
-    # nothing on disk.
-    if args.write_obj_init:
-        with h5py.File(args.out_file.replace('.h5', '_obj.h5'), 'w') as f:
-            for part in ('re', 'im'):
-                f.create_dataset(f'/exchange/obj_init_{part}{args.paganin}_{args.bin}',
-                                 shape=(nzobj, nobj, nobj), dtype='float32',
-                                 fillvalue=0.0)
 
     with h5py.File(args.out_file.replace('.h5', '_prb.h5'), 'w') as f:
         f.create_dataset('prb_amp',   data=np.abs(cl.vars['prb']).astype('float32'))

@@ -20,9 +20,8 @@ shrink solver is involved:
 The starting object is whatever read_obj finds in {pfile}_obj.h5, i.e.
 obj_init_re{paganin}_{bin} + 1j*obj_init_im{paganin}_{bin}.  steps15.py writes
 that file (mosaic stitch -> multi-distance Paganin -> FBP), so paganin= and bin=
-here must match config_steps15.conf.  Two alternatives: set init_vol= in the
-config to start from a raw .vol, or set write_obj_init=true in config_gen.conf
-to get a ZERO obj_init and skip steps15.py entirely (from-scratch run).
+here must match config_steps15.conf.  Set init_vol= in the config to start from
+a raw .vol instead.
 
 Checkpoints go to path_out; an existing one is resumed from automatically.
 """

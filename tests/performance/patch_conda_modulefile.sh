@@ -79,6 +79,17 @@ for pin in ${PINS}; do
     sed -i "s|${esc}|${new}|g" "${DEST}"
     echo "  -> ${pin}  =>  ${new}"
     CHANGED=$((CHANGED + 1))
+    # The pin is repinned, but the same version may also be baked into a
+    # hardcoded path (setenv HDF5_ROOT .../hdf5-parallel/1.14.3.5/gnu/12.3).
+    # Replacing a bare version string everywhere is too blunt to do silently,
+    # so flag it and let you decide.
+    oldv=${pin#*/}
+    vesc=$(printf '%s' "${oldv}" | sed 's/[][\.*^$/]/\\&/g')
+    if grep -n "${vesc}" "${DEST}" >/dev/null 2>&1; then
+        echo "     WARNING: '${oldv}' still appears in the file, in a path or"
+        echo "              string that is not a module pin -- check these lines:"
+        grep -n "${vesc}" "${DEST}" | sed 's/^/                /'
+    fi
 done
 echo "repinned ${CHANGED} dependenc$([ ${CHANGED} -eq 1 ] && echo y || echo ies)"
 

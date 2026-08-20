@@ -33,6 +33,13 @@ ap.add_argument('--nchunk', type=int, default=4,     help='theta chunk size for 
 ap.add_argument('--ndistchunk', type=int, default=0,
                 help='distances sharing one upload of a theta chunk of proj '
                      '(0 = all ndist, the default; 1 = the old outer-distance loop)')
+ap.add_argument('--niter',  type=int, default=1,
+                help='BH iterations; with 2+ the reported last iteration excludes '
+                     'the CuPy JIT compile that lands in iteration 0')
+ap.add_argument('--plan', action='store_true',
+                help='print sizes and the memory they need, then exit without allocating')
+ap.add_argument('--nranks', type=int, default=0,
+                help='rank count to assume in --plan (default: the actual MPI size)')
 ap.add_argument('--log',    type=str, default='perf.log',
                 help='log file path (rank 0; pass an empty string to disable file logging)')
 args_cli = ap.parse_args()
@@ -52,7 +59,7 @@ ndist           = 4
 # 0 on the command line means "all of them"; resolve it here so the plan, the
 # log header and Rec all quote the same number.
 ndistchunk = min(ndistchunk, ndist) if ndistchunk > 0 else ndist
-niter           = 1                             # short — measures steady-state per-iter cost
+niter           = args_cli.niter                # short — measures steady-state per-iter cost
 obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.1
@@ -76,6 +83,69 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 set_log_level(log_level)
+
+
+# ── Memory plan (--plan): sizes only, no allocation, no GPU ─────────────────
+
+
+def _local(total, r, nranks):
+    """holotomocupy.mpi_functions.get_local_chunk — size of rank r's slab."""
+    q, rem = divmod(total, nranks)
+    return q + (1 if r < rem else 0)
+
+
+def _plan(nranks):
+    """Pinned-host and (approximate) GPU bytes on the heaviest rank."""
+    GiB  = 1024.0**3
+    item = np.dtype(obj_dtype).itemsize
+    lnz  = _local(nzobj,  0, nranks)
+    lth  = _local(ntheta, 0, nranks)
+
+    host = {
+        f'obj  3 x [{lnz}, {nobj}, {nobj}]':        3 * lnz * nobj * nobj * item,
+        f'proj 3 x [{lth}, {nzobj}, {nobj}]':       3 * lth * nzobj * nobj * item,
+        f'proj_tmp [{ntheta}, {lnz}, {nobj}]':      ntheta * lnz * nobj * item,
+        f'data [{ndist}, {lth}, {nz}, {n}]':        ndist * lth * nz * n * 4,
+        'prb + pos (3 x each)':                     3 * ndist * nz * n * 8 + 4 * ndist * lth * 2 * 4,
+    }
+    proj_chunk = nchunk * nzobj * nobj * item
+    obj_chunk  = nchunk * nobj  * nobj * item
+    data_chunk = nchunk * nz    * n    * 4
+    dist_chunk = data_chunk + 3 * nchunk * 2 * 4 + nchunk * 4
+    _pool      = lambda nd: int(2.1 * max(3 * proj_chunk + nd * dist_chunk, 3 * obj_chunk))
+    gpu = {
+        'chunking pool':                             _pool(ndistchunk),
+        f'prb staging 3 x [{ndistchunk}, {nz}, {n}]': 3 * ndistchunk * nz * n * 8,
+        f'tomo fde [{nchunk}, {2*nobj}, {2*nobj}]':  nchunk * (2 * nobj)**2 * 8,
+        f'tomo sino [{ntheta}, {nchunk}, {nobj}]':   ntheta * nchunk * nobj * 8,
+        f'prop big [{nchunk}, {2*nz}, {2*n}]':       nchunk * (2 * nz) * (2 * n) * 8,
+        f'shift plan [{nchunk}, {nzobj}, {nobj}]':   nchunk * nzobj * nobj * 8,
+        f'ref [{ndist}, {nz}, {n}]':                 ndist * nz * n * 4,
+    }
+    return host, gpu, sum(host.values()) / GiB, sum(gpu.values()) / GiB
+
+
+if args_cli.plan:
+    if rank == 0:
+        nranks = args_cli.nranks if args_cli.nranks else size
+        host, gpu, host_gb, gpu_gb = _plan(nranks)
+        print(f'perf plan: n={n}  nranks={nranks}  nchunk={nchunk}  '
+              f'ndistchunk={ndistchunk}')
+        print(f'  detector   : {nz} x {n}   angles: {ntheta}   distances: {ndist}')
+        print(f'  object     : {nzobj} x {nobj} x {nobj}')
+        print(f'  local slab : ntheta {_local(ntheta, 0, nranks)}  '
+              f'nzobj {_local(nzobj, 0, nranks)}')
+        print('  pinned host memory, heaviest rank:')
+        for k, v in host.items():
+            print(f'    {k:<42s} {v/1024**3:10.2f} GB')
+        print(f'    {"TOTAL":<42s} {host_gb:10.2f} GB  '
+              f'({host_gb*nranks:.2f} GB over {nranks} ranks)')
+        print('  GPU memory per rank (approx, plan work areas not counted):')
+        for k, v in gpu.items():
+            print(f'    {k:<42s} {v/1024**3:10.2f} GB')
+        print(f'    {"TOTAL":<42s} {gpu_gb:10.2f} GB')
+    raise SystemExit
+
 
 # Tee logger output to a file on rank 0 so we can parse timings/memory later.
 if rank == 0 and log_path:

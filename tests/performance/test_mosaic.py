@@ -9,7 +9,8 @@ distance axis exactly the way tests/mosaic_brain/step6.py runs the real thing:
     ndist = ntiles * ndist_tile,   flat index = tile*ndist_tile + k
     z1    = tile(z1_tile, ntiles)
 
-so rec_mpi.Rec sees ndist = 5*2*4 = 40 distances over one wide object grid, and
+so rec_mpi.Rec sees ndist = ntiles*ndist_tile distances over one wide object
+grid (the default 1 x 5 tiles x 4 distances gives ndist = 20), and
 each tile's place on the mosaic lives in vars['pos'] (that is how
 mosaic_reader.MosaicReader presents the tile files to the solver).
 
@@ -80,7 +81,7 @@ ap.add_argument('--ndistchunk', type=int, default=0,
                 help='distances sharing one upload of a theta chunk of proj '
                      '(0 = all ndist, the default; 1 = the old outer-distance loop)')
 ap.add_argument('--ntile-h',    type=int, default=5,  help='tiles per row (default 5)')
-ap.add_argument('--ntile-v',    type=int, default=1,  help='tile rows (default 2)')
+ap.add_argument('--ntile-v',    type=int, default=1,  help='tile rows (default 1)')
 ap.add_argument('--ndist-tile', type=int, default=4,  help='distances per tile (default 4)')
 ap.add_argument('--niter',      type=int, default=1,  help='BH iterations (iter 0 is warmup)')
 ap.add_argument('--ntheta',     type=int, default=0,  help='override the 6000>>bin angle count')

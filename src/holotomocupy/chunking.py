@@ -32,6 +32,10 @@ class Chunking:
                      Each chunk transfers (chunk + inp_pad) rows so the kernel
                      receives the full padded window and can slice freely.
                      size is derived as inp[0].shape[axis_inp] - inp_pad.
+                     Any FURTHER proper input whose shape[axis_inp] is also
+                     size + inp_pad gets the same halo treatment, so a kernel
+                     needing two haloed fields (eg a bilinear stencil form
+                     against two directions) can take both in one pass.
         """
 
         def decorator(func):
@@ -59,16 +63,19 @@ class Chunking:
                     elif isinstance(out[k], (np.ndarray, cp.ndarray)):
                         nonproper_out += 1
 
-                # inp[0] when inp_pad > 0: always the padded proper input
-                padded_first = 1 if inp_pad > 0 else 0
-                proper_inp   = padded_first
-                for k in range(padded_first, len(inp)):
+                # inp[0] when inp_pad > 0: always the padded proper input.
+                # inp_pads[j] is the halo of proper input j -- inp_pad for a
+                # haloed one, 0 for an ordinary one. Classified by shape, the
+                # same way proper/non-proper already is.
+                inp_pads = [inp_pad] if inp_pad > 0 else []
+                for k in range(len(inp_pads), len(inp)):
                     if ((isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray))
                             and inp[k].ndim > axis_inp
-                            and inp[k].shape[axis_inp] == size):
-                        proper_inp += 1
+                            and inp[k].shape[axis_inp] in (size, size + inp_pad)):
+                        inp_pads.append(inp[k].shape[axis_inp] - size)
                     elif isinstance(inp[k], np.ndarray) or isinstance(inp[k], cp.ndarray):
                         nonproper_inp += 1
+                proper_inp = len(inp_pads)
 
                 # Numpy non-proper outputs: auto-create a cupy scratch (uploaded from
                 # the current CPU value so read-modify-write patterns work), swap into
@@ -100,7 +107,7 @@ class Chunking:
                 self.run(cl, gout, ginp,
                          proper_inp, nonproper_inp,
                          proper_out, nonproper_out,
-                         axis_out, axis_inp, func, inp_pad)
+                         axis_out, axis_inp, func, inp_pads, size)
 
                 # D2H any numpy non-proper outputs back to their original pinned buffers.
                 if np_out_refs:
@@ -115,25 +122,32 @@ class Chunking:
 
         return decorator
 
-    def run(self, cl, out, inp, proper_inp, nonproper_inp, proper_out, nonproper_out, axis_out, axis_inp, func, inp_pad=0):
-        """Run by chunks with overlapped H2D / compute / D2H on three streams."""
+    def run(self, cl, out, inp, proper_inp, nonproper_inp, proper_out, nonproper_out, axis_out, axis_inp, func, inp_pads=None, size=None):
+        """Run by chunks with overlapped H2D / compute / D2H on three streams.
+
+        inp_pads[j] is the halo width of proper input j (0 for most; inp_pad
+        for the padded ones). size is the chunking length without padding.
+        """
+        if inp_pads is None:
+            inp_pads = [0] * proper_inp
+        if size is None:
+            size = inp[0].shape[axis_inp]
 
         gpu_mem = self.gpu_mem
         stream  = self.stream
 
-        size   = inp[0].shape[axis_inp] - inp_pad
         nchunk = int(np.ceil(size / self.chunk))
 
         # pre-allocate double-buffered GPU arrays
         out_gpu, offset = self.alloc_double_buffers(out[:proper_out], axis_out, gpu_mem, 0, self.chunk)
 
-        if inp_pad > 0 and proper_inp > 0:
-            # First proper input is padded: allocate chunk + inp_pad rows for it
-            inp_gpu_pad,  offset = self.alloc_double_buffers(inp[:1],              axis_inp, gpu_mem, offset, self.chunk + inp_pad)
-            inp_gpu_rest, offset = self.alloc_double_buffers(inp[1:proper_inp],    axis_inp, gpu_mem, offset, self.chunk)
-            inp_gpu = [[inp_gpu_pad[j][0]] + inp_gpu_rest[j] for j in (0, 1)]
-        else:
-            inp_gpu, offset = self.alloc_double_buffers(inp[:proper_inp], axis_inp, gpu_mem, offset, self.chunk)
+        # each proper input gets chunk + its own halo rows
+        inp_gpu = [[], []]
+        for j in range(proper_inp):
+            bufs, offset = self.alloc_double_buffers(
+                inp[j:j + 1], axis_inp, gpu_mem, offset, self.chunk + inp_pads[j])
+            inp_gpu[0].append(bufs[0][0])
+            inp_gpu[1].append(bufs[1][0])
 
         # move non-proper numpy inputs to GPU once
         for k in range(proper_inp, proper_inp + nonproper_inp):
@@ -144,7 +158,7 @@ class Chunking:
             end = min(size, (k + 1) * self.chunk)
             cur_stream = cp.cuda.get_current_stream()
             for j in range(proper_inp):
-                extra = inp_pad if (j == 0 and inp_pad > 0) else 0
+                extra = inp_pads[j]
                 ndim = inp[j].ndim
                 src = self.mk_slices(axis_inp, slice(st, end + extra), ndim)
                 dst = self.mk_slices(axis_inp, slice(0, end - st + extra), ndim)
@@ -203,11 +217,10 @@ class Chunking:
             st  = k * self.chunk
             end = min(size, (k + 1) * self.chunk)
             n   = end - st
-            # Slice each proper input; padded input (j==0) gets n+inp_pad rows
+            # Slice each proper input; padded ones get n + their halo rows
             inp_gpu_c = []
             for j in range(proper_inp):
-                extra = inp_pad if (j == 0 and inp_pad > 0) else 0
-                slc = self.mk_slices(axis_inp, slice(0, n + extra), inp_gpu[buf_id][j].ndim)
+                slc = self.mk_slices(axis_inp, slice(0, n + inp_pads[j]), inp_gpu[buf_id][j].ndim)
                 inp_gpu_c.append(inp_gpu[buf_id][j][slc])
             out_gpu_c = self.slice_bufs(out_gpu[buf_id], axis_out, n)
             func(

@@ -58,6 +58,11 @@ class RecDelta(Rec):
         self.dF     = [self.dF0, self.dF1, self.dF2, self.dF3, self.dF4]
         self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2, self.d2F_dF3, self.d2F_dF4]
         self.rho_sq['bd'] = float(args.rho[3]) ** 2
+        # RecDelta overrides hessian_cascade and compute_alpha (extra 'bd'
+        # variable, F4 level), so the parent's fused single-sweep step does not
+        # apply. Forced here rather than as a class attribute because
+        # Rec.__init__ copies every config key onto self.
+        self.fused_hessian = False
 
         # Second MPIClass for proj-side traffic in float32 (proj is now real).
         # Parent's self.cl_mpi (complex64) is unused by RecDelta but kept so inherited

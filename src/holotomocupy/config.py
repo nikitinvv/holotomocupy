@@ -35,6 +35,12 @@ def parse_args(config_file):
         args.lam_prbfit    = cfg.getfloat("lam_prbfit")
         args.lam_laplacian = cfg.getfloat("lam_laplacian", fallback=0.0)
         args.rho = get_list(cfg, "rho", float)
+        # Derive the CG beta/alpha from one Hessian sweep instead of three
+        # (see the fused_hessian note on Rec). check_fused_hessian re-measures
+        # every form the classic path would have measured and logs the relative
+        # disagreement — 4 extra sweeps per iteration, for verification only.
+        args.fused_hessian       = cfg.getboolean("fused_hessian",       fallback=True)
+        args.check_fused_hessian = cfg.getboolean("check_fused_hessian", fallback=False)
         args.niter = cfg.getint("niter")
         args.nchunk = cfg.getint("nchunk")
         args.checkpoint_step = cfg.getint("checkpoint_step")

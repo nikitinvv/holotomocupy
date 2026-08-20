@@ -143,7 +143,7 @@ obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.2
 lam_prbfit      = 3.1e-3
-lam_laplacian   = 0
+lam_laplacian   = 1e-3
 start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                             # iter markers for parse_perf_log.py
@@ -315,7 +315,7 @@ args = SimpleNamespace(
     theta=np.linspace(0, np.pi, ntheta, endpoint=False).astype('float32'),
     mask=mask,
     # MPI
-    comm=comm,
+    comm=comm,    
 )
 
 if rank == 0:

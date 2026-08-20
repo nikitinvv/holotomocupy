@@ -22,6 +22,38 @@ cupy.fft.config.get_plan_cache().set_size(0) # dont waste GPU memory
 
 
 class Rec:
+    # --- fused CG step ---------------------------------------------------
+    # The bilinear form B(y,z) = <y, H(vars)·z> is symmetric: _d2F_dF0_fused
+    # contracts as (1-d0)*reprod(y,z) + d0*reprod(l0,y)*reprod(l0,z), which is
+    # manifestly invariant under y<->z. So the three cascade sweeps the classic
+    # path runs per iteration
+    #
+    #     B(g,e)                  -> beta numerator      (compute_beta)
+    #     B(e,e)                  -> beta denominator    (compute_beta)
+    #     B(b*e - g, b*e - g)     -> alpha denominator   (compute_alpha)
+    #
+    # all follow from the three forms {B(g,g), B(g,e), B(e,e)} of a SINGLE
+    # sweep:
+    #
+    #     beta   = B(g,e) / B(e,e)
+    #     bottom = b^2*B(e,e) - 2*b*B(g,e) + B(g,g)
+    #
+    # One sweep instead of three, i.e. one third of the host->device streaming
+    # (the cascades are PCIe-bound), for two extra chunk-sized `w`
+    # accumulators. Set False to fall back to the classic path; subclasses
+    # that override hessian_cascade or compute_alpha must opt out.
+    #
+    # All three terms of the functional are expanded the same way, each
+    # producing its three forms from one pass over its own data:
+    # hessian_cascade3, PrbfitTerm.hessian3, LaplacianTerm.hessian3. The
+    # regularization one needs grads['obj'] to carry ghost rows like
+    # vars['obj'] and etas['obj'] already do, which costs 4 z-slabs of pinned
+    # memory and only when lam_laplacian > 0.
+    #
+    # Per iteration: 1 cascade sweep (was 3), 1 regularization pass (was 3),
+    # and 2 allreduces (was 3).
+    fused_hessian = True
+
     def __init__(self, args):
 
         # copy args to elements of the class
@@ -78,7 +110,8 @@ class Rec:
         if self.lam_laplacian > 0:
             self.cl_lap_term = LaplacianTerm(self.lam_laplacian, self.obj_size,
                                              self.local_nzobj, self.nobj, self.obj_dtype,
-                                             self.cl_mpi, self.cl_chunking.gpu_batch)
+                                             self.cl_mpi, self.cl_chunking.gpu_batch,
+                                             grad_pad=getattr(self, 'alloc_mode', 'full') != 'gen')
         if self.lam_prbfit > 0:
             self.cl_prb_term = PrbfitTerm(self.lam_prbfit, self.prb_size,
                                           self.ndist, self.nz, self.n, self.cl_prop)
@@ -94,6 +127,7 @@ class Rec:
         self.redist = self.cl_mpi.redist
         self.allreduce  = self.cl_mpi.allreduce
         self.allreduce2 = self.cl_mpi.allreduce2
+        self.allreduce_scalars = self.cl_mpi.allreduce_scalars
         
         # save convergence results
         self.table = pd.DataFrame(columns=["iter", "err", "time"])
@@ -112,7 +146,9 @@ class Rec:
             _grad_dist:      3 proj + 1 data + tiny (2 pos + eff_demag)
           linear_batch on vars['obj']:     3 obj-shape  (out + x + y)
           gradient_laplacian (inp_pad=4):  3 obj-shape + 4 obj-slabs from padding
-                                           (only sized in when lam_laplacian > 0)
+          laplacian hessian3 (inp_pad=4):  2 obj-shape + 8 obj-slabs (two haloed
+                                           inputs, g_pad and e_pad)
+                                           (both only sized in when lam_laplacian > 0)
         linear_batch on vars['proj'] is 3 proj-shape — dominated by cascade.
         `data` has no ndist axis here: it's the single-dist slice self.data[k]
         passed in by the outer loop, shape [nchunk, nz, n].
@@ -126,6 +162,7 @@ class Rec:
         candidates = [3 * proj_bytes + data_bytes, 3 * obj_bytes]  # cascade, lin_obj
         if self.lam_laplacian > 0:
             candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
+            candidates.append(2 * obj_bytes + 8 * obj_slab)        # laplacian hessian3
         return int(2.1 * max(candidates))   # ×2 double-buffering + 10% slack for pos/eff_demag
 
     def alloc_arrays(self):
@@ -142,17 +179,22 @@ class Rec:
         gen = getattr(self, 'alloc_mode', 'full') == 'gen'
         prb_shape = [self.ndist, self.nz, self.n]
         obj_shape = [self.local_nzobj, self.nobj, self.nobj]
-        # vars['obj'] / etas['obj'] alias the padded scratch owned by cl_lap_term when
-        # the Laplacian term is active; otherwise plain obj-shape buffers.
+        # vars/etas/grads['obj'] alias the padded scratch owned by cl_lap_term when
+        # the Laplacian term is active; otherwise plain obj-shape buffers. All
+        # three carry ghost rows so a single chunked pass can differentiate any
+        # of them (LaplacianTerm.hessian3).
         if hasattr(self, 'cl_lap_term'):
-            obj_buf  = self.cl_lap_term.obj_view
-            etas_obj = self.cl_lap_term.etas_view
+            obj_buf   = self.cl_lap_term.obj_view
+            etas_obj  = self.cl_lap_term.etas_view
+            grads_obj = self.cl_lap_term.grads_view
         else:
             obj_buf  = make_pinned(obj_shape, dtype=self.obj_dtype); obj_buf[:]  = 0
-            # etas['obj'] is a gradient-side buffer: not allocated in gen mode.
-            etas_obj = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
-            if etas_obj is not None:
-                etas_obj[:] = 0
+            # etas/grads['obj'] are gradient-side buffers: not allocated in gen mode.
+            etas_obj  = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
+            grads_obj = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
+            for b in (etas_obj, grads_obj):
+                if b is not None:
+                    b[:] = 0
 
         # reconstruction variables. prb / pos are pinned CPU (uploaded once per
         # gpu_batch call by the chunking auto-cp.asarray on non-proper inputs).
@@ -176,7 +218,6 @@ class Rec:
         self.grads, self.etas = {}, {}
         if not gen:
             for ge in self.grads, self.etas:
-                ge["obj"]  = make_pinned(obj_shape, dtype=self.obj_dtype)
                 ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
                 ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
             # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
@@ -184,7 +225,16 @@ class Rec:
             # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
             self.grads["prb"] = make_pinned(prb_shape, dtype='complex64')
             self.etas["prb"]  = make_pinned(prb_shape, dtype='complex64')
-            self.etas["obj"] = etas_obj
+            self.etas["obj"]  = etas_obj
+            self.grads["obj"] = grads_obj
+            # etas must start at exactly zero, not at whatever the pinned pool
+            # handed back: at start_iter the CG step is eta <- 0*eta - grad, and
+            # 0*NaN is NaN. It also makes the first Hessian sweep return
+            # B(g,e) = B(e,e) = 0 exactly, which is what lets that iteration take
+            # the same code path as every other one.
+            for k, v in self.etas.items():
+                if k != "obj":      # obj is zeroed at allocation above
+                    v[:] = 0
         self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
 
         self.shrink_nd = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
@@ -202,9 +252,8 @@ class Rec:
         for i in range(self.start_iter, self.niter):
             with nvtx.annotate(f"::BH:{i}"):
                 self.compute_gradient(vars, grads)
-                beta = self.compute_beta(vars, grads, etas, i)
-                alpha, top, bottom = self.compute_alpha(vars, grads, etas, beta)
-                self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
+                alpha, top, bottom = self.compute_step(vars, grads, etas, i)
+                #self.check_approximation(vars, etas, top, bottom, alpha, i, writer)
                 self.apply_step(vars, etas, alpha)
                 self.log_iter(vars, i, writer)
 
@@ -240,6 +289,91 @@ class Rec:
         with nvtx.annotate(":::BH:redist", color='red'):
             self.redist(self.proj_tmp, grads['proj'])
 
+    def compute_step(self, vars, grads, etas, i):
+        """One CG step: update the search direction with the new beta and
+        return (alpha, top, bottom). Fused single-sweep route when eligible
+        (see the `fused_hessian` note on the class), classic three-sweep route
+        otherwise."""
+        if self.fused_hessian:
+            return self._compute_step_fused(vars, grads, etas, i)
+        beta = self.compute_beta(vars, grads, etas, i)
+        return self.compute_alpha(vars, grads, etas, beta)
+
+    def _compute_step_fused(self, vars, grads, etas, i):
+        """beta and alpha from ONE cascade sweep instead of three."""
+        with nvtx.annotate(":::BH:calc_step"):
+            check = True#getattr(self, 'check_fused_hessian', False)
+
+            # Every term — cascade, probe-fit, regularization — gives all three
+            # forms in one pass over its own data. Reduce BEFORE expanding
+            # `bottom` below: the expansion folds B(g,e) and B(e,g) into one
+            # 2*beta*Bge term, and for the regularization those two are equal
+            # only globally — per rank they differ by a biharmonic flux across
+            # the slab boundary (see tests/extra_terms/test_hessian3.py).
+            Qgg, Bge, Qee = self.allreduce_scalars(
+                *self.hessian3(vars, grads, etas))
+
+            # Steepest descent on the first iteration: eta_new = -g, so
+            # bottom = B(-g,-g) = Qgg, which the expansion below already gives at
+            # beta = 0. etas is zero there, so the sweep measured Bge = Qee = 0
+            # and only the ratio needs the special case (0/0).
+            beta = 0.0 if i == self.start_iter else Bge / Qee
+
+            if check and i > self.start_iter:
+                ref_beta = self._ref_beta(vars, grads, etas)
+                self._log_fused_check(i, "beta", beta, ref_beta)
+
+            # etas <- beta*etas - grads. Must run *after* the sweep: it
+            # overwrites the direction the sweep just read (e_pad views it).
+            top, = self.allreduce_scalars(self._update_etas(grads, etas, beta))
+
+            bottom = beta * beta * Qee - 2.0 * beta * Bge + Qgg
+            # This part is a Schur complement (Qgg - Bge^2/Qee): a difference of
+            # positive quantities that nearly cancel when beta is large. The
+            # arithmetic is float64, but warn when the result is non-positive
+            # (the problem is nonconvex) or survives only a small fraction of
+            # the terms that produced it.
+            scale = abs(beta * beta * Qee) + abs(2.0 * beta * Bge) + abs(Qgg)
+            if not bottom > 1e-6 * scale:
+                logger.warning(
+                    f"iter={i}: ill-conditioned alpha denominator bottom={bottom:.6e} "
+                    f"from Qgg={Qgg:.6e} Bge={Bge:.6e} Qee={Qee:.6e} beta={beta:.6e}")
+
+            if check:
+                # etas holds the updated direction, so this is exactly the
+                # sweep compute_alpha would have run.
+                ref_bottom = self.allreduce_scalars(self.hessian(vars, etas, etas))[0]
+                self._log_fused_check(i, "bottom", bottom, ref_bottom)
+
+            alpha = top / bottom
+        return alpha, top, bottom
+
+    def _ref_beta(self, vars, grads, etas):
+        """beta the classic way — two extra sweeps. Verification only."""
+        t, b = self.allreduce_scalars(self.hessian(vars, grads, etas),
+                                      self.hessian(vars, etas, etas))
+        return t / b
+
+    def _log_fused_check(self, i, name, got, ref):
+        """Report |fused - measured| / |measured| for the fused-step check."""
+        rel = abs(got - ref) / abs(ref) if ref != 0 else abs(got)
+        logger.info(f"iter={i}: fused-check {name:>6}  fused={got:+.9e}  "
+                    f"measured={ref:+.9e}  rel={rel:.3e}")
+
+    def _update_etas(self, grads, etas, beta):
+        """etas <- beta*etas - grads for every variable, returning the local
+        alpha numerator -<eta_new, grad>/rho^2 summed over obj/pos (+prb on
+        rank 0)."""
+        top = 0
+        for v in ("obj", "pos"):
+            top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
+        # probe is shared across ranks; only rank 0 contributes to the rank-0 sum
+        dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
+        if self.rank == 0:
+            top -= dot_prb / self.rho_sq['prb']
+        self.linear_batch(etas['proj'], grads['proj'], beta, -1)
+        return top
+
     def compute_beta(self, vars, grads, etas, i):
         """CG coefficient beta = <grad, H·eta> / <eta, H·eta>.
         Returns 0 on the first iter (pure steepest descent)."""
@@ -256,14 +390,7 @@ class Rec:
         the step size alpha. Returns (alpha, top, bottom); top/bottom are
         forwarded to check_approximation."""
         with nvtx.annotate(":::BH:calc_alpha"):
-            top = 0
-            for v in ("obj", "pos"):
-                top -= self.linear_redot_batch(etas[v], grads[v], beta, -1) / self.rho_sq[v]
-            # probe is shared across ranks; only rank 0 contributes to the rank-0 sum
-            dot_prb = self.linear_redot_batch(etas['prb'], grads['prb'], beta, -1)
-            if self.rank == 0:
-                top -= dot_prb / self.rho_sq['prb']
-            self.linear_batch(etas['proj'], grads['proj'], beta, -1)
+            top = self._update_etas(grads, etas, beta)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
             alpha = top / bottom
@@ -291,7 +418,11 @@ class Rec:
         """Hessian for the full functional, is a sum of 3 terms:
         1. main data fit term calcuated with the cascade rule,
         2. probe fit term,
-        3. regularization term"""
+        3. regularization term
+
+        All three addends are LOCAL; the caller allreduces the sum once. The
+        regularization term takes its second direction from the stored e_pad
+        (which views etas['obj']), not from the `etas` argument."""
         with nvtx.annotate("hessian"):
             w = self.hessian_cascade(vars, grads, etas)
             if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -338,6 +469,91 @@ class Rec:
                        vars['prb'][k], grads['prb'][k], etas['prb'][k])
 
         return out[0].get()
+
+    def hessian3(self, vars, grads, etas):
+        """{B(g,g), B(g,e), B(e,e)} — the same three terms hessian() sums, but
+        as the three bilinear forms of (g,e) instead of one, each term
+        contributing all three from a single pass over its own data. Local (not
+        allreduced), like hessian().
+
+        The regularization term ignores its arguments: g and e are the interiors
+        of the padded slabs it owns (see LaplacianTerm.hessian3)."""
+        with nvtx.annotate("hessian3"):
+            hgg, hge, hee = self.hessian_cascade3(vars, grads, etas)
+            if self.rank == 0 and hasattr(self, 'cl_prb_term'):
+                pgg, pge, pee = self.cl_prb_term.hessian3(
+                    vars["prb"], grads["prb"], etas["prb"])
+                hgg = hgg + pgg
+                hge = hge + pge
+                hee = hee + pee
+            if hasattr(self, 'cl_lap_term'):
+                lgg, lge, lee = self.cl_lap_term.hessian3()
+                hgg = hgg + lgg
+                hge = hge + lge
+                hee = hee + lee
+        return hgg, hge, hee
+
+    @timer
+    def hessian_cascade3(self, vars, grads, etas):
+        """The three bilinear forms {B(g,g), B(g,e), B(e,e)} of the main term
+        from ONE cascade sweep.
+
+        Same composition rule (Carlsson, 2025) as hessian_cascade, but the
+        x-chain — the part that streams vars/grads/etas['proj'] and `data` over
+        PCIe, i.e. essentially all of the cost — is advanced once and shared by
+        all three pairs instead of being recomputed per call.
+
+        `out` is a 3-element cupy accumulator. Chunking classifies it as a
+        *non-proper* output (its axis-0 length is not the chunk's theta count)
+        and hands it whole to every chunk, exactly as it does the scalar in
+        hessian_cascade."""
+
+        # ...which relies on 3 != the chunked axis length. Only violated by a
+        # degenerate decomposition, but a silent mis-slice would be very hard
+        # to spot in the numbers.
+        assert self.local_ntheta != 3, "local_ntheta==3 aliases the accumulator shape"
+
+        out = cp.zeros(3, dtype="float32")
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
+        def _hess3_dist(self, out, d, eff_demag,
+                        x_pos, g_pos, e_pos,
+                        x_proj, g_proj, e_proj,
+                        x_prb, g_prb, e_prb):
+            self._eff_demag_chunk = eff_demag
+            self.cl_shift.coeff_cache_reset()
+            self.apply_F_cache_reset()
+            x = [x_prb, x_proj, x_pos]
+            g = [g_prb, g_proj, g_pos]
+            e = [e_prb, e_proj, e_pos]
+            # Passing the *same* list object for y and z on the diagonal forms
+            # keeps the `y12 is z12` / cached-coeff fast paths in d2F_dF1 and
+            # d2F_dF3 alive — the y_is_z flag becomes structural.
+            wgg = [None, None, None]
+            wge = [None, None, None]
+            wee = [None, None, None]
+            for id in range(1, len(self.F))[::-1]:
+                # d2F_dF[id] must see the pre-update x, g, e — hence all three
+                # contractions before dF[id] advances the chains.
+                wgg = self.d2F_dF[id](x, g, g, wgg)
+                wge = self.d2F_dF[id](x, g, e, wge)
+                wee = self.d2F_dF[id](x, e, e, wee)
+                fx, gn = self.dF[id](x, g)
+                en = self.dF[id](x, e, return_x=False)
+                x, g, e = fx, gn, en
+            out[0:1] += self.d2F_dF[0](x, g, g, wgg, d)
+            out[1:2] += self.d2F_dF[0](x, g, e, wge, d)
+            out[2:3] += self.d2F_dF[0](x, e, e, wee, d)
+
+        for k in range(self.ndist):
+            self._dist_idx = k
+            _hess3_dist(self, out, self.data[k], self.eff_demag[k],
+                        vars['pos'][k], grads['pos'][k], etas['pos'][k],
+                        vars['proj'], grads['proj'], etas['proj'],
+                        vars['prb'][k], grads['prb'][k], etas['prb'][k])
+
+        h = out.get()
+        return float(h[0]), float(h[1]), float(h[2])
 
     def gradients(self, vars, grads):
         """Full gradient, consists of 2 terms:

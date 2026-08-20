@@ -7,30 +7,48 @@ from mpi4py import MPI
 from .utils import lap, redot, reprod, timer, make_pinned
 
 
+def biharm(pad_chunk):
+    """(∇²)² over the owned slices of a chunk carrying 2 ghost rows per z-side.
+
+    Returns an array shaped like pad_chunk[2:-2]: the inner Laplacians consume
+    one ghost row, the outer one the second.
+    """
+    lap_zm1 = lap(pad_chunk[:-4], pad_chunk[1:-3], pad_chunk[2:-2])
+    lap_z   = lap(pad_chunk[1:-3], pad_chunk[2:-2], pad_chunk[3:-1])
+    lap_zp1 = lap(pad_chunk[2:-2], pad_chunk[3:-1], pad_chunk[4:])
+    return lap(lap_zm1, lap_z, lap_zp1)
+
+
 class LaplacianTerm:
     """3-D biharmonic regularization: (lam / obj_size) * ||∇²u||² where u = vars['obj'].
 
-    Owns the padded scratch buffers u_pad / e_pad of shape [local_nzobj+4, nobj, nobj]
-    whose middle [2:-2] slices (exposed as `obj_view` / `etas_view`) alias vars['obj']
-    and etas['obj']. The 2 ghost rows on each z-side let a chunk compute (∇²)² in a
-    single padded pass. When `lam == 0` the term is inactive and no padding is
-    allocated; obj_view / etas_view return None so the caller can allocate plain
-    obj-shape buffers instead.
+    Owns the padded scratch buffers u_pad / e_pad / g_pad of shape
+    [local_nzobj+4, nobj, nobj] whose middle [2:-2] slices (exposed as `obj_view` /
+    `etas_view` / `grads_view`) alias vars['obj'], etas['obj'] and grads['obj'].
+    The 2 ghost rows on each z-side let a chunk compute (∇²)² in a single padded
+    pass; g_pad exists so the *gradient* direction can be differentiated too,
+    which is what lets hessian3 return all three bilinear forms at once. When
+    `lam == 0` the term is inactive and no padding is allocated; the views
+    return None so the caller can allocate plain obj-shape buffers instead.
+
+    Halo cost over plain obj-shape buffers: 4 z-slabs per padded array.
     """
 
-    def __init__(self, lam, obj_size, local_nzobj, nobj, obj_dtype, cl_mpi, gpu_batch):
+    def __init__(self, lam, obj_size, local_nzobj, nobj, obj_dtype, cl_mpi, gpu_batch,
+                 grad_pad=True):
         self.lam       = lam
         self.obj_size  = obj_size
         self.cl_mpi    = cl_mpi
         self.gpu_batch = gpu_batch
+        self.u_pad = self.e_pad = self.g_pad = None
         if lam != 0:
-            self.u_pad = make_pinned([local_nzobj + 4, nobj, nobj], dtype=obj_dtype)
-            self.e_pad = make_pinned([local_nzobj + 4, nobj, nobj], dtype=obj_dtype)
-            self.u_pad[:] = 0
-            self.e_pad[:] = 0
-        else:
-            self.u_pad = None
-            self.e_pad = None
+            shape = [local_nzobj + 4, nobj, nobj]
+            self.u_pad = make_pinned(shape, dtype=obj_dtype); self.u_pad[:] = 0
+            self.e_pad = make_pinned(shape, dtype=obj_dtype); self.e_pad[:] = 0
+            # grads/etas are reconstruction-only; generation (alloc_mode='gen')
+            # never touches them, so skip the buffer there.
+            if grad_pad:
+                self.g_pad = make_pinned(shape, dtype=obj_dtype); self.g_pad[:] = 0
 
     @property
     def obj_view(self):
@@ -41,6 +59,11 @@ class LaplacianTerm:
     def etas_view(self):
         """Storage for etas['obj'] (view into e_pad); None when this term is inactive."""
         return None if self.e_pad is None else self.e_pad[2:-2]
+
+    @property
+    def grads_view(self):
+        """Storage for grads['obj'] (view into g_pad); None when inactive."""
+        return None if self.g_pad is None else self.g_pad[2:-2]
 
     def exchange_ghosts(self, pad):
         """Fill pad[0:2] / pad[-2:] from neighbouring ranks; zero at the global boundary."""
@@ -66,16 +89,18 @@ class LaplacianTerm:
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
         def _biharm_grad(self, g, u_pad_chunk, g_in):
-            lap_zm1 = lap(u_pad_chunk[:-4], u_pad_chunk[1:-3], u_pad_chunk[2:-2])
-            lap_z   = lap(u_pad_chunk[1:-3], u_pad_chunk[2:-2], u_pad_chunk[3:-1])
-            lap_zp1 = lap(u_pad_chunk[2:-2], u_pad_chunk[3:-1], u_pad_chunk[4:])
-            g[:] = g_in + scale * lap(lap_zm1, lap_z, lap_zp1)
+            g[:] = g_in + scale * biharm(u_pad_chunk)
 
         _biharm_grad(self, grad_obj, self.u_pad, grad_obj)
 
     @timer
     def hessian(self, dobj1):
-        """2*lam/obj_size * Re<dobj1, (∇²)²e>, allreduced over ranks."""
+        """2*lam/obj_size * Re<dobj1, (∇²)²e> over the LOCAL obj slab.
+
+        Local, like energy_local and PrbfitTerm.hessian: Rec.hessian sums the
+        three terms and its caller allreduces once. (This used to allreduce
+        internally, which made the regularization term count comm.size times
+        in the total — latent, since lam_laplacian is 0 in every config.)"""
         if self.lam == 0:
             return 0
         scale = np.float32(2.0 * self.lam / self.obj_size)
@@ -84,13 +109,50 @@ class LaplacianTerm:
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
         def _biharm_dot(self, acc, e_pad_chunk, d1):
-            lap_zm1 = lap(e_pad_chunk[:-4], e_pad_chunk[1:-3], e_pad_chunk[2:-2])
-            lap_z   = lap(e_pad_chunk[1:-3], e_pad_chunk[2:-2], e_pad_chunk[3:-1])
-            lap_zp1 = lap(e_pad_chunk[2:-2], e_pad_chunk[3:-1], e_pad_chunk[4:])
-            acc[:] += redot(d1, lap(lap_zm1, lap_z, lap_zp1))
+            acc[:] += redot(d1, biharm(e_pad_chunk))
 
         _biharm_dot(self, acc, self.e_pad, dobj1)
-        return float(self.cl_mpi.allreduce(np.array(scale * float(acc[0]), dtype='float32')))
+        return float(scale * float(acc[0]))
+
+    @timer
+    def hessian3(self, *_):
+        """The three regularization bilinear forms {B(g,g), B(g,e), B(e,e)} from
+        ONE pass — the Laplacian counterpart of Rec.hessian3.
+
+        Takes no directions: g and e are g_pad[2:-2] and e_pad[2:-2], so the pass
+        streams the two padded slabs and reads both the biharmonics and the
+        contraction vectors out of them. (Any positional arguments are ignored,
+        which keeps the call site uniform with the other hessian3's.)
+
+        Both fields carry ghost rows, so both biharmonics are available in the
+        same chunk and the three redots cost only arithmetic on top. Local, like
+        hessian(); the caller allreduces.
+
+        Half the traffic of the two-pass route it replaces, and it lets the
+        caller derive `bottom` arithmetically instead of re-measuring it after
+        the etas update."""
+        if self.lam == 0:
+            return 0.0, 0.0, 0.0
+        scale = np.float32(2.0 * self.lam / self.obj_size)
+        # The 3-element accumulator is a non-proper output only because 3 is not
+        # the chunked axis length; a degenerate slab would silently make it one.
+        assert self.g_pad.shape[0] - 4 != 3, "local_nzobj==3 aliases the accumulator shape"
+        self.exchange_ghosts(self.g_pad)
+        self.exchange_ghosts(self.e_pad)
+        acc = cp.zeros(3, dtype='float32')
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1, inp_pad=4)
+        def _biharm_dot3(self, acc, g_pad_chunk, e_pad_chunk):
+            bg = biharm(g_pad_chunk)
+            be = biharm(e_pad_chunk)
+            g  = g_pad_chunk[2:-2]
+            acc[0:1] += redot(g, bg)
+            acc[1:2] += redot(g, be)
+            acc[2:3] += redot(e_pad_chunk[2:-2], be)
+
+        _biharm_dot3(self, acc, self.g_pad, self.e_pad)
+        a = acc.get()
+        return float(scale * a[0]), float(scale * a[1]), float(scale * a[2])
 
     def energy_local(self):
         """Local biharmonic energy (lam/obj_size) * ||∇²u||². No allreduce."""
@@ -157,6 +219,31 @@ class PrbfitTerm:
             out += 2 * (v1 + v2)
         out = self.lam * out / self.prb_size
         return out.get()
+
+    @timer
+    def hessian3(self, prb, dg, de):
+        """The three probe-fit bilinear forms {B(g,g), B(g,e), B(e,e)}.
+
+        Same contraction as hessian(), but the direction-independent Dprb/l0/d0
+        and the two direction propagations are each computed once per distance
+        instead of once per pair — 3 D() calls per j instead of 9."""
+        if self.lam == 0:
+            return 0, 0, 0
+        ogg = oge = oee = 0
+        for j in range(self.ndist):
+            Dprb = self.cl_prop.D(prb[j:j+1], j)
+            Dg   = self.cl_prop.D(dg[j:j+1], j)
+            De   = self.cl_prop.D(de[j:j+1], j)
+            aDprb = cp.abs(Dprb)
+            l0 = Dprb / aDprb
+            d0 = self.ref[j:j+1] / aDprb
+            pg = reprod(l0, Dg)
+            pe = reprod(l0, De)
+            ogg += 2 * (cp.sum((1 - d0) * reprod(Dg, Dg)) + cp.sum(d0 * pg * pg))
+            oge += 2 * (cp.sum((1 - d0) * reprod(Dg, De)) + cp.sum(d0 * pg * pe))
+            oee += 2 * (cp.sum((1 - d0) * reprod(De, De)) + cp.sum(d0 * pe * pe))
+        s = self.lam / self.prb_size
+        return (s * ogg).get(), (s * oge).get(), (s * oee).get()
 
     def energy_local(self, prb):
         """Local probe-fit energy (lam / prb_size) * Σ_j ||(|D·prb_j| - ref_j)||²."""

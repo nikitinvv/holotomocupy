@@ -32,6 +32,6 @@ for b in $BINS; do
     nc=$(nchunk_for "$b")
     echo "=== bin $b  nchunk $nc  np $NP"
     mpirun -np "$NP" ./set_affinity_gpu.sh \
-        "$PY" test_mosaic.py --bin "$b" --nchunk "$nc" --log "logmosaic${b}_${NP}"
+        "$PY" test_mosaic.py --bin "$b" --nchunk "$nc" --log "logmosaic${b}_${NP}" 
     "$PY" parse_perf_log.py "logmosaic${b}_${NP}" --iter 1
 done

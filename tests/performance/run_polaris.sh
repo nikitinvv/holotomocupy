@@ -1,4 +1,4 @@
-#!/bin/bash -l
+#!/bin/bash
 #PBS -N holotomo_perf
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
@@ -20,8 +20,10 @@
 
 set -eu
 cd "${PBS_O_WORKDIR:-$(dirname "$(readlink -f "$0")")}"
-# Activate the environment holding cupy / mpi4py here, e.g.
-#   module use /soft/modulefiles && module load conda && conda activate holotomocupy
+# Environment: conda + venv + MATHDX_ROOT, and (temporarily) the mpich ABI
+# repair the August 2026 maintenance made necessary.  Kept in one file so the
+# ranks never depend on ~/.bashrc -- see env_polaris.sh.
+. ./env_polaris.sh
 
 N=512                               # detector size (nz = n)
 NTHETA=$(( 3 * N / 4 ))             # projection angles
@@ -47,7 +49,8 @@ if [ "${1:-}" = "--plan" ]; then
 fi
 
 echo "=== n $N  ntheta $NTHETA  nchunk $NCHUNK  np $NP on $NODES node(s)"
-mpiexec -n "$NP" -ppn 4 --cpu-bind depth -d 8 ./set_affinity_gpu_polaris.sh \
+mpiexec -n "$NP" --ppn 4 --depth=8 --cpu-bind depth --env OMP_NUM_THREADS=4 \
+    ./set_affinity_gpu_polaris.sh \
     python test.py --n "$N" --ntheta "$NTHETA" --nchunk "$NCHUNK" \
                    --log "$LOG" "$@"
 python parse_perf_log.py "$LOG"

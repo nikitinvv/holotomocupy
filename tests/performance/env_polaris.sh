@@ -25,9 +25,14 @@ module load cudatoolkit-standalone       # nvcc for the cuFFTDx JIT
 # that ABI.  Lmod's default gcc-native may be newer, which moves the cray-mpich
 # lib dir out from under them.
 HDF5_PREFIX=${HDF5_ROOT:-${CRAY_HDF5_PARALLEL_PREFIX:-${HDF5_DIR:-}}}
+# Only worth pinning when the system actually offers more than one MPI ABI to
+# choose between; today Polaris ships gnu/12.3 alone, so this is a no-op.
 HDF5_GCC=$(echo "${HDF5_PREFIX}" | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/?$|\1|p')
+MPICH_ABIS=$(ls -1d /opt/cray/pe/mpich/*/ofi/gnu/*/ 2>/dev/null \
+             | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/$|\1|p' | sort -u)
 CUR_GCC=$(module -t --redirect list 2>/dev/null | sed -nE 's|^gcc-native/(.*)$|\1|p')
-if [ -n "${HDF5_GCC}" ] && [ "${CUR_GCC%%.*}" != "${HDF5_GCC%%.*}" ]; then
+if [ -n "${HDF5_GCC}" ] && [ "$(echo "${MPICH_ABIS}" | wc -l)" -gt 1 ] \
+   && [ "${CUR_GCC%%.*}" != "${HDF5_GCC%%.*}" ]; then
     module load "gcc-native/${HDF5_GCC}" 2>/dev/null \
         || module load "gcc-native/${HDF5_GCC%%.*}" 2>/dev/null \
         || echo "NOTE: no gcc-native/${HDF5_GCC}; relying on the ABI repair below."

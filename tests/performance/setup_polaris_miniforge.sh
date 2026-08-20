@@ -43,19 +43,20 @@ echo "=== HDF5 prefix: $HDF5_PREFIX"
 # then libhdf5.so wants libmpi_gnu_123.so.12 while `cc` links libmpi_gnu_<new>,
 # and the rank loads two MPI libraries.  Pin GCC to the HDF5 build if we can.
 HDF5_GCC=$(echo "$HDF5_PREFIX" | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/?$|\1|p')
-CUR_GCC=$(module -t --redirect list 2>/dev/null | sed -nE 's|^gcc-native/(.*)$|\1|p')
-if [ -n "$HDF5_GCC" ] && [ "${CUR_GCC%%.*}" != "${HDF5_GCC%%.*}" ]; then
-    echo "=== gcc-native/${CUR_GCC:-?} loaded but HDF5 is a gnu/${HDF5_GCC} build; pinning GCC"
-    if   module load "gcc-native/${HDF5_GCC}"      2>/dev/null; then :
-    elif module load "gcc-native/${HDF5_GCC%%.*}"  2>/dev/null; then :
-    else
-        echo "    WARNING: no gcc-native/${HDF5_GCC} module.  Continuing on gcc-native/${CUR_GCC}." >&2
-        echo "             If ranks later fail on 'libmpi_gnu_*.so: cannot open shared" >&2
-        echo "             object file', env_polaris.sh repairs it via LD_LIBRARY_PATH." >&2
+MPICH_ABIS=$(ls -1d /opt/cray/pe/mpich/*/ofi/gnu/*/ 2>/dev/null \
+             | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/$|\1|p' | sort -u)
+echo "=== cray-mpich GNU ABIs installed: $(echo $MPICH_ABIS | tr '\n' ' ')"
+if [ -n "$HDF5_GCC" ]; then
+    if [ "$(echo "$MPICH_ABIS" | wc -l)" = "1" ] && [ "$MPICH_ABIS" = "$HDF5_GCC" ]; then
+        # Only one MPI ABI exists on the system and HDF5 uses it, so the craype
+        # wrapper has nothing else to pick -- mpi4py and h5py land on the same
+        # libmpi regardless of which gcc-native is loaded.  Nothing to pin.
+        echo "=== single MPI ABI (gnu/${HDF5_GCC}) and HDF5 matches it -- consistent"
+    elif ! echo "$MPICH_ABIS" | grep -qx "$HDF5_GCC"; then
+        echo "    WARNING: HDF5 is a gnu/${HDF5_GCC} build but cray-mpich has no such ABI." >&2
+        echo "             h5py and mpi4py may end up on different libmpi versions." >&2
     fi
 fi
-echo "=== cray-mpich ABI dirs available:"
-ls -1d /opt/cray/pe/mpich/*/ofi/gnu/*/lib 2>/dev/null | sed 's/^/    /' || echo "    (none found)"
 
 # --- conda env -------------------------------------------------------------
 # Locate a conda: $MINIFORGE, then the usual install spots, then one already
@@ -90,7 +91,10 @@ echo "=== conda: $CONDA_SH"
 
 if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     echo "=== creating conda env '$ENV_NAME' (python 3.11)"
-    conda create -y -n "$ENV_NAME" python=3.11
+    # -c conda-forge explicitly: a ~/.condarc that sets `channels: []` (or a
+    # miniforge install whose channel defaults did not get written) makes a
+    # bare `conda create` fail with NoChannelsConfiguredError.
+    conda create -y -n "$ENV_NAME" -c conda-forge --override-channels python=3.11
 fi
 conda activate "$ENV_NAME"
 echo "=== python: $(command -v python)  $(python -V 2>&1)"

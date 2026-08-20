@@ -1,63 +1,42 @@
 #!/usr/bin/env bash
-# Single-tile perf benchmark: BH iterations on a square detector at each of a
-# list of sizes.  ndist = 4 propagation distances, one tile.  The mosaic
-# counterpart is run_mosaic.sh.
+# Single-tile perf benchmark: BH iterations on a square detector of size N,
+# ndist = 4 propagation distances, one tile.  The mosaic counterpart is
+# run_mosaic.sh, the Polaris job script is run_polaris.sh.
 #
-#   ./run.sh --plan               # sizes + memory for every n, no GPU, no run
-#   ./run.sh                      # NP=4 ranks, sizes 512 / 1024 / 2048
-#   NP=8 SIZES="4096" ./run.sh
-#   NCHUNK=28 SIZES=1024 ./run.sh # override the per-size nchunk default
-#   NITER=2 ./run.sh              # add a warmup iteration, report the second
-#   NDISTCHUNK=1 ./run.sh         # force the old outer-distance loop everywhere
+#   ./run.sh --plan     # sizes + memory for the settings below, no GPU, no run
+#   ./run.sh            # run it, then print the timing breakdown
 #
-# The big sizes need many ranks -- see "Running on a cluster" in Readme.md for
-# the node counts and the per-size nchunk/ndistchunk that fit an 80 GB card.
+# Everything is set here in the script -- edit and rerun.  The big sizes need
+# many ranks; see "Running on a cluster" in Readme.md for the node counts and
+# the per-size nchunk / ndistchunk that fit an 80 GB card.
 
 set -eu
 cd "$(dirname "$(readlink -f "$0")")"
 
-PY=${PY:-python}
-NP=${NP:-4}
-SIZES=${SIZES:-"512 1024"}
-# BH iterations.  Iteration 0 absorbs the CuPy JIT compile, so NITER=2 gives a
-# clean steady-state number -- worth it except at the sizes where one iteration
-# is already expensive.
-NITER=${NITER:-1}
-
-# How the ranks are started.  Default is Open MPI; on a SLURM-only site use
-#   LAUNCH="srun -n" ./run.sh
-# Both put the rank count immediately after, which is all the drivers assume.
-LAUNCH=${LAUNCH:-"mpirun -np"}
-
-# nchunk per size.  These defaults are deliberately conservative -- they are
-# what a single small box tolerates.  On a big card they leave throughput on
-# the table; set NCHUNK to override (see the Readme's recommended-settings
-# table for per-size values on an 80 GB card).  The chunking pool scales as
+NP=4                                # ranks = GPUs
+N=512                               # detector size (nz = n)
+NTHETA=$(( 3 * N / 4 ))             # projection angles
+# Theta chunk size, the main perf knob.  The chunking pool scales as
 # nchunk * nobj^2 (nobj = 1.59n), so it has to come down fast as n grows.
-nchunk_for () { case "$1" in 512) echo 16;; 1024) echo 8;; 2048) echo 4;; 4096) echo 2;; *) echo 1;; esac; }
-# ndistchunk per size: unlike the mosaic geometry, here nzobj == nobj, so the
-# pool has no headroom and every extra resident distance costs memory from the
-# first one.  At n >= 8192 that is the difference between fitting and not.
-ndistchunk_for () { case "$1" in 8192) echo 2;; *) echo 0;; esac; }
-ntheta_for () { echo $(( 900 * $1 / 1024 )); }
+# Powers of two, from the 80 GB / 8-rank-node table in Readme.md:
+#     n         512   1024   2048   4096   8192
+#     nchunk      8     16     16      4      1
+NCHUNK=8
+# 0 = all ndist distances share one upload of a theta chunk of proj.  Here
+# nzobj == nobj, so the pool has no headroom and every extra resident distance
+# costs memory from the first one; at n = 8192 use 2, which is the difference
+# between fitting an 80 GB card and not.
+NDISTCHUNK=0
+LOG="log${N}_${NCHUNK}"
 
 if [ "${1:-}" = "--plan" ]; then
-    for n in $SIZES; do
-        "$PY" test.py --n "$n" --ntheta "$(ntheta_for "$n")" \
-                      --nchunk "${NCHUNK:-$(nchunk_for "$n")}" \
-                      --ndistchunk "${NDISTCHUNK:-$(ndistchunk_for "$n")}" \
-                      --nranks "$NP" --plan
-    done
+    python test.py --n "$N" --ntheta "$NTHETA" --nchunk "$NCHUNK" \
+                   --ndistchunk "$NDISTCHUNK" --nranks "$NP" --plan
     exit 0
 fi
 
-for n in $SIZES; do
-    nc=${NCHUNK:-$(nchunk_for "$n")}
-    nt=$(ntheta_for "$n")
-    ndc=${NDISTCHUNK:-$(ndistchunk_for "$n")}
-    echo "=== n $n  ntheta $nt  nchunk $nc  ndistchunk $ndc  np $NP"
-    $LAUNCH "$NP" ./set_affinity_gpu.sh \
-        "$PY" test.py --n "$n" --ntheta "$nt" --nchunk "$nc" \
-                      --ndistchunk "$ndc" --niter "$NITER" --log "log${n}_${nc}"
-    "$PY" parse_perf_log.py "log${n}_${nc}" --iter "$(( NITER - 1 ))"
-done
+echo "=== n $N  ntheta $NTHETA  nchunk $NCHUNK  ndistchunk $NDISTCHUNK  np $NP"
+mpirun -np "$NP" ./set_affinity_gpu.sh \
+    python test.py --n "$N" --ntheta "$NTHETA" --nchunk "$NCHUNK" \
+                   --ndistchunk "$NDISTCHUNK" --log "$LOG" "$@"
+python parse_perf_log.py "$LOG"

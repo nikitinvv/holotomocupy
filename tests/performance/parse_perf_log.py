@@ -2,7 +2,7 @@
 """
 Parse the log produced by rec_iterative_mpi_syn.py and print:
   * max process memory + max GPU memory across the whole run
-  * per-function timing breakdown for the requested BH iter (default: iter 1)
+  * per-function timing breakdown for the requested BH iter (default: the last)
   * grouped category totals (gradient / hessian / redist / linear_batch / min /
     allreduce), with the hessian bucket broken down per hessian() invocation
     when the solver runs the classic three-sweep path
@@ -124,12 +124,14 @@ def split_hessians(calls):
     return instances
 
 
-def report(path, iter_no=1, out=None, show_info=True, show_header=True):
+def report(path, iter_no=None, out=None, show_info=True, show_header=True):
     """Write the summary of `path` to `out`; return a shell-style exit code.
 
     Split out of main() so a benchmark can append its own summary to the log it
     just wrote (test.py / test_mosaic.py do that) without shelling out.
     show_info=False drops the machine/job block, which is already in the log.
+    iter_no=None breaks down the last iter present in the log, which is the
+    steady-state one whatever --niter the run used.
     """
     out = sys.stdout if out is None else out
     def p(*a, **kw):
@@ -153,6 +155,8 @@ def report(path, iter_no=1, out=None, show_info=True, show_header=True):
     p(f"max GPU memory    : {max_gpu:.3f} GB")
     p(f"iters seen        : {sorted(iters)}")
 
+    if iter_no is None:
+        iter_no = max(iters) if iters else 0
     if iter_no not in iters:
         p(f"\niter={iter_no} not in log (available: {sorted(iters)})")
         return 2
@@ -213,8 +217,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('log', nargs='?', default='perf.log',
                     help='path to the perf log file (default: perf.log)')
-    ap.add_argument('--iter', type=int, default=1,
-                    help='which BH iter to break down (default: 1 — second iter, post-JIT warmup)')
+    ap.add_argument('--iter', type=int, default=None,
+                    help='which BH iter to break down (default: the last one in the log)')
     args = ap.parse_args()
     sys.exit(report(args.log, args.iter))
 

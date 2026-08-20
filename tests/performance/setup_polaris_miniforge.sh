@@ -37,8 +37,61 @@ if [ -z "$HDF5_PREFIX" ] || [ ! -d "$HDF5_PREFIX/include" ]; then
 fi
 echo "=== HDF5 prefix: $HDF5_PREFIX"
 
+# --- keep one GCC/MPI ABI across mpi4py, h5py and cray-mpich ---------------
+# cray-hdf5-parallel ships a build per GCC ABI and its prefix ends in the one
+# it was compiled with (.../gnu/12.3).  Lmod's default gcc-native may be newer;
+# then libhdf5.so wants libmpi_gnu_123.so.12 while `cc` links libmpi_gnu_<new>,
+# and the rank loads two MPI libraries.  Pin GCC to the HDF5 build if we can.
+HDF5_GCC=$(echo "$HDF5_PREFIX" | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/?$|\1|p')
+CUR_GCC=$(module -t --redirect list 2>/dev/null | sed -nE 's|^gcc-native/(.*)$|\1|p')
+if [ -n "$HDF5_GCC" ] && [ "${CUR_GCC%%.*}" != "${HDF5_GCC%%.*}" ]; then
+    echo "=== gcc-native/${CUR_GCC:-?} loaded but HDF5 is a gnu/${HDF5_GCC} build; pinning GCC"
+    if   module load "gcc-native/${HDF5_GCC}"      2>/dev/null; then :
+    elif module load "gcc-native/${HDF5_GCC%%.*}"  2>/dev/null; then :
+    else
+        echo "    WARNING: no gcc-native/${HDF5_GCC} module.  Continuing on gcc-native/${CUR_GCC}." >&2
+        echo "             If ranks later fail on 'libmpi_gnu_*.so: cannot open shared" >&2
+        echo "             object file', env_polaris.sh repairs it via LD_LIBRARY_PATH." >&2
+    fi
+fi
+echo "=== cray-mpich ABI dirs available:"
+ls -1d /opt/cray/pe/mpich/*/ofi/gnu/*/lib 2>/dev/null | sed 's/^/    /' || echo "    (none found)"
+
 # --- conda env -------------------------------------------------------------
-source "$MINIFORGE/bin/activate"
+# Locate a conda: $MINIFORGE, then the usual install spots, then one already
+# on PATH (e.g. an interactive shell that has run `conda activate` by hand).
+CONDA_SH=""
+for cand in "$MINIFORGE" "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/mambaforge" "$HOME/anaconda3"; do
+    if [ -f "$cand/etc/profile.d/conda.sh" ]; then CONDA_SH="$cand/etc/profile.d/conda.sh"; break; fi
+done
+if [ -z "$CONDA_SH" ] && command -v conda >/dev/null 2>&1; then
+    CONDA_SH="$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh"
+    [ -f "$CONDA_SH" ] || CONDA_SH=""
+fi
+if [ -z "$CONDA_SH" ]; then
+    cat >&2 <<'MSG'
+ERROR: no conda installation found.
+
+Install miniforge first (from a login node, takes ~2 min):
+
+    cd ~
+    wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+    bash Miniforge3-Linux-x86_64.sh -b -p $HOME/miniforge3
+    $HOME/miniforge3/bin/conda create -y -n myenv python=3.11
+
+then re-run this script.  If conda is somewhere else, point at it:
+
+    MINIFORGE=/path/to/miniforge3 bash setup_polaris_miniforge.sh
+MSG
+    exit 1
+fi
+echo "=== conda: $CONDA_SH"
+. "$CONDA_SH"
+
+if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+    echo "=== creating conda env '$ENV_NAME' (python 3.11)"
+    conda create -y -n "$ENV_NAME" python=3.11
+fi
 conda activate "$ENV_NAME"
 echo "=== python: $(command -v python)  $(python -V 2>&1)"
 

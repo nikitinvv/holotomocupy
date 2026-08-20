@@ -20,11 +20,33 @@ module load PrgEnv-gnu
 module load cray-hdf5-parallel
 module load cudatoolkit-standalone       # nvcc for the cuFFTDx JIT
 
-if [ ! -f "${MINIFORGE}/bin/activate" ]; then
-    echo "ERROR: no miniforge at ${MINIFORGE}; run setup_polaris_miniforge.sh first." >&2
+# Same GCC pin as setup_polaris_miniforge.sh: the cray-hdf5-parallel prefix
+# ends in the GCC ABI it was built for, and mpi4py/h5py were compiled under
+# that ABI.  Lmod's default gcc-native may be newer, which moves the cray-mpich
+# lib dir out from under them.
+HDF5_PREFIX=${HDF5_ROOT:-${CRAY_HDF5_PARALLEL_PREFIX:-${HDF5_DIR:-}}}
+HDF5_GCC=$(echo "${HDF5_PREFIX}" | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/?$|\1|p')
+CUR_GCC=$(module -t --redirect list 2>/dev/null | sed -nE 's|^gcc-native/(.*)$|\1|p')
+if [ -n "${HDF5_GCC}" ] && [ "${CUR_GCC%%.*}" != "${HDF5_GCC%%.*}" ]; then
+    module load "gcc-native/${HDF5_GCC}" 2>/dev/null \
+        || module load "gcc-native/${HDF5_GCC%%.*}" 2>/dev/null \
+        || echo "NOTE: no gcc-native/${HDF5_GCC}; relying on the ABI repair below."
+fi
+
+# Locate conda: $MINIFORGE, then the usual install spots, then one on PATH.
+CONDA_SH=""
+for cand in "${MINIFORGE}" "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/mambaforge" "$HOME/anaconda3"; do
+    if [ -f "${cand}/etc/profile.d/conda.sh" ]; then CONDA_SH="${cand}/etc/profile.d/conda.sh"; break; fi
+done
+if [ -z "${CONDA_SH}" ] && command -v conda >/dev/null 2>&1; then
+    CONDA_SH="$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh"
+    [ -f "${CONDA_SH}" ] || CONDA_SH=""
+fi
+if [ -z "${CONDA_SH}" ]; then
+    echo "ERROR: no conda found; run setup_polaris_miniforge.sh first." >&2
     exit 1
 fi
-. "${MINIFORGE}/bin/activate"
+. "${CONDA_SH}"
 conda activate "${ENV_NAME}"
 
 # mpi4py ABI check: PrgEnv/gcc-native bumps move the cray-mpich lib dir and the

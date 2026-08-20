@@ -38,13 +38,16 @@ if [ -n "${HDF5_GCC}" ] && [ "$(echo "${MPICH_ABIS}" | wc -l)" -gt 1 ] \
         || echo "NOTE: no gcc-native/${HDF5_GCC}; relying on the ABI repair below."
 fi
 
-# A venv (the fallback setup_polaris_miniforge.sh uses when conda cannot
-# create an env on a login node) wins over a conda env of the same name.
-VENV_DIR=${VENV_DIR:-$HOME/venvs/${ENV_NAME}}
-if [ -f "${VENV_DIR}/bin/activate" ]; then
-    . "${VENV_DIR}/bin/activate"
-    HTC_ENV_KIND="venv ${VENV_DIR}"
-fi
+# Prefer a venv built by setup_polaris_miniforge.sh.  htc-site (over the ALCF
+# conda, inheriting its Cray mpi4py / parallel h5py / cupy) before htc-forge
+# (miniforge with those compiled locally); an explicit VENV_DIR beats both.
+for cand in ${VENV_DIR:-} "$HOME/venvs/htc-site" "$HOME/venvs/htc-forge" "$HOME/venvs/${ENV_NAME}"; do
+    if [ -n "${cand}" ] && [ -f "${cand}/bin/activate" ]; then
+        . "${cand}/bin/activate"
+        HTC_ENV_KIND="venv ${cand}"
+        break
+    fi
+done
 
 # Locate conda: $MINIFORGE, then the usual install spots, then one on PATH.
 CONDA_SH=""

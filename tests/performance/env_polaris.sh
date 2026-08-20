@@ -38,6 +38,14 @@ if [ -n "${HDF5_GCC}" ] && [ "$(echo "${MPICH_ABIS}" | wc -l)" -gt 1 ] \
         || echo "NOTE: no gcc-native/${HDF5_GCC}; relying on the ABI repair below."
 fi
 
+# A venv (the fallback setup_polaris_miniforge.sh uses when conda cannot
+# create an env on a login node) wins over a conda env of the same name.
+VENV_DIR=${VENV_DIR:-$HOME/venvs/${ENV_NAME}}
+if [ -f "${VENV_DIR}/bin/activate" ]; then
+    . "${VENV_DIR}/bin/activate"
+    HTC_ENV_KIND="venv ${VENV_DIR}"
+fi
+
 # Locate conda: $MINIFORGE, then the usual install spots, then one on PATH.
 CONDA_SH=""
 for cand in "${MINIFORGE}" "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/mambaforge" "$HOME/anaconda3"; do
@@ -47,12 +55,16 @@ if [ -z "${CONDA_SH}" ] && command -v conda >/dev/null 2>&1; then
     CONDA_SH="$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh"
     [ -f "${CONDA_SH}" ] || CONDA_SH=""
 fi
-if [ -z "${CONDA_SH}" ]; then
-    echo "ERROR: no conda found; run setup_polaris_miniforge.sh first." >&2
-    exit 1
+if [ -z "${HTC_ENV_KIND:-}" ]; then
+    if [ -z "${CONDA_SH}" ]; then
+        echo "ERROR: no venv at ${VENV_DIR} and no conda found;" >&2
+        echo "       run setup_polaris_miniforge.sh first." >&2
+        exit 1
+    fi
+    . "${CONDA_SH}"
+    conda activate "${ENV_NAME}"
+    HTC_ENV_KIND="conda ${ENV_NAME}"
 fi
-. "${CONDA_SH}"
-conda activate "${ENV_NAME}"
 
 # mpi4py ABI check: PrgEnv/gcc-native bumps move the cray-mpich lib dir and the
 # extension then fails to load at rank start, deep inside the job.  Catch it here.
@@ -87,6 +99,7 @@ export CUFFTDX_SO_DIR=${CUFFTDX_SO_DIR:-$HOME/.cache/holotomocupy_cufftdx}
 mkdir -p "${CUFFTDX_SO_DIR}"
 
 set -eu
+echo "env:         ${HTC_ENV_KIND}"
 echo "python:      $(command -v python)"
 echo "nvcc:        ${NVCC:-<none>}"
 echo "MATHDX_ROOT: ${MATHDX_ROOT}"

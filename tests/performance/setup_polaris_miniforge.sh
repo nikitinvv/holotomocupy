@@ -89,14 +89,52 @@ fi
 echo "=== conda: $CONDA_SH"
 . "$CONDA_SH"
 
-if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+# Polaris login nodes cap processes/threads per user, and a VS Code remote
+# server eats a large share of it.  conda 26.x's sharded-repodata solver opens
+# a thread pool per channel and dies with "RuntimeError: can't start new
+# thread" when the budget is gone.  Raise the soft limit to the hard one and
+# make conda single-threaded.
+ulimit -u "$(ulimit -Hu)" 2>/dev/null || true
+echo "=== nproc limit: soft=$(ulimit -Su) hard=$(ulimit -Hu); threads in use by $USER: $(ps -u "$USER" -L --no-headers 2>/dev/null | wc -l)"
+export CONDA_FETCH_THREADS=1
+export CONDA_NUMBER_CHANNEL_NOTICES=0
+
+VENV_DIR=${VENV_DIR:-$HOME/venvs/$ENV_NAME}
+
+if [ -f "$VENV_DIR/bin/activate" ]; then
+    echo "=== activating existing venv $VENV_DIR"
+    . "$VENV_DIR/bin/activate"
+elif conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+    conda activate "$ENV_NAME"
+elif [ "${USE_VENV:-0}" = "1" ]; then
+    echo "=== creating venv $VENV_DIR from base python ($(python -V 2>&1))"
+    mkdir -p "$(dirname "$VENV_DIR")"
+    python -m venv "$VENV_DIR"
+    . "$VENV_DIR/bin/activate"
+else
     echo "=== creating conda env '$ENV_NAME' (python 3.11)"
-    # -c conda-forge explicitly: a ~/.condarc that sets `channels: []` (or a
-    # miniforge install whose channel defaults did not get written) makes a
-    # bare `conda create` fail with NoChannelsConfiguredError.
-    conda create -y -n "$ENV_NAME" -c conda-forge --override-channels python=3.11
+    # -c conda-forge explicitly: a ~/.condarc with no channels makes a bare
+    # `conda create` fail with NoChannelsConfiguredError.
+    if ! conda create -y -n "$ENV_NAME" -c conda-forge --override-channels python=3.11; then
+        echo "=== libmamba solve failed; retrying with the classic solver"
+        if ! CONDA_SOLVER=classic conda create -y -n "$ENV_NAME" \
+                 -c conda-forge --override-channels python=3.11; then
+            # Both solvers need the thread pool.  A venv over the miniforge base
+            # python needs no solver at all, and everything this package uses is
+            # pip-installed anyway -- conda was only ever supplying the
+            # interpreter.  Base python is 3.13; all deps have cp313 wheels or
+            # are built from source here regardless.
+            echo "=== conda cannot create an env on this node; falling back to a venv"
+            mkdir -p "$(dirname "$VENV_DIR")"
+            python -m venv "$VENV_DIR"
+            . "$VENV_DIR/bin/activate"
+        else
+            conda activate "$ENV_NAME"
+        fi
+    else
+        conda activate "$ENV_NAME"
+    fi
 fi
-conda activate "$ENV_NAME"
 echo "=== python: $(command -v python)  $(python -V 2>&1)"
 
 # Nothing below uses `conda install`.  Adding conda-forge mpich, hdf5 or

@@ -14,8 +14,8 @@ set -eu
 cd "$(dirname "$(readlink -f "$0")")"
 
 NP=4                                # ranks = GPUs
-N=512                               # detector size (nz = n)
-NTHETA=$(( 3 * N / 4 ))             # projection angles
+N=2048                               # detector size (nz = n)
+NTHETA=$(( 1800 * N / 2048 ))       # projection angles (1800 at n = 2048)
 # Theta chunk size, the main perf knob.  The chunking pool scales as
 # nchunk * nobj^2 (nobj = 1.59n), so it has to come down fast as n grows.
 # Powers of two, from the 80 GB / 8-rank-node table in Readme.md:

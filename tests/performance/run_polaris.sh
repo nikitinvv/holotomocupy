@@ -20,13 +20,11 @@
 
 set -eu
 cd "${PBS_O_WORKDIR:-$(dirname "$(readlink -f "$0")")}"
-# Environment: conda + venv + MATHDX_ROOT, and (temporarily) the mpich ABI
-# repair the August 2026 maintenance made necessary.  Kept in one file so the
-# ranks never depend on ~/.bashrc -- see env_polaris.sh.
-. ./env_polaris.sh
+[ -f ./env_polaris.sh ] && . ./env_polaris.sh
+
 
 N=512                               # detector size (nz = n)
-NTHETA=$(( 3 * N / 4 ))             # projection angles
+NTHETA=$(( 1800 * N / 2048 ))       # projection angles (1800 at n = 2048)
 # Theta chunk size for a 40 GB A100 -- powers of two, with the node count the
 # Polaris table in Readme.md pairs them with:
 #     n         512   1024   2048   4096

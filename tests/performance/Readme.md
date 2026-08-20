@@ -30,14 +30,14 @@ edits or a few copies of the file.
 
 Single rank:
 ```bash
-python test.py --n 2048 --ntheta 1536 --nchunk 4
+python test.py --n 2048 --ntheta 1800 --nchunk 4
 python parse_perf_log.py perf.log
 ```
 
 Multi-rank with one GPU per local rank (round-robin pinning):
 ```bash
 mpirun -np 8 ./set_affinity_gpu.sh \
-    python test.py --n 2048 --ntheta 1536 --nchunk 4 --log log2048_8
+    python test.py --n 2048 --ntheta 1800 --nchunk 4 --log log2048_8
 python parse_perf_log.py log2048_8
 ```
 
@@ -279,7 +279,7 @@ catches a bad `nchunk` before it costs you an allocation:
 
 # or, without editing anything, straight from the tables:
 python test_mosaic.py --bin 1 --ntile-v 2 --nchunk 4 --nranks 64 --plan
-python test.py --n 4096 --ntheta 3072 --nchunk 4 --nranks 64 --plan
+python test.py --n 4096 --ntheta 3600 --nchunk 4 --nranks 64 --plan
 ```
 
 Compare the `TOTAL` lines against the tables below. Remember the GPU total is a
@@ -360,7 +360,7 @@ run () {                                    # n, nchunk, [extra flags]
     n=$1; nc=$2; shift 2
     log="log${n}_${nc}"
     srun -n "$SLURM_NTASKS" ./set_affinity_gpu.sh \
-        python test.py --n "$n" --ntheta "$(( 3 * n / 4 ))" --nchunk "$nc" \
+        python test.py --n "$n" --ntheta "$(( 1800 * n / 2048 ))" --nchunk "$nc" \
                        --niter 2 --log "$log" "$@"
     python parse_perf_log.py "$log"
 }
@@ -370,8 +370,8 @@ run 1024 16
 run 2048 16
 ```
 
-n = 2048 sits at 1364 GB of 2 TB on one node — if the queue allows, give it
-`--nodes=2` and it drops to 683 GB (`nchunk` stays 16; GPU memory does not
+n = 2048 sits at 1464 GB of 2 TB on one node — if the queue allows, give it
+`--nodes=2` and it drops to 735 GB (`nchunk` stays 16; GPU memory does not
 divide by node count).
 
 **Job 5 — single tile, 4096 (8 nodes) and 8192 (64–128 nodes).** 8192 is the
@@ -380,11 +380,11 @@ an 80 GB card at all.
 
 ```bash
 run 4096 4                                  # --nodes=8
-run 8192 1 --ndistchunk 2                   # --nodes=64, 1427 GB/node
+run 8192 1 --ndistchunk 2                   # --nodes=64, 1563 GB/node
 ```
 
 If even 64 nodes is out of reach, run 8192 with fewer angles —
-`python test.py --n 8192 --ntheta 1536 --nchunk 1 --ndistchunk 2 ...` — and say
+`python test.py --n 8192 --ntheta 1800 --nchunk 1 --ndistchunk 2 ...` — and say
 so in the report. The breakdown is still meaningful; the absolute time is just
 not comparable to the rest of the sweep.
 
@@ -481,32 +481,33 @@ scaling studies. If you have fewer nodes than the table asks for, cut
 ### Recommended settings — B. Single tile
 
 `n` is the detector size; the object is `nobj = nzobj = 1.59 n` cubed and
-`ntheta = 3n/4`, both set by `run.sh`. `ndist` is always 4.
+`ntheta = 1800 n / 2048` — 1800 angles at n = 2048, halving with n — both set
+by `run.sh`. `ndist` is always 4.
 
 | n | nobj | ntheta | nodes | ranks | lth | `--nchunk` | `--ndistchunk` | host/rank | host/node | plan GPU | ~actual GPU |
 |---|------|--------|-------|-------|-----|-----------|----------------|-----------|-----------|----------|-------------|
-| 512 | 816 | 384 | 1 | 8 | 48 | 8 | 4 | 2.7 GB | 21 GB | 0.6 GB | ~2 GB |
-|   |   |   | 2 | 16 | 24 | 4 | 4 | 1.4 GB | 11 GB | 0.3 GB | ~1 GB |
-| 1024 | 1632 | 768 | 1 | 8 | 96 | 16 | 4 | 21.4 GB | 171 GB | 4.9 GB | ~15 GB |
-|   |   |   | 2 | 16 | 48 | 8 | 4 | 10.7 GB | 86 GB | 2.5 GB | ~7 GB |
-| 2048 | 3264 | 1536 | 1 | 8 | 192 | 16 | 4 | 170.5 GB | 1364 GB | 19.5 GB | ~58 GB |
-|   |   |   | 2 | 16 | 96 | 16 | 4 | 85.4 GB | 683 GB | 19.5 GB | ~58 GB |
-| 4096 | 6528 | 3072 | 8 | 64 | 48 | 4 | 4 | 171.6 GB | 1373 GB | 20.8 GB | ~62 GB |
-|   |   |   | 16 | 128 | 24 | 4 | 4 | 86.6 GB | 692 GB | 20.8 GB | ~62 GB |
-| 8192 | 13056 | 6144 | 64 | 512 | 12 | 1 | 2 | 178.3 GB | 1427 GB | 22.0 GB | ~66 GB |
-|   |   |   | 128 | 1024 | 6 | 1 | 2 | 92.2 GB | 737 GB | 22.0 GB | ~66 GB |
+| 512 | 816 | 450 | 1 | 8 | 57 | 8 | 4 | 2.9 GB | 23 GB | 0.6 GB | ~2 GB |
+|   |   |   | 2 | 16 | 29 | 4 | 4 | 1.5 GB | 12 GB | 0.3 GB | ~1 GB |
+| 1024 | 1632 | 900 | 1 | 8 | 113 | 16 | 4 | 23.0 GB | 184 GB | 4.9 GB | ~15 GB |
+|   |   |   | 2 | 16 | 57 | 8 | 4 | 11.6 GB | 93 GB | 2.5 GB | ~8 GB |
+| 2048 | 3264 | 1800 | 1 | 8 | 225 | 16 | 4 | 183.0 GB | 1464 GB | 19.6 GB | ~59 GB |
+|   |   |   | 2 | 16 | 113 | 16 | 4 | 91.9 GB | 735 GB | 19.6 GB | ~59 GB |
+| 4096 | 6528 | 3600 | 8 | 64 | 57 | 4 | 4 | 185.1 GB | 1480 GB | 20.9 GB | ~63 GB |
+|   |   |   | 16 | 128 | 29 | 4 | 4 | 93.9 GB | 751 GB | 20.9 GB | ~63 GB |
+| 8192 | 13056 | 7200 | 64 | 512 | 15 | 1 | 2 | 195.4 GB | 1563 GB | 22.1 GB | ~66 GB |
+|   |   |   | 128 | 1024 | 8 | 1 | 2 | 103.1 GB | 825 GB | 22.1 GB | ~66 GB |
 
 Notes on this sweep:
 
 * 512 / 1024 / 2048 all fit on **one node**. 2048 is the tight one at 1 node
-  (1364 GB of 2 TB) — use 2 nodes if the allocation allows.
+  (1464 GB of 2 TB) — use 2 nodes if the allocation allows.
 * **4096 needs 8 nodes**, host-bound.
 * **8192 is the hard one** and is GPU-bound, not host-bound: even at
   `nchunk = 1` the object-plane buffers (`nobj = 13056`) dominate. It needs
   `--ndistchunk 2` to fit an 80 GB card at all. 64 nodes is the practical
-  minimum (1427 GB/node); 192 nodes is the most that is allowed, since at 256
-  `lth` would fall to 3 and rule 2 below rejects it. If 8192 is out of reach
-  for your allocation, **run it with a reduced `--ntheta`** and say so in the
+  minimum (1563 GB/node); 225 nodes is the most that is allowed, since past
+  1800 ranks `lth` falls to 3 and rule 2 below rejects it. If 8192 is out of
+  reach for your allocation, **run it with a reduced `--ntheta`** and say so in the
   report — the timing breakdown is still meaningful, the absolute numbers just
   are not comparable to the others.
 
@@ -684,19 +685,19 @@ card.
 
 | n | nobj | ntheta | nodes (`select=`) | ranks | lth | `NCHUNK` | `--ndistchunk` | host/rank | host/node | plan GPU | ~actual GPU |
 |---|------|--------|-------|-------|-----|-----------|----------------|-----------|-----------|----------|-------------|
-| 512 | 816 | 384 | 1 | 4 | 96 | 16 | 4 | 5.3 GB | 21 GB | 1.2 GB | ~4 GB |
-|   |   |   | 4 | 16 | 24 | 4 | 4 | 1.4 GB | 5 GB | 0.3 GB | ~1 GB |
-| 1024 | 1632 | 768 | 1 | 4 | 192 | 32 | 4 | 42.6 GB | 170 GB | 9.6 GB | ~29 GB |
-|   |   |   | 2 | 8 | 96 | 16 | 4 | 21.4 GB | 85 GB | 4.9 GB | ~15 GB |
-| 2048 | 3264 | 1536 | 4 | 16 | 96 | 8 | 4 | 85.4 GB | 342 GB | 10.0 GB | ~30 GB |
-|   |   |   | 8 | 32 | 48 | 8 | 4 | 42.9 GB | 172 GB | 10.0 GB | ~30 GB |
-| 4096 | 6528 | 3072 | 32 | 128 | 24 | 2 | 4 | 86.6 GB | 346 GB | 11.3 GB | ~34 GB |
-|   |   |   | 64 | 256 | 12 | 2 | 4 | 44.6 GB | 178 GB | 11.3 GB | ~34 GB |
-| 8192 | 13056 | 6144 | — | — | — | — | — | — | — | 20.0 GB | **does not fit** |
+| 512 | 816 | 450 | 1 | 4 | 113 | 16 | 4 | 5.7 GB | 23 GB | 1.2 GB | ~4 GB |
+|   |   |   | 2 | 8 | 57 | 8 | 4 | 2.9 GB | 12 GB | 0.6 GB | ~2 GB |
+| 1024 | 1632 | 900 | 1 | 4 | 225 | 32 | 4 | 45.8 GB | 183 GB | 9.7 GB | ~29 GB |
+|   |   |   | 2 | 8 | 113 | 16 | 4 | 23.0 GB | 92 GB | 4.9 GB | ~15 GB |
+| 2048 | 3264 | 1800 | 4 | 16 | 113 | 8 | 4 | 91.9 GB | 367 GB | 10.0 GB | ~30 GB |
+|   |   |   | 8 | 32 | 57 | 8 | 4 | 46.3 GB | 185 GB | 10.0 GB | ~30 GB |
+| 4096 | 6528 | 3600 | 32 | 128 | 29 | 2 | 4 | 93.9 GB | 376 GB | 11.3 GB | ~34 GB |
+|   |   |   | 64 | 256 | 15 | 2 | 4 | 48.9 GB | 195 GB | 11.3 GB | ~34 GB |
+| 8192 | 13056 | 7200 | — | — | — | — | — | — | — | 20.1 GB | **does not fit** |
 
 The single-node `n = 1024` row (`nchunk 32`, ~29 GB of 40) is the tightest
 entry in either table; drop to 16 if it OOMs. n = 2048 does not fit on fewer
-than 4 nodes (2 nodes would be 682 GB against 512).
+than 4 nodes (2 nodes would be 732 GB against 512).
 
 #### What does not fit a 40 GB card
 
@@ -712,7 +713,7 @@ object grid.
   `[1, 24576, 24576]` tomo FDE buffer (4.5 GB). Both scale with `nobj`, which no
   flag shrinks.
 * **Single tile n = 8192** — object `13056³`. The floor at
-  `nchunk = 1 --ndistchunk 1` is 20.0 GB, ~60 GB actual. Unlike on the H100,
+  `nchunk = 1 --ndistchunk 1` is 20.1 GB, ~60 GB actual. Unlike on the H100,
   cutting `--ntheta` does not rescue it: only the `tomo sino` buffer depends on
   `ntheta`, and it is well under a gigabyte.
 
@@ -818,7 +819,7 @@ A 4× cut in angles buys 33 %. To get bin 1 onto fewer nodes, drop tiles
 2. **`lth ≥ 4`.** `rec_mpi` asserts `local_ntheta != 3`. Since
    `lth ≈ ntheta/nranks`, that caps useful ranks at `ntheta/4`: 187 at bin 3,
    375 at bin 2, 750 at bin 1, 1500 at bin 0 for the mosaic; with
-   `ntheta = 3n/4`, 96 / 192 / 384 / 768 / 1536 for single-tile
+   `ntheta = 1800 n / 2048`, 112 / 225 / 450 / 900 / 1800 for single-tile
    n = 512 … 8192.
 3. **`ndistchunk ≠ lth`.** The chunking layer tells theta-chunked arrays from
    broadcast ones by comparing `shape[0]` to the chunk size, so a distance
@@ -832,7 +833,7 @@ anything. Both scripts have it:
 
 ```bash
 python test_mosaic.py --bin 1 --nchunk 4 --nranks 32 --plan
-python test.py --n 8192 --ntheta 6144 --nchunk 1 --ndistchunk 2 --nranks 1024 --plan
+python test.py --n 8192 --ntheta 7200 --nchunk 1 --ndistchunk 2 --nranks 1024 --plan
 ./run_mosaic.sh --plan          # whatever BIN / NCHUNK the script says
 ./run.sh --plan                 # whatever N / NCHUNK the script says
 ./run_mosaic_polaris.sh --plan  # same, on a login node

@@ -20,10 +20,7 @@
 
 set -eu
 cd "${PBS_O_WORKDIR:-$(dirname "$(readlink -f "$0")")}"
-# Environment: conda + venv + MATHDX_ROOT, and (temporarily) the mpich ABI
-# repair the August 2026 maintenance made necessary.  Kept in one file so the
-# ranks never depend on ~/.bashrc -- see env_polaris.sh.
-. ./env_polaris.sh
+[ -f ./env_polaris.sh ] && . ./env_polaris.sh
 
 BIN=3                               # n = nz = 2048>>bin, ntheta = 6000>>bin
 NTILE_V=1                           # tile rows

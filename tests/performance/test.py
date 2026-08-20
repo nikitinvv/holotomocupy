@@ -2,10 +2,16 @@
 """
 Multi-distance holotomography performance benchmark on fully-synthetic data.
 
-Generates everything in-process (no Reader / h5 I/O): probe per distance,
-3-D tomographic object slab, rotation angles, positions. Forward-models
-sqrt(intensity) + sqrt(reference) via Rec.gen_sqrt_data / Rec.cl_prb_term.gen_sqrt_ref,
-then runs BH for `--niter` iterations and prints a timing summary.
+Generates everything in-process (no Reader / h5 I/O): rotation angles,
+positions, and a random sqrt(intensity) data array. Like test_mosaic.py,
+nothing is forward-modelled -- there is no object to synthesize and no
+Rec.gen_sqrt_data pass. The reconstruction starts from scratch (zero object,
+flat probe) exactly as a from-scratch production run does, then runs BH for
+`--niter` iterations and prints a timing summary.
+
+The point is the cost of one BH iteration at this size; BH runs a fixed number
+of iterations regardless of the values, so random data times the same as real
+data and costs a fraction of the memory and setup to produce.
 
 Launch with:
     mpirun -n <N> python rec_iterative_mpi_syn.py --n 1024 --ntheta 64 --nchunk 4
@@ -269,87 +275,62 @@ cl = Rec(args)
 
 
 # ── Synthetic inputs ────────────────────────────────────────────────────────
-# Reproducibility model:
-#   * single MASTER_SEED — same on every rank, every machine
-#   * SeedSequence.spawn() produces three top-level streams (prb / obj / pos)
-#   * each is then spawned into one independent sub-seed per GLOBAL index
-#     (distance / z-slice / theta) so the synthetic data depends only on the
-#     global index, NOT on how MPI happens to split the work
-#   * random numbers are drawn on the CPU via numpy.default_rng — that's
-#     bit-stable across NumPy versions and machines (cp.random would not be)
-#   * no FFTs are used in the synthesis — everything is direct random fill
+# Reproducibility model (same as test_mosaic.py): one MASTER_SEED,
+# SeedSequence.spawn() per GLOBAL theta index, so the inputs depend only on the
+# global index and not on how MPI splits the work.  Random numbers are drawn on
+# the CPU via numpy.default_rng — bit-stable across NumPy versions and machines
+# (cp.random would not be).
+#
+# Nothing is forward-modelled.  Drawing a full random data array would be
+# several hundred GB of RNG at the large sizes, so one random frame per distance
+# is drawn once and modulated by a per-angle scalar: cheap, rank-count
+# independent, and non-degenerate, which is all the solver needs.
 MASTER_SEED = 20260525
-_ss_root                  = np.random.SeedSequence(MASTER_SEED)
-_ss_prb, _ss_obj, _ss_pos = _ss_root.spawn(3)
+_ss_root         = np.random.SeedSequence(MASTER_SEED)
+_ss_pos, _ss_dat = _ss_root.spawn(2)
 
 
-# Probe per distance: Gaussian-envelope amplitude × small random phase.
-# No FFTs — direct random fill, scaled to keep |prb| ~ 1.
-def synth_prb(nz, n, ndist, ss):
-    v  = np.linspace(-0.5, 0.5, n,  endpoint=False, dtype='float32')
-    u  = np.linspace(-0.5, 0.5, nz, endpoint=False, dtype='float32')
-    vy, vx = np.meshgrid(u, v, indexing='ij')
-    amp = np.exp(-2 * (vx**2 + vy**2)).astype('float32')
-    out = np.empty((ndist, nz, n), dtype='complex64')
-    seeds_per_dist = ss.spawn(ndist)
-    for j, sseed in enumerate(seeds_per_dist):
-        ph = 0.1 * np.random.default_rng(sseed).standard_normal((nz, n), dtype='float32')
-        p  = (amp * np.exp(1j * ph)).astype('complex64')
-        p /= np.mean(np.abs(p))                              # |prb| ~ 1
-        out[j] = p
-    return out
-
-
-# Object slab [st:end) of the GLOBAL nzobj × nobj × nobj volume.
-# Plain random fill (no FFT smoothing) — fast, and bit-reproducible because
-# each global slice is drawn from its own seed spawned off MASTER_SEED.
-def synth_obj(st, end, nzobj_global, nobj, ss, dtype):
-    out_dtype = 'complex64' if dtype == 'complex64' else 'float32'
-    out = np.empty((end - st, nobj, nobj), dtype=out_dtype)
-    if end - st == 0:
-        return out
-
-    slice_seeds = ss.spawn(nzobj_global)[st:end]
-    is_cplx     = (dtype == 'complex64')
-    scale       = np.float32(1e-3)
-
-    for k, sseed in enumerate(slice_seeds):
-        rng_k = np.random.default_rng(sseed)
-        re = rng_k.standard_normal((nobj, nobj), dtype='float32') * scale
-        if is_cplx:
-            im = rng_k.standard_normal((nobj, nobj), dtype='float32') * (scale / np.float32(30))
-            out[k] = (-re + 1j * im).astype('complex64')
-        else:
-            out[k] = -re
-    return out
-
-
-# Positions for global theta range [st:end). Dist-major layout to match Rec.
-def synth_pos(st, end, ntheta_global, ndist, ss):
-    if end - st == 0:
+def synth_pos(st, end, ntheta_global, ss):
+    """[ndist, local_ntheta, 2] positions for global theta range [st:end)."""
+    nl = end - st
+    if nl == 0:
         return np.empty((ndist, 0, 2), dtype='float32')
-    theta_seeds = ss.spawn(ntheta_global)[st:end]
-    out = np.empty((ndist, end - st, 2), dtype='float32')
-    for j, sseed in enumerate(theta_seeds):
-        out[:, j] = (10.0 * (np.random.default_rng(sseed).random((ndist, 2), dtype='float32') - 0.5))
+    out = np.empty((ndist, nl, 2), dtype='float32')
+    for j, sseed in enumerate(ss.spawn(ntheta_global)[st:end]):
+        out[:, j] = 10.0 * (np.random.default_rng(sseed).random((ndist, 2),
+                                                                dtype='float32') - 0.5)
     return out
 
 
-cl.vars['prb'][:] = synth_prb(nz, n, ndist, _ss_prb)   # vars['prb'] is pinned numpy
-cl.vars['obj'][:] = synth_obj(cl.st_obj,   cl.end_obj,   nzobj,  nobj, _ss_obj, obj_dtype)
-cl.vars['pos'][:] = synth_pos(cl.st_theta, cl.end_theta, ntheta, ndist, _ss_pos)
+def synth_data(out, st, end, ntheta_global, ss):
+    """Fill the pinned [ndist, local_ntheta, nz, n] sqrt-intensity buffer.
+
+    One random frame per distance, scaled by a per-(angle, distance) factor —
+    a memory-bandwidth-bound fill rather than several hundred GB of RNG.
+    """
+    nl = end - st
+    if nl == 0:
+        return
+    frames = np.empty((ndist, nz, n), dtype='float32')
+    fr_rng = np.random.default_rng(np.random.SeedSequence(MASTER_SEED + 2))
+    for k in range(ndist):
+        frames[k] = 0.9 + 0.2 * fr_rng.random((nz, n), dtype='float32')
+    for j, sseed in enumerate(ss.spawn(ntheta_global)[st:end]):
+        s = np.random.default_rng(sseed).uniform(0.95, 1.05, ndist).astype('float32')
+        for k in range(ndist):
+            np.multiply(frames[k], s[k], out=out[k, j])
 
 
-# ── Forward-model synthetic data + reference ────────────────────────────────
-comm.Barrier()
-cl.gen_sqrt_data(cl.vars, cl.data)
-cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
+# vars['obj'] is left at the zero alloc_arrays made: the reconstruction starts
+# from scratch.  Nothing is forward-modelled, so there is no object to
+# synthesize and no probe to recover from.
+logger.info("synthesize positions")
+cl.vars['pos'][:] = synth_pos(cl.st_theta, cl.end_theta, ntheta, _ss_pos)
+cl.vars['prb'][:] = 1                                   # flat probe
 
-
-# ── Initial guess: zero obj, unit prb, slightly-perturbed pos ──────────────
-cl.vars['obj'][:] = 0
-cl.vars['prb'][:] = 1
-# Keep cl.vars['pos'] as the synthetic positions (matches the data) — Rec recovers from them as init
+logger.info("synthesize data")
+synth_data(cl.data, cl.st_theta, cl.end_theta, ntheta, _ss_dat)
+cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)     # ref = |D.prb| for prb = 1
 
 
 # ── Time BH ────────────────────────────────────────────────────────────────

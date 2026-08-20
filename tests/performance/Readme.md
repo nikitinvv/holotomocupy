@@ -7,7 +7,7 @@ that summarises one BH iteration.
 
 | file | purpose |
 |------|---------|
-| `test.py`              | the benchmark — generates phantom, probe, positions, runs `Rec.BH()`, writes a perf log |
+| `test.py`              | the benchmark — generates positions + random data, runs `Rec.BH()`, writes a perf log |
 | `test_mosaic.py`       | the same benchmark for a MOSAIC scan (default 1 × 5 tiles × 4 distances = 20 distances over one wide object; `--ntile-v 2` gives 40) |
 | `run_mosaic.sh`        | drives `test_mosaic.py` over a list of binning levels, then parses each log |
 | `run.sh`               | the same for `test.py`, over a list of detector sizes (512 … 8192) |
@@ -58,9 +58,16 @@ are hardcoded at the top of `test.py` — edit there. Defaults are:
 `nobj = 3264·n/2048` (scales linearly with `n`, matches the brain-Y350 config),
 `lam_prbfit = lam_laplacian = 0`, `checkpoint_step = -1`, `error_step = 1`.
 
-The synthesised inputs (probe, object slab, positions) are deterministic
-across machines and rank counts — seeded from a single `MASTER_SEED` via
-`numpy.SeedSequence.spawn()` per global slice/distance/theta index.
+Nothing is forward-modelled, the same as `test_mosaic.py`: the object stays at
+the zero `Rec` allocated, the probe is flat, and `data` is filled with one
+random frame per distance modulated by a per-angle scalar. BH runs a fixed
+number of iterations regardless of the values, so this times identically to
+real data while skipping the object synthesis and the `gen_sqrt_data` forward
+pass — which at `n = 8192` is the difference between a long startup and none.
+
+The synthesised inputs (positions, data) are deterministic across machines and
+rank counts — seeded from a single `MASTER_SEED` via
+`numpy.SeedSequence.spawn()` per global theta index.
 
 ## Mosaic benchmark — `test_mosaic.py`
 

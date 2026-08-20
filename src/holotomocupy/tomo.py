@@ -67,8 +67,9 @@ class Tomo:
         with self._plan_2d:
             cufft.fft2(self._buf_fde, overwrite_x=True)
         self._buf_fde *= c2dfftshift
-        # STEP2: NUFFT gather into full buf_sino (extra slices are zero, no effect)
-        self._buf_sino.fill(0)
+        # STEP2: NUFFT gather into full buf_sino (extra slices are zero, no effect).
+        # No memset needed: with dir==0 the gather kernel starts each thread from
+        # g0 = 0 and *assigns* g[g_ind], covering every element of _buf_sino.
         gather_kernel(
             (math.ceil(n / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),

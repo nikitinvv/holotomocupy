@@ -71,8 +71,8 @@ class Rec:
     #
     # Set ndistchunk = 1 (config key or --ndistchunk) to reproduce the old
     # behaviour exactly.
-    # Subclasses whose cascade kernels are genuinely per-distance (RecDelta)
-    # set hoist_dist_loop = False, which pins ndistchunk to 1 so the chunking
+    # Subclasses whose cascade kernels are genuinely per-distance set
+    # hoist_dist_loop = False, which pins ndistchunk to 1 so the chunking
     # pool is sized as before.
     hoist_dist_loop = True
 
@@ -97,7 +97,7 @@ class Rec:
         nbytes = self._chunking_pool_bytes()
 
         ### multinode processing
-        self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
+        self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, 'complex64')
         self.local_nzobj = self.cl_mpi.local_nzobj
         self.local_ntheta = self.cl_mpi.local_ntheta
         self.rank      = self.cl_mpi.rank
@@ -152,10 +152,10 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.obj_dtype, self.nchunk)
+        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
         if self.lam_laplacian > 0:
             self.cl_lap_term = LaplacianTerm(self.lam_laplacian, self.obj_size,
-                                             self.local_nzobj, self.nobj, self.obj_dtype,
+                                             self.local_nzobj, self.nobj,
                                              self.cl_mpi, self.cl_chunking.gpu_batch,
                                              grad_pad=getattr(self, 'alloc_mode', 'full') != 'gen')
         if self.lam_prbfit > 0:
@@ -252,7 +252,7 @@ class Rec:
         (1 proj + ndistchunk * small) are both under the cascade candidate.
         Any new @gpu_batch caller with a bigger footprint must be added.
         """
-        obj_item   = np.dtype(self.obj_dtype).itemsize
+        obj_item   = np.dtype('complex64').itemsize
         obj_slab   = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
         proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
         obj_bytes  = self.nchunk * obj_slab
@@ -286,10 +286,10 @@ class Rec:
             etas_obj  = self.cl_lap_term.etas_view
             grads_obj = self.cl_lap_term.grads_view
         else:
-            obj_buf  = make_pinned(obj_shape, dtype=self.obj_dtype); obj_buf[:]  = 0
+            obj_buf  = make_pinned(obj_shape, dtype='complex64'); obj_buf[:]  = 0
             # etas/grads['obj'] are gradient-side buffers: not allocated in gen mode.
-            etas_obj  = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
-            grads_obj = None if gen else make_pinned(obj_shape, dtype=self.obj_dtype)
+            etas_obj  = None if gen else make_pinned(obj_shape, dtype='complex64')
+            grads_obj = None if gen else make_pinned(obj_shape, dtype='complex64')
             for b in (etas_obj, grads_obj):
                 if b is not None:
                     b[:] = 0
@@ -303,7 +303,7 @@ class Rec:
             'obj':  obj_buf,
             'pos':  make_pinned([self.ndist, self.local_ntheta, 2],         dtype='float32'),
             'prb':  make_pinned(prb_shape,                                 dtype='complex64'),
-            'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype),
+            'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='complex64'),
         }
         # measurement data; ref is owned by cl_prb_term — aliased here for back-compat
         # so external code (readers, gen_sqrt_ref out-arg) can keep using cl.ref.
@@ -317,7 +317,7 @@ class Rec:
         if not gen:
             for ge in self.grads, self.etas:
                 ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
-                ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype=self.obj_dtype)
+                ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='complex64')
             # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
             # staging buffer to accumulate y[0]*rho_sq across theta chunks for one dist,
             # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
@@ -333,7 +333,7 @@ class Rec:
             for k, v in self.etas.items():
                 if k != "obj":      # obj is zeroed at allocation above
                     v[:] = 0
-        self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype=self.obj_dtype)
+        self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype='complex64')
 
         self.shrink_nd = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
         self.eff_demag = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
@@ -774,8 +774,7 @@ class Rec:
 
                     gradprb[j] += y[0] * self.rho_sq['prb']
                     gradpos[j][:] = y[2] * self.rho_sq['pos']
-                    y[1] *= self.rho_sq['obj']
-                    gradproj_out += y[1]
+                    gradproj_out += y[1]*self.rho_sq['obj']
                 if last:
                     gradproj_out[:] = self.cl_shift.coeff(gradproj_out)
 
@@ -1022,7 +1021,6 @@ class Rec:
         x21, x22 = x
 
         y22 = self._gF2_fused(x22, y12)
-        y22 = y22.real if self.obj_dtype == 'float32' else y22
 
         y21 = y11
         return [y21, y22]
@@ -1124,7 +1122,7 @@ class Rec:
 
     def vis_debug(self, vars, i, writer=None):
         """Per-iter checkpoint write (pos-error plot bundled in)."""
-        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
+        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1): # or i <= self.start_iter:
             return
         writer.write_checkpoint(vars, i, self.norm_const, pos_init=self.pos_init)
 
@@ -1142,8 +1140,8 @@ class Rec:
 
         # lazy-allocate scratch buffers (only created on the first triggered iter)
         if not hasattr(self, '_chk_objt'):
-            self._chk_objt  = make_pinned(vars['obj'].shape,  self.obj_dtype)
-            self._chk_projt = make_pinned(vars['proj'].shape, self.obj_dtype)
+            self._chk_objt  = make_pinned(vars['obj'].shape,  'complex64')
+            self._chk_projt = make_pinned(vars['proj'].shape, 'complex64')
             self._chk_prbt  = cp.empty_like(vars['prb'])
             self._chk_post  = cp.empty_like(vars['pos'])
 

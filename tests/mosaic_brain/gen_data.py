@@ -306,7 +306,6 @@ rargs = SimpleNamespace(
     n                       = n,
     nzobj                   = nzobj,
     nobj                    = nobj,
-    obj_dtype               = 'complex64',
     mask                    = 1.0,
     lam_prbfit              = 0.0,
     lam_laplacian           = 0.0,

@@ -66,7 +66,6 @@ ndist           = 4
 # log header and Rec all quote the same number.
 ndistchunk = min(ndistchunk, ndist) if ndistchunk > 0 else ndist
 niter           = args_cli.niter                # short — measures steady-state per-iter cost
-obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.1
 lam_prbfit      = 1e-2                           # disable probe-fit regularization
@@ -103,7 +102,7 @@ def _local(total, r, nranks):
 def _plan(nranks):
     """Pinned-host and (approximate) GPU bytes on the heaviest rank."""
     GiB  = 1024.0**3
-    item = np.dtype(obj_dtype).itemsize
+    item = np.dtype('complex64').itemsize
     lnz  = _local(nzobj,  0, nranks)
     lth  = _local(ntheta, 0, nranks)
 
@@ -248,7 +247,7 @@ args = SimpleNamespace(
     ntheta=ntheta, ndist=ndist,
     nchunk=nchunk, ndistchunk=ndistchunk, niter=niter, start_iter=start_iter,
     # dtypes / regs
-    obj_dtype=obj_dtype, rho=rho,
+    rho=rho,
     lam_prbfit=lam_prbfit, lam_laplacian=lam_laplacian,
     # logging / I/O
     checkpoint_step=checkpoint_step, error_step=error_step,
@@ -270,7 +269,7 @@ if rank == 0:
     logger.warning(f"perf-test: n={n} nz={nz} nobj={nobj} nzobj={nzobj} "
                    f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} "
                    f"ndistchunk={ndistchunk} niter={niter} "
-                   f"nranks={size} obj_dtype={obj_dtype}")
+                   f"nranks={size}")
 cl = Rec(args)
 
 

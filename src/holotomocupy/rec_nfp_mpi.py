@@ -39,6 +39,10 @@ class RecNFP:
         for key, value in vars(args).items():
             setattr(self, key, value)
 
+        # proj/obj arrays are complex64. RecNFPDelta temporarily flips this to
+        # 'float32' around alloc_arrays() so vars['proj'] comes out real-valued.
+        self.obj_dtype = 'complex64'
+
         # cascade: F0 ◦ F1 ◦ F2 ◦ F3
         self.F      = [self.F0,      self.F1,      self.F2,      self.F3]
         self.gF     = [self.gF0,     self.gF1,     self.gF2,     self.gF3]
@@ -52,7 +56,7 @@ class RecNFP:
         nbytes = int(multiplier * self.nchunk * (self.nz * self.n * float_item + self.nobj * self.nobj * complex_item))
 
         # MPI: distribute theta; prb/proj replicated on all ranks
-        self.cl_mpi       = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, args.obj_dtype)
+        self.cl_mpi       = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, 'complex64')
         self.local_ntheta = self.cl_mpi.local_ntheta
         self.rank         = self.cl_mpi.rank
         self.st_theta     = self.cl_mpi.st_theta
@@ -78,7 +82,7 @@ class RecNFP:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
-        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj,self.obj_dtype)
+        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj)
 
         self.alloc_arrays()
 
@@ -389,7 +393,6 @@ class RecNFP:
         x = self.apply_F_from(x, 3)
         x21, x22 = x
         y22 = self._gF2_fused(x22, y12)
-        y22 = y22.real if self.obj_dtype == 'float32' else y22
         return [y11, y22]
 
     ####### F3: (prb, proj, pos) → (prb, S_pos(proj))
@@ -445,7 +448,7 @@ class RecNFP:
         c = self._tiled_coeff(x32, n)
         m = cp.ones(n, dtype='float32')
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
-        y32 = cp.zeros([self.nzobj, self.nobj], dtype=self.obj_dtype)
+        y32 = cp.zeros([self.nzobj, self.nobj], dtype='complex64')
         y32[:] = cp.sum(Deltapsi, axis=0)
         y32[:] = self.cl_shift.coeff(y32)
         return [y21, y32, y33]

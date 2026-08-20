@@ -160,7 +160,6 @@ rec_args = SimpleNamespace(
     n                       = n,
     nzobj                   = nobj,
     nobj                    = nobj,
-    obj_dtype               = 'complex64',
     rho                     = rho,
     niter                   = niter,
     nchunk                  = nchunk,

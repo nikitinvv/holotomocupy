@@ -65,14 +65,14 @@ for _p in args.tile_files:
         raise SystemExit(f'{_p} not found — run gen_data.py first')
 
 # --- Distribute object and projection slices across MPI ranks -----------
-cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
+cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, 'complex64')
 
 # --- Build I/O helpers --------------------------------------------------
 reader = MosaicReader(
     args.tile_files, args.mosaic_file, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist_tile, args.nz, args.n, args.obj_dtype,
+    args.ndist_tile, args.nz, args.n,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
     tiles=args.tiles,
 )
@@ -81,7 +81,7 @@ writer = Writer(
     args.path_out, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.ndist, args.nz, args.n,
 )
 
 # Physics parameters come from the generated /exchange/* archive

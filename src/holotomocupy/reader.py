@@ -142,7 +142,7 @@ class Reader:
     def __init__(self, in_file, comm,
                  st_obj, end_obj, nzobj, nobj,
                  st_theta, end_theta, ntheta,
-                 ndist, nz, n, obj_dtype,
+                 ndist, nz, n,
                  paganin, rotation_center_shift, start_theta, bin):
         self.in_file   = in_file
         self.comm      = comm
@@ -157,7 +157,6 @@ class Reader:
         self.ndist     = ndist
         self.nz        = nz
         self.n         = n
-        self.obj_dtype = obj_dtype
         self.paganin   = paganin
         self.rotation_center_shift = rotation_center_shift
         self.bin       = bin
@@ -193,7 +192,7 @@ class Reader:
             endx = nobj0  // 2 + self.nobj  // 2
             local_nz = self.end_obj - self.st_obj
             if out is None:
-                out = np.empty([local_nz, self.nobj, self.nobj], dtype=self.obj_dtype)
+                out = np.empty([local_nz, self.nobj, self.nobj], dtype='complex64')
             batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds_re.dtype.itemsize))
             for i0 in range(0, local_nz, batch):
                 i1 = min(i0 + batch, local_nz)
@@ -358,17 +357,16 @@ class Reader:
         # which can exceed tens of GB per rank for large objects.
         # Now we process one z-batch at a time: peak extra RAM ≈ 2 × batch × nobj0² × 8 B.
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
-            obj_dtype = f.attrs['obj_dtype']
             st_src  = self.st_obj  // scale
             end_src = self.end_obj // scale
             n0      = self.end_obj - self.st_obj
             nz_src  = max(1, end_src - st_src)
             ds_re   = f['obj_re']
-            ds_im   = f['obj_im'] if obj_dtype == 'complex64' else None
+            ds_im   = f['obj_im']
             nobj0   = ds_re.shape[1]
 
             if out_obj is None:
-                out_obj = np.empty((n0, self.nobj, self.nobj), dtype=self.obj_dtype)
+                out_obj = np.empty((n0, self.nobj, self.nobj), dtype='complex64')
 
             # Target ~256 MB per batch (complex64 = 8 B worst case)
             z_batch = max(1, (1 << 28) // (nobj0 * nobj0 * 8))
@@ -465,8 +463,6 @@ class Reader:
             for i0 in range(0, nz_src, batch):
                 i1 = min(i0 + batch, nz_src)
                 block[i0:i1] = ds[st_src + i0 : st_src + i1]
-        if self.obj_dtype == 'float32':
-            block = block.real.copy()
         # upsample spatial dimensions in memory
         block = np.repeat(np.repeat(block, scale, axis=1), scale, axis=2)
         # map source z-slices to output z-slices
@@ -474,7 +470,7 @@ class Reader:
             (np.arange(n0) * nz_src / n0).astype(np.intp),
             0, nz_src - 1,
         )
-        out[:] = block[idx0].astype(self.obj_dtype)
+        out[:] = block[idx0].astype('complex64')
         return out
 
     def read_vol_obj(self, vol_path, out, scale=1.0, vol_dtype='float32'):

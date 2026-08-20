@@ -16,20 +16,20 @@ set_log_level(args.log_level)
 comm = MPI.COMM_WORLD
 args.comm = comm
 
-cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
+cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, 'complex64')
 
 reader = Reader(
     args.in_file, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.ndist, args.nz, args.n,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
 )
 writer = Writer(
     args.path_out, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.ndist, args.nz, args.n,
 )
 
 # physics parameters read from the data file

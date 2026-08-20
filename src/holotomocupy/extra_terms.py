@@ -34,7 +34,7 @@ class LaplacianTerm:
     Halo cost over plain obj-shape buffers: 4 z-slabs per padded array.
     """
 
-    def __init__(self, lam, obj_size, local_nzobj, nobj, obj_dtype, cl_mpi, gpu_batch,
+    def __init__(self, lam, obj_size, local_nzobj, nobj, cl_mpi, gpu_batch,
                  grad_pad=True):
         self.lam       = lam
         self.obj_size  = obj_size
@@ -43,12 +43,12 @@ class LaplacianTerm:
         self.u_pad = self.e_pad = self.g_pad = None
         if lam != 0:
             shape = [local_nzobj + 4, nobj, nobj]
-            self.u_pad = make_pinned(shape, dtype=obj_dtype); self.u_pad[:] = 0
-            self.e_pad = make_pinned(shape, dtype=obj_dtype); self.e_pad[:] = 0
+            self.u_pad = make_pinned(shape, dtype='complex64'); self.u_pad[:] = 0
+            self.e_pad = make_pinned(shape, dtype='complex64'); self.e_pad[:] = 0
             # grads/etas are reconstruction-only; generation (alloc_mode='gen')
             # never touches them, so skip the buffer there.
             if grad_pad:
-                self.g_pad = make_pinned(shape, dtype=obj_dtype); self.g_pad[:] = 0
+                self.g_pad = make_pinned(shape, dtype='complex64'); self.g_pad[:] = 0
 
     @property
     def obj_view(self):

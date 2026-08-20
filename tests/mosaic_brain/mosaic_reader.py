@@ -32,7 +32,7 @@ class MosaicReader(Reader):
     def __init__(self, tile_files, mosaic_file, comm,
                  st_obj, end_obj, nzobj, nobj,
                  st_theta, end_theta, ntheta,
-                 ndist_tile, nz, n, obj_dtype,
+                 ndist_tile, nz, n,
                  paganin, rotation_center_shift, start_theta, bin,
                  tiles=None):
         # Scalars, the angle list and z1 of one tile come from the first file;
@@ -40,7 +40,7 @@ class MosaicReader(Reader):
         super().__init__(tile_files[0], comm,
                          st_obj, end_obj, nzobj, nobj,
                          st_theta, end_theta, ntheta,
-                         ndist_tile, nz, n, obj_dtype,
+                         ndist_tile, nz, n,
                          paganin, rotation_center_shift, start_theta, bin)
 
         self.tile_files  = list(tile_files)

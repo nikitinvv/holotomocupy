@@ -46,7 +46,6 @@ args = SimpleNamespace(
     n                       = n,
     nzobj                   = nzobj,
     nobj                    = nobj,
-    obj_dtype               = 'complex64',
     mask                    = 0.9,
     lam_prbfit              = 0.0,
     rho                     = [1, 0.05, 0.02],

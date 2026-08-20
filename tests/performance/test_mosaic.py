@@ -146,7 +146,6 @@ nobj     = args_cli.nobj  if args_cli.nobj  else _ceil(_reach_h) >> bins
 
 
 # ── Fixed solver config (mirrors mosaic_brain/config_step6.conf) ────────────
-obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.2
 lam_prbfit      = 3.1e-3
@@ -179,7 +178,7 @@ def _local(total, r, nranks):
 def _plan(nranks):
     """Pinned-host and (approximate) GPU bytes on the heaviest rank."""
     GiB  = 1024.0**3
-    item = np.dtype(obj_dtype).itemsize
+    item = np.dtype('complex64').itemsize
     lnz  = _local(nzobj,  0, nranks)
     lth  = _local(ntheta, 0, nranks)
 
@@ -315,7 +314,7 @@ args = SimpleNamespace(
     ntheta=ntheta, ndist=ndist,
     nchunk=nchunk, ndistchunk=ndistchunk, niter=niter, start_iter=start_iter,
     # dtypes / regs
-    obj_dtype=obj_dtype, rho=rho,
+    rho=rho,
     lam_prbfit=lam_prbfit, lam_laplacian=lam_laplacian,
     # logging / I/O
     checkpoint_step=checkpoint_step, error_step=error_step,
@@ -337,7 +336,7 @@ if rank == 0:
     logger.warning(f"perf-test: n={n} nz={nz} nobj={nobj} nzobj={nzobj} "
                    f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} "
                    f"ndistchunk={ndistchunk} niter={niter} "
-                   f"nranks={size} obj_dtype={obj_dtype}")
+                   f"nranks={size}")
     logger.warning(f"perf-test: voxel={voxelsize*1e9:.3f} nm  "
                    f"tile_step={TILE_STEP_REF/2**bins:.1f} px  "
                    f"jitter={SHIFT_RAND_PX/2**bins:.2f} det px")

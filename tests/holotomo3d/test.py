@@ -126,7 +126,6 @@ args.nzobj                   = nobj                    # object volume height (p
 args.nobj                    = nobj                    # object volume width/depth (pixels)
 
 # --- solver / regularisation ---
-args.obj_dtype   = 'complex64'      # object dtype: 'complex64' (phase+absorption) or 'float32' (phase only)
 args.mask        = 0.9              # support mask radius as fraction of field of view
 args.lam_prbfit  = 2e-3            # probe-fit regularisation weight
 args.rho         = [1, 0.05, 0.02] # gradient step-size scales for [obj, prb, pos]
@@ -156,7 +155,6 @@ writer = Writer(
     ndist       = ndist,
     nz          = n,
     n           = n,
-    obj_dtype   = args.obj_dtype,
 )
 
 #### Set Ground-Truth Variables and Generate Synthetic Data

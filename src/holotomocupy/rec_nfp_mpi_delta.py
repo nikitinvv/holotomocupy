@@ -36,12 +36,6 @@ class RecNFPDelta(RecNFP):
     _var_names = ("prb", "proj", "pos", "bd")
 
     def __init__(self, args):
-        if args.obj_dtype != 'complex64':
-            raise ValueError(
-                f"RecNFPDelta requires args.obj_dtype='complex64' "
-                f"(cl_shift/cl_prop machinery is complex); got {args.obj_dtype!r}. "
-                f"proj is reallocated as float32 internally."
-            )
         if not hasattr(args, 'rho') or len(args.rho) != 4:
             raise ValueError(
                 f"RecNFPDelta requires args.rho of length 4 "

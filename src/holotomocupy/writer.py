@@ -20,13 +20,13 @@ class Writer:
       /pos     (ntheta, ndist, 2)   float32 — assembled from all ranks (theta-distributed)
 
     Attrs on the root group:
-      iter, obj_dtype
+      iter
     """
 
     def __init__(self, path_out, comm,
                  st_obj, end_obj, nzobj, nobj,
                  st_theta, end_theta, ntheta,
-                 ndist, nz, n, obj_dtype):
+                 ndist, nz, n):
         self.path_out  = path_out
         self.comm      = comm
         self.rank      = comm.Get_rank()
@@ -41,7 +41,6 @@ class Writer:
         self.ndist     = ndist
         self.nz        = nz
         self.n         = n
-        self.obj_dtype = obj_dtype
 
         self.h5_dir   = os.path.join(path_out, 'checkpoints')
         self.tiff_dir = os.path.join(path_out, 'checkpoints_tiff')
@@ -81,15 +80,13 @@ class Writer:
         # mpio block: all ranks create datasets and write obj/pos collectively
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
             f.attrs['iter']      = i
-            f.attrs['obj_dtype'] = self.obj_dtype
             # Save scalar variables (e.g. RecDelta's bd) as HDF5 attributes if present.
             if 'bd' in vars:
                 f.attrs['bd'] = float(vars['bd'][0])
 
             obj_shape = (self.nzobj, self.nobj, self.nobj)
             ds_re = f.create_dataset('obj_re', shape=obj_shape, dtype='float32')
-            if self.obj_dtype == 'complex64':
-                ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
+            ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
             ds_pos = f.create_dataset('pos', shape=(self.ntheta, self.ndist, 2), dtype='float32')
             prb_shape = (self.ndist, self.nz, self.n)
             ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
@@ -106,9 +103,8 @@ class Writer:
                 obj_slab = vars['obj'][i0:i1]          # pinned view, no copy
                 np.multiply(obj_slab.real, np.float32(norm_const), out=slab_buf[:nzb])
                 ds_re[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
-                if self.obj_dtype == 'complex64':
-                    np.multiply(obj_slab.imag, np.float32(norm_const), out=slab_buf[:nzb])
-                    ds_im[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
+                np.multiply(obj_slab.imag, np.float32(norm_const), out=slab_buf[:nzb])
+                ds_im[self.st_obj + i0:self.st_obj + i1] = slab_buf[:nzb]
             del slab_buf
 
             # vars['pos'] is [ndist, local_ntheta, 2]; on-disk format is [ntheta, ndist, 2].

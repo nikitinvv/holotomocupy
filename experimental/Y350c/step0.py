@@ -134,7 +134,6 @@ for dataset_id in dataset_ids:
         n                       = n,
         nzobj                   = nobj,
         nobj                    = nobj,
-        obj_dtype               = 'complex64',
         rho                     = rho,
         niter                   = niter,
         nchunk                  = nchunk,

@@ -54,7 +54,7 @@ def main():
     arr_np  = make_input(n)
     arr_gpu = cp.asarray(arr_np)[cp.newaxis]   # [1, n, n]
 
-    cl = Shift(n=n, npsi=n, nz=n, nzpsi=n, obj_dtype='complex64')
+    cl = Shift(n=n, npsi=n, nz=n, nzpsi=n)
 
     shifts = [(0.0, 0.0),
               (0.5, 0.0),

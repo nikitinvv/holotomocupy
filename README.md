@@ -299,7 +299,6 @@ energy=17.23                   # X-ray energy (keV)
 paganin=20                     # Paganin regularization constant
 rotation_center_shift=-8.78    # rotation center offset from detector center (pixels)
 mask=1.1                       # tomographic mask radius (fraction of detector half-width)
-obj_dtype=complex64            # object dtype: complex64 or float32
 
 # Regularization
 lam_prbfit=3.1e-3              # probe fit weight

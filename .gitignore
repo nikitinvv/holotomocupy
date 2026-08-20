@@ -222,3 +222,4 @@ report*
 tests/test_results/
 
 *.txt
+log*

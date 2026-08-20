@@ -10,7 +10,7 @@ that summarises one BH iteration.
 | `test.py`              | the benchmark — generates phantom, probe, positions, runs `Rec.BH()`, writes a perf log |
 | `test_mosaic.py`       | the same benchmark for a MOSAIC scan (2 × 5 tiles × 4 distances = 40 distances over one wide object) |
 | `run_mosaic.sh`        | drives `test_mosaic.py` over a list of binning levels, then parses each log |
-| `peak_mem.py`          | background sampler for peak GPU / host memory, used by both benchmarks |
+| `run.sh`               | the same for `test.py`, over a list of detector sizes |
 | `set_affinity_gpu.sh`  | per-rank GPU pinning (`CUDA_VISIBLE_DEVICES = local_rank % ngpus`) |
 | `parse_perf_log.py`    | reads the perf log; reports per-iter timing breakdown + max process / GPU memory |
 | `log512`               | example log from a `--n 512 --ntheta 450 --nchunk 4` run on 8 ranks × 4 GPUs |
@@ -30,6 +30,12 @@ mpirun -np 8 ./set_affinity_gpu.sh \
 python parse_perf_log.py log2048_8 --iter 1
 ```
 
+Or sweep several detector sizes and parse each log:
+```bash
+./run.sh                       # NP=4 ranks, sizes 512 / 1024 / 2048
+NP=8 SIZES="1024 2048" ./run.sh
+```
+
 ## `test.py` CLI
 
 | flag       | default      | meaning |
@@ -37,6 +43,7 @@ python parse_perf_log.py log2048_8 --iter 1
 | `--n`      | **required** | detector size (square: `nz = n`) |
 | `--ntheta` | **required** | number of projection angles |
 | `--nchunk` | `4`          | theta chunk size for the batched GPU ops — main perf knob |
+| `--ndistchunk` | `0` (= all) | distances sharing one upload of a theta chunk of `proj`; `1` restores the old outer-distance loop |
 | `--log`    | `perf.log`   | output log path on rank 0 (`''` disables file logging) |
 
 Other knobs (object padding, `ndist`, `niter`, dtype, regularization, …)
@@ -130,23 +137,14 @@ The log format is identical to `test.py`'s, so `parse_perf_log.py` works
 unchanged. Before iterating, rank 0 logs where every tile window lands on the
 object grid — the same placement check `mosaic_brain/step6.py` prints.
 
-### Peak memory
+### Memory
 
-`@timer` only reports what it happens to see at the end of each timed call, so
-transient peaks (cuFFT work areas, the scratch inside `Shift`/`Tomo`) and the
-whole allocation phase are invisible to it. `peak_mem.py` polls instead, on a
-background thread at 20 Hz, and the run ends with the worst rank's maxima:
-
-```
-perf-test: peak GPU during BH  6.41 GB in use of 47.27 GB  (cupy pool 5.98 GB, baseline before the run 1.33 GB)
-perf-test: peak GPU during setup 2.10 GB in use  (cupy pool 1.74 GB)
-perf-test: peak host RSS  setup 52.1 GB, BH 52.4 GB  (worst rank; predicted pinned 50.9 GB)
-```
-
-`in use` comes from `cudaMemGetInfo` and is device-wide — on a shared GPU it
-counts other processes too, which is what `baseline` (usage before the sampler
-started) is there to show. `cupy pool` is everything CuPy took from the driver,
-free-list included. Compare either against the `--plan` prediction.
+`@timer` records GPU memory as it happens to stand at the end of each timed
+call, and `parse_perf_log.py` reports the maximum it saw. That is enough to
+compare runs; transient peaks inside a call (cuFFT work areas, the scratch in
+`Shift`/`Tomo`) and the allocation phase are not covered. For an up-front
+estimate, run with `--plan`, which prints the pinned-host and GPU budgets per
+rank without allocating anything.
 
 ### `test_mosaic.py` CLI
 
@@ -154,6 +152,7 @@ free-list included. Compare either against the `--plan` prediction.
 |------|---------|---------|
 | `--bin`        | **required** | `n = nz = 2048>>bin`, `ntheta = 6000>>bin` |
 | `--nchunk`     | `4`   | theta chunk size — main perf knob |
+| `--ndistchunk` | `0` (= all) | distances sharing one upload of a theta chunk of `proj`; `1` restores the old outer-distance loop |
 | `--ntile-h`    | `5`   | tiles per row |
 | `--ntile-v`    | `2`   | tile rows |
 | `--ndist-tile` | `4`   | distances per tile (max 4) |
@@ -186,12 +185,19 @@ Reads the perf log and prints:
 
    | category   | members                                                    |
    |------------|------------------------------------------------------------|
-   | `gradient` | `gradients_cascade + adj_tomo + fwd_tomo`                  |
-   | `hessian1`, `hessian2`, `hessian3` | the 3 `Rec.hessian()` calls per iter (β-num, β-den, α-den), each split into `hessian_cascade + hessian_laplacian [+ hessian_prbfit]` |
+   | `gradient` | `gradients_cascade + adj_tomo + fwd_tomo + gradient` (the last being the extra_terms regularizer) |
+   | `hessian`  | `hessian_cascade[3] + hessian[3]` — the cascade sweeps plus their extra_terms regularizers |
    | `redist`   | both MPI `redist` calls inside the iter                    |
    | `linear_batch` | `linear_batch + linear_redot_batch`                    |
-   | `allreduce`    | `allreduce + allreduce2`                               |
-   | `other`        | any remaining timed functions                          |
+   | `min`      | the line-search `Rec.min()`                                |
+   | `allreduce`    | `allreduce + allreduce2 + allreduce_scalars`           |
+   | `other`        | any remaining timed functions (empty on a healthy log) |
+
+   With `fused_hessian=false` the solver runs three separate `Rec.hessian()`
+   calls per iter (β-num, β-den, α-den) and the `hessian` row is followed by a
+   `#1 / #2 / #3` breakdown, one per call. `fused_hessian=true` (the default)
+   derives all three forms from one `hessian_cascade3` sweep, so there is a
+   single instance and no breakdown.
 
    Iter boundaries are detected from `error_debug`'s `iter=N: <t>sec ...` lines,
    so the perf log needs `error_step ≥ 1` (default in `test.py`). The `<t>sec`

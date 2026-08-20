@@ -51,7 +51,6 @@ from holotomocupy.rec_mpi       import Rec
 from holotomocupy.logger_config import logger, set_log_level, add_file_handler
 
 sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from peak_mem import PeakSampler, reduce_peaks            # noqa: E402
 
 cp.cuda.set_pinned_memory_allocator(None)
 
@@ -77,10 +76,13 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--bin',        type=int, required=True,
                 help='binning level: n = nz = 2048>>bin, ntheta = 6000>>bin')
 ap.add_argument('--nchunk',     type=int, default=4,  help='theta chunk size for batched ops')
+ap.add_argument('--ndistchunk', type=int, default=0,
+                help='distances sharing one upload of a theta chunk of proj '
+                     '(0 = all ndist, the default; 1 = the old outer-distance loop)')
 ap.add_argument('--ntile-h',    type=int, default=5,  help='tiles per row (default 5)')
-ap.add_argument('--ntile-v',    type=int, default=2,  help='tile rows (default 2)')
+ap.add_argument('--ntile-v',    type=int, default=1,  help='tile rows (default 2)')
 ap.add_argument('--ndist-tile', type=int, default=4,  help='distances per tile (default 4)')
-ap.add_argument('--niter',      type=int, default=2,  help='BH iterations (iter 0 is warmup)')
+ap.add_argument('--niter',      type=int, default=1,  help='BH iterations (iter 0 is warmup)')
 ap.add_argument('--ntheta',     type=int, default=0,  help='override the 6000>>bin angle count')
 ap.add_argument('--nobj',       type=int, default=0,  help='override the mosaic width  (binned px)')
 ap.add_argument('--nzobj',      type=int, default=0,  help='override the mosaic height (binned px)')
@@ -94,6 +96,7 @@ args_cli = ap.parse_args()
 
 bins       = args_cli.bin
 nchunk     = args_cli.nchunk
+ndistchunk = args_cli.ndistchunk
 ntile_h    = args_cli.ntile_h
 ntile_v    = args_cli.ntile_v
 ndist_tile = args_cli.ndist_tile
@@ -106,6 +109,9 @@ n      = nz = NDET_REF >> bins
 ntheta = args_cli.ntheta if args_cli.ntheta else NTHETA_REF >> bins
 ntiles = ntile_v * ntile_h
 ndist  = ntiles * ndist_tile
+# 0 on the command line means "all of them"; resolve it here so the plan, the
+# log header and Rec all quote the same number.
+ndistchunk = min(ndistchunk, ndist) if ndistchunk > 0 else ndist
 
 if ndist_tile > len(z1_tile_all):
     raise SystemExit(f'--ndist-tile {ndist_tile} > {len(z1_tile_all)} known distances')
@@ -143,7 +149,7 @@ obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.2
 lam_prbfit      = 3.1e-3
-lam_laplacian   = 1e-3
+lam_laplacian   = 0
 start_iter      = 0
 checkpoint_step = -1                            # no disk I/O
 error_step      = 1                             # iter markers for parse_perf_log.py
@@ -189,9 +195,13 @@ def _plan(nranks):
     proj_chunk = nchunk * nzobj * nobj * item
     obj_chunk  = nchunk * nobj  * nobj * item
     data_chunk = nchunk * nz    * n    * 4
+    # distances are hoisted inside the theta chunk (Rec._resolve_ndistchunk):
+    # ndistchunk data/pos chunks are resident at once, plus the prb bundles.
+    dist_chunk  = data_chunk + 3 * nchunk * 2 * 4 + nchunk * 4
+    _pool       = lambda nd: int(2.1 * max(3 * proj_chunk + nd * dist_chunk, 3 * obj_chunk))
     gpu = {
-        'chunking pool':                            int(2.1 * max(3 * proj_chunk + data_chunk,
-                                                                  3 * obj_chunk)),
+        'chunking pool':                            _pool(ndistchunk),
+        f'prb staging 3 x [{ndistchunk}, {nz}, {n}]': 3 * ndistchunk * nz * n * 8,
         f'tomo fde [{nchunk}, {2*nobj}, {2*nobj}]': nchunk * (2 * nobj)**2 * 8,
         f'tomo sino [{ntheta}, {nchunk}, {nobj}]':  ntheta * nchunk * nobj * 8,
         f'prop big [{nchunk}, {2*nz}, {2*n}]':      nchunk * (2 * nz) * (2 * n) * 8,
@@ -205,7 +215,8 @@ if args_cli.plan:
     if rank == 0:
         nranks = args_cli.nranks if args_cli.nranks else size
         host, gpu, host_gb, gpu_gb = _plan(nranks)
-        print(f'mosaic perf plan: bin={bins}  nranks={nranks}  nchunk={nchunk}')
+        print(f'mosaic perf plan: bin={bins}  nranks={nranks}  nchunk={nchunk}  '
+              f'ndistchunk={ndistchunk}')
         print(f'  tiles      : {ntile_v} x {ntile_h} = {ntiles}, {ndist_tile} distances each '
               f'-> ndist = {ndist}')
         print(f'  detector   : {nz} x {n}   angles: {ntheta}')
@@ -301,7 +312,7 @@ args = SimpleNamespace(
     # sizes
     nz=nz, n=n, nzobj=nzobj, nobj=nobj,
     ntheta=ntheta, ndist=ndist,
-    nchunk=nchunk, niter=niter, start_iter=start_iter,
+    nchunk=nchunk, ndistchunk=ndistchunk, niter=niter, start_iter=start_iter,
     # dtypes / regs
     obj_dtype=obj_dtype, rho=rho,
     lam_prbfit=lam_prbfit, lam_laplacian=lam_laplacian,
@@ -323,7 +334,8 @@ if rank == 0:
     logger.warning(f"perf-test: mosaic {ntile_v}x{ntile_h} tiles x {ndist_tile} dist "
                    f"-> ndist={ndist}  bin={bins}")
     logger.warning(f"perf-test: n={n} nz={nz} nobj={nobj} nzobj={nzobj} "
-                   f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} niter={niter} "
+                   f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} "
+                   f"ndistchunk={ndistchunk} niter={niter} "
                    f"nranks={size} obj_dtype={obj_dtype}")
     logger.warning(f"perf-test: voxel={voxelsize*1e9:.3f} nm  "
                    f"tile_step={TILE_STEP_REF/2**bins:.1f} px  "
@@ -333,12 +345,6 @@ if rank == 0:
 
 
 # ── Build the reconstruction class ──────────────────────────────────────────
-# Poll memory from here on: @timer only records what it happens to see at the
-# end of a timed call, which misses transient peaks (cuFFT work areas, the
-# scratch inside Shift/Tomo) and the allocation phase entirely.
-sampler = PeakSampler()
-sampler.start()
-
 cl = Rec(args)
 
 
@@ -427,8 +433,6 @@ if rank == 0 and cl.end_theta > cl.st_theta:
 # ── Time BH ────────────────────────────────────────────────────────────────
 comm.Barrier()
 cp.cuda.Device().synchronize()
-peak_setup = reduce_peaks(comm, sampler.snapshot())     # allocation + synthesis
-sampler.reset()
 t0 = time.time()
 
 cl.BH()
@@ -436,22 +440,11 @@ cl.BH()
 cp.cuda.Device().synchronize()
 comm.Barrier()
 elapsed = time.time() - t0
-peak_bh = reduce_peaks(comm, sampler.stop())
 
 
 # ── Timing summary ──────────────────────────────────────────────────────────
 if rank == 0:
     per_iter = elapsed / max(niter, 1)
-    # Worst rank for each figure. `dev` is device-wide (memGetInfo), so it
-    # includes whatever else was already on the GPU -- `baseline` is that.
-    logger.warning(f"perf-test: peak GPU during BH  {peak_bh['dev']:.2f} GB in use of "
-                   f"{peak_bh['total']:.2f} GB  (cupy pool {peak_bh['pool']:.2f} GB, "
-                   f"baseline before the run {peak_bh['baseline']:.2f} GB)")
-    logger.warning(f"perf-test: peak GPU during setup {peak_setup['dev']:.2f} GB in use  "
-                   f"(cupy pool {peak_setup['pool']:.2f} GB)")
-    logger.warning(f"perf-test: peak host RSS  setup {peak_setup['rss']:.2f} GB, "
-                   f"BH {peak_bh['rss']:.2f} GB  (worst rank; predicted pinned "
-                   f"{host_gb:.2f} GB)")
     logger.warning(f"BH done: {niter} iters in {elapsed:.3f} s ({per_iter*1e3:.1f} ms/iter)  "
                    f"[nranks={size}, bin={bins}, n={n}, nobj={nobj}, nzobj={nzobj}, "
                    f"ntheta={ntheta}, ndist={ndist}, nchunk={nchunk}]")

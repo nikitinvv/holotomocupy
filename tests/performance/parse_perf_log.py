@@ -3,7 +3,9 @@
 Parse the log produced by rec_iterative_mpi_syn.py and print:
   * max process memory + max GPU memory across the whole run
   * per-function timing breakdown for the requested BH iter (default: iter 1)
-  * grouped category totals (redist / gradient / hessian / linear_batch / allreduce)
+  * grouped category totals (gradient / hessian / redist / linear_batch / min /
+    allreduce), with the hessian bucket broken down per hessian() invocation
+    when the solver runs the classic three-sweep path
 
 `@timer`-decorated methods log a line of the form
     [rank=0] FUNCNAME: 0.1234 sec, process memory 1.23 GB, GPU memory 4.56 GB
@@ -35,14 +37,20 @@ INFO_RE = re.compile(r'\[rank=\d+\]\s+(machine|job|perf-test|BH done):\s*(.+)')
 
 # ── category mapping ────────────────────────────────────────────────────────
 # Each iter's @timer calls are bucketed by function name into these groups.
-# The 'hessian' bucket is split per-instance (hessian1, hessian2, ...) at print
-# time using split_hessians(); see the categories-rendering loop below.
+# Names are the @timer'd method names as they appear in the log:
+#   *_cascade / *_cascade3  the cascade sweeps in rec_mpi (3 = the fused form,
+#                           one sweep yielding B(g,g), B(g,e), B(e,e))
+#   gradient / hessian / hessian3   the extra_terms regularizers (Laplacian,
+#                           prb fit), which log under their own bare names
+# The hessian bucket is additionally split per hessian() invocation at print
+# time by split_hessians(); see the categories-rendering loop below.
 CATEGORIES = {
-    'gradient':     {'gradients_cascade', 'adj_tomo', 'fwd_tomo'},
-    'hessian':      {'hessian_cascade', 'hessian_laplacian', 'hessian_prbfit'},
+    'gradient':     {'gradients_cascade', 'adj_tomo', 'fwd_tomo', 'gradient'},
+    'hessian':      {'hessian_cascade', 'hessian_cascade3', 'hessian', 'hessian3'},
     'redist':       {'redist'},
     'linear_batch': {'linear_batch', 'linear_redot_batch'},
-    'allreduce':    {'allreduce', 'allreduce2'},
+    'min':          {'min'},
+    'allreduce':    {'allreduce', 'allreduce2', 'allreduce_scalars'},
 }
 
 
@@ -94,17 +102,19 @@ def summarise_iter(calls):
     return by_fn
 
 
-# Inside one BH iter `Rec.hessian()` always emits a hessian_cascade first, then
-# (optionally) hessian_prbfit, then hessian_laplacian — in that order, with no
-# other timed calls between them. Splitting by hessian_cascade boundaries gives
-# the individual hessian-call instances (typically 3 per iter: β-num, β-den, α).
-_HESSIAN_INNER = {'hessian_cascade', 'hessian_laplacian', 'hessian_prbfit'}
+# Inside one BH iter `Rec.hessian()` emits a cascade sweep first, then the
+# extra_terms regularizers — in that order, with no other timed calls between
+# them. Splitting on the cascade names gives the individual hessian-call
+# instances: 3 per iter on the classic path (beta-num, beta-den, alpha), 1 on
+# the fused path, where a single hessian_cascade3 yields all three forms.
+_HESSIAN_START = {'hessian_cascade', 'hessian_cascade3'}
+_HESSIAN_INNER = CATEGORIES['hessian']
 
 def split_hessians(calls):
     instances = []
     current = None
     for fn, t, *_ in calls:
-        if fn == 'hessian_cascade':
+        if fn in _HESSIAN_START:
             current = []
             instances.append(current)
         if current is not None and fn in _HESSIAN_INNER:
@@ -173,22 +183,22 @@ def report(path, iter_no=1, out=None, show_info=True, show_header=True):
     hessian_instances = split_hessians(calls)
     p(f"{'category':<16} {'calls':>6} {'total[s]':>12} {'pct':>7}  members")
     for cat, members in CATEGORIES.items():
-        if cat == 'hessian':
-            # split into hessian1, hessian2, … (one per BH hessian() invocation)
-            for k, inst in enumerate(hessian_instances, start=1):
-                cnt = len(inst)
-                tot = sum(t for _, t in inst)
-                pct = 100 * tot / total if total else 0
-                present = sorted({fn for fn, _ in inst})
-                p(f"{'hessian' + str(k):<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
-            seen.update(members & set(by_fn))
-            continue
         cnt = sum(c for fn, (c, _) in by_fn.items() if fn in members)
         tot = sum(t for fn, (_, t) in by_fn.items() if fn in members)
         pct = 100 * tot / total if total else 0
         present = sorted(members & set(by_fn))
         seen.update(present)
         p(f"{cat:<16} {cnt:>6} {tot:>12.4f} {pct:>6.1f}%  {present}")
+        # On the classic path the bucket is three separate hessian() calls, and
+        # which one is expensive matters; break them out under the total. The
+        # fused path has a single instance, so the sub-row would just repeat it.
+        if cat == 'hessian' and len(hessian_instances) > 1:
+            for k, inst in enumerate(hessian_instances, start=1):
+                icnt = len(inst)
+                itot = sum(t for _, t in inst)
+                ipct = 100 * itot / total if total else 0
+                iprs = sorted({fn for fn, _ in inst})
+                p(f"{'  #' + str(k):<16} {icnt:>6} {itot:>12.4f} {ipct:>6.1f}%  {iprs}")
     other_fns = sorted(set(by_fn) - seen)
     if other_fns:
         cnt = sum(by_fn[fn][0] for fn in other_fns)

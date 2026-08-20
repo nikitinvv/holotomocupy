@@ -3,6 +3,36 @@ import numpy as np
 import os
 from .utils import *
 
+def _axpby(out, x, y, a, b):
+    """out = a*x + b*y, in place and with as few temporaries as the scalars allow.
+
+    Written as `out[:] = a*x + b*y` this costs three chunk-sized allocations --
+    a*x, b*y and their sum -- plus the copy into out, i.e. four full passes over
+    a chunk and three buffers the chunking arena never accounted for. On the
+    object-shape call sites a chunk is nchunk*nobj*nobj complex64 (hundreds of
+    MB), so those temporaries are close to a gigabyte of pool.
+
+    Every call site in the solvers has a in {0, 1} or b in {1, -1, 0}; the
+    branches below turn those into pure in-place ufuncs with no temporary at
+    all, and only the genuinely general `out += b*y` keeps one.
+    """
+    if a == 1:
+        if out is not x:
+            out[:] = x
+    elif a == 0:
+        out[:] = 0
+    else:
+        cp.multiply(x, a, out=out)
+
+    if b == 1:
+        out += y
+    elif b == -1:
+        out -= y
+    elif b != 0:
+        out += b * y
+    return out
+
+
 class Chunking:
     def __init__(self, nbytes, chunk):
         self.gpu_mem = cp.cuda.alloc(nbytes)
@@ -306,12 +336,12 @@ class Chunking:
         if out is None:
             out = x
         if isinstance(x, cp.ndarray):
-            out[:] = a * x + b * y
+            _axpby(out, x, y, a, b)
             return
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _linear(self, out, x, y, a, b):
-            out[:] = a * x + b * y
+            _axpby(out, x, y, a, b)
 
         _linear(self, out, x, y, a, b)
 
@@ -319,13 +349,13 @@ class Chunking:
     def linear_redot_batch(self, x, y, a, b):
         """x = ax + by, returns Re<y, x_new> in one pass"""
         if isinstance(x, cp.ndarray):
-            x[:] = a * x + b * y
+            _axpby(x, x, y, a, b)
             return redot(y, x).get()
         res = cp.zeros(1, dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=2)
         def _linear_redot(self, out, res, x, y, a, b):
-            out[:] = a * x + b * y
+            _axpby(out, x, y, a, b)
             res[:] += redot(y, out)
 
         _linear_redot(self, x, res, x, y, a, b)
@@ -335,11 +365,11 @@ class Chunking:
     def mulc_batch(self, out, x, a):
         """out = ax"""
         if isinstance(x, cp.ndarray):
-            out[:] = a * x
+            cp.multiply(x, a, out=out)
             return
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _mulc(self, out, x, a):
-            out[:] = a * x
+            cp.multiply(x, a, out=out)
 
         _mulc(self, out, x, a)

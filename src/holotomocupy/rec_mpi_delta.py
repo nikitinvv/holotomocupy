@@ -37,6 +37,12 @@ from .mpi_functions import MPIClass
 
 
 class RecDelta(Rec):
+    # RecDelta overrides every cascade kernel with a genuinely per-distance
+    # version (extra 'bd' variable, F4 level), so the parent's hoisted
+    # distance loop does not apply. This pins ndistchunk to 1 before
+    # Rec.__init__ sizes the chunking pool.
+    hoist_dist_loop = False
+
     def __init__(self, args):
         if args.obj_dtype != 'complex64':
             raise ValueError(

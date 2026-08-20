@@ -43,6 +43,10 @@ def parse_args(config_file):
         args.check_fused_hessian = cfg.getboolean("check_fused_hessian", fallback=False)
         args.niter = cfg.getint("niter")
         args.nchunk = cfg.getint("nchunk")
+        # How many distances share one upload of a theta chunk of proj inside
+        # the cascade kernels. 0 = all of them (the default), 1 = the old
+        # outer-distance loop. See Rec._resolve_ndistchunk.
+        args.ndistchunk = cfg.getint("ndistchunk", fallback=0)
         args.checkpoint_step = cfg.getint("checkpoint_step")
         args.error_step      = cfg.getint("error_step")
         args.start_iter = cfg.getint("start_iter")

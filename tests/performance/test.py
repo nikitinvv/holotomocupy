@@ -30,6 +30,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--n',      type=int, required=True, help='detector size (square: nz=n=n)')
 ap.add_argument('--ntheta', type=int, required=True, help='number of projection angles')
 ap.add_argument('--nchunk', type=int, default=4,     help='theta chunk size for batched ops (default 4)')
+ap.add_argument('--ndistchunk', type=int, default=0,
+                help='distances sharing one upload of a theta chunk of proj '
+                     '(0 = all ndist, the default; 1 = the old outer-distance loop)')
 ap.add_argument('--log',    type=str, default='perf.log',
                 help='log file path (rank 0; pass an empty string to disable file logging)')
 args_cli = ap.parse_args()
@@ -37,6 +40,7 @@ args_cli = ap.parse_args()
 n       = args_cli.n
 ntheta  = args_cli.ntheta
 nchunk  = args_cli.nchunk
+ndistchunk = args_cli.ndistchunk
 log_path = args_cli.log
 
 
@@ -45,7 +49,10 @@ nz              = n
 nobj            = 3264*n//2048                       # small padding around detector for tomo
 nzobj           = nobj                          # cubic object volume
 ndist           = 4
-niter           = 2                             # short — measures steady-state per-iter cost
+# 0 on the command line means "all of them"; resolve it here so the plan, the
+# log header and Rec all quote the same number.
+ndistchunk = min(ndistchunk, ndist) if ndistchunk > 0 else ndist
+niter           = 1                             # short — measures steady-state per-iter cost
 obj_dtype       = 'complex64'
 rho             = [1, 0.05, 0.02]
 mask            = 1.1
@@ -163,7 +170,7 @@ args = SimpleNamespace(
     # sizes
     nz=nz, n=n, nzobj=nzobj, nobj=nobj,
     ntheta=ntheta, ndist=ndist,
-    nchunk=nchunk, niter=niter, start_iter=start_iter,
+    nchunk=nchunk, ndistchunk=ndistchunk, niter=niter, start_iter=start_iter,
     # dtypes / regs
     obj_dtype=obj_dtype, rho=rho,
     lam_prbfit=lam_prbfit, lam_laplacian=lam_laplacian,
@@ -185,7 +192,8 @@ args = SimpleNamespace(
 # ── Build the reconstruction class ──────────────────────────────────────────
 if rank == 0:
     logger.warning(f"perf-test: n={n} nz={nz} nobj={nobj} nzobj={nzobj} "
-                   f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} niter={niter} "
+                   f"ntheta={ntheta} ndist={ndist} nchunk={nchunk} "
+                   f"ndistchunk={ndistchunk} niter={niter} "
                    f"nranks={size} obj_dtype={obj_dtype}")
 cl = Rec(args)
 

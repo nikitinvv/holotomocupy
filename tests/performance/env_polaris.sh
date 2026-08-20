@@ -20,6 +20,12 @@ module load PrgEnv-gnu
 module load cray-hdf5-parallel
 module load cudatoolkit-standalone       # nvcc for the cuFFTDx JIT
 
+# Cray PE exports its library paths on CRAY_LD_LIBRARY_PATH, not
+# LD_LIBRARY_PATH, so an extension linked against libmpi_gnu_*.so fails to load
+# at rank start.  Merging the two is the fix; the ABI repair further down stays
+# as a fallback for the case where the ABI itself moved.
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 # Same GCC pin as setup_polaris_miniforge.sh: the cray-hdf5-parallel prefix
 # ends in the GCC ABI it was built for, and mpi4py/h5py were compiled under
 # that ABI.  Lmod's default gcc-native may be newer, which moves the cray-mpich

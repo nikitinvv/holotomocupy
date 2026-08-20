@@ -45,6 +45,12 @@ if [ -z "$HDF5_PREFIX" ] || [ ! -d "$HDF5_PREFIX/include" ]; then
 fi
 echo "=== HDF5 prefix: $HDF5_PREFIX"
 
+# The Cray PE modules put their libraries on CRAY_LD_LIBRARY_PATH and leave
+# LD_LIBRARY_PATH alone, so `cc` links mpi4py against libmpi_gnu_123.so.12 and
+# the loader then cannot find it ("cannot open shared object file").  Merge the
+# two.  This covers mpich, hdf5, libsci and pmi in one go.
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 HDF5_GCC=$(echo "$HDF5_PREFIX" | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/?$|\1|p')
 MPICH_ABIS=$(ls -1d /opt/cray/pe/mpich/*/ofi/gnu/*/ 2>/dev/null \
              | sed -nE 's|.*/gnu/([0-9]+\.[0-9]+)/$|\1|p' | sort -u)
@@ -146,12 +152,43 @@ have_parallel_h5py() {
 }
 have_cupy() { python -c "import cupy" 2>/dev/null; }
 
+# In site mode the venv inherits the ALCF conda's site-packages, and those were
+# built against the numpy that ships there.  `pip install -U numpy` would
+# shadow it with a newer one for every inherited extension -- so only ever
+# install a prerequisite that is genuinely absent, never upgrade one.
+ensure() {   # ensure <import name> [pip name]
+    python -c "import $1" 2>/dev/null && return 0
+    run_build "installing ${2:-$1}" pip install --no-cache-dir "${2:-$1}"
+}
+
+why_mpi4py() {
+    python - 2>&1 <<'DIAG'
+try:
+    from mpi4py import MPI
+except Exception as e:
+    print(f"not importable ({type(e).__name__}: {e})")
+else:
+    v = MPI.Get_library_version().strip().splitlines()[0]
+    print(("Cray -- " if "CRAY" in v.upper() else "NOT Cray -- ") + v[:70])
+DIAG
+}
+why_h5py() {
+    python - 2>&1 <<'DIAG'
+try:
+    import h5py
+except Exception as e:
+    print(f"not importable ({type(e).__name__}: {e})")
+else:
+    print(f"{h5py.version.version}, mpi={h5py.get_config().mpi}")
+DIAG
+}
+
 # --- mpi4py ----------------------------------------------------------------
 if have_cray_mpi4py; then
     echo "=== mpi4py: already Cray MPICH, leaving it alone"
 else
-    run_build "installing build prerequisites" \
-        pip install --no-cache-dir -U pip setuptools wheel "numpy<3" Cython pkgconfig
+    echo "=== mpi4py must be built -- inherited state: $(why_mpi4py)"
+    ensure setuptools; ensure wheel; ensure numpy; ensure Cython cython; ensure pkgconfig
     # `cc -shared`: the Cray wrapper can default to static linking, which
     # produces an unimportable extension.  If this fails, retry with MPICC=cc.
     run_build "building mpi4py against Cray MPICH" \
@@ -163,8 +200,8 @@ fi
 if have_parallel_h5py; then
     echo "=== h5py: already built with MPI, leaving it alone"
 else
-    python -c "import numpy" 2>/dev/null || \
-        run_build "installing numpy" pip install --no-cache-dir "numpy<3" Cython pkgconfig
+    echo "=== h5py must be built -- inherited state: $(why_h5py)"
+    ensure numpy; ensure Cython cython; ensure pkgconfig
     # --no-deps, NOT --force-reinstall: h5py built with MPI declares mpi4py as
     # a runtime dependency, and --force-reinstall re-resolves dependencies --
     # which downloads the PyPI mpi4py wheel and overwrites the Cray build with
@@ -185,17 +222,23 @@ else
 fi
 
 # --- the rest --------------------------------------------------------------
-for pkg in scipy tifffile matplotlib matplotlib_scalebar pandas psutil nvtx dxchange; do
-    python -c "import $pkg" 2>/dev/null && continue
-    case "$pkg" in matplotlib_scalebar) name=matplotlib-scalebar ;; *) name=$pkg ;; esac
-    run_build "installing $name" pip install --no-cache-dir "$name"
-done
+ensure scipy; ensure tifffile; ensure matplotlib
+ensure matplotlib_scalebar matplotlib-scalebar
+ensure pandas; ensure psutil; ensure nvtx; ensure dxchange
 
 run_build "installing holotomocupy (editable)" pip install --no-cache-dir --no-deps -e "$REPO"
 
 # Anything above could in principle have pulled a PyPI mpi4py over the Cray
 # build.  Cheap to check; expensive to discover from a job running over TCP.
 if ! have_cray_mpi4py; then
+    if python -c "import mpi4py.MPI" 2>&1 | grep -q "cannot open shared object file"; then
+        # Rebuilding cannot fix a loader-path problem; say so instead of
+        # burning another compile on a node that struggles to fork one.
+        echo "ERROR: mpi4py is built but its MPI library is not on LD_LIBRARY_PATH:" >&2
+        python -c "import mpi4py.MPI" 2>&1 | sed 's/^/       /' >&2
+        echo "       CRAY_LD_LIBRARY_PATH=${CRAY_LD_LIBRARY_PATH:-<unset>}" >&2
+        exit 1
+    fi
     run_build "repairing a clobbered mpi4py" \
         env MPICC="cc -shared" pip install --no-cache-dir --force-reinstall \
             --no-binary=mpi4py --no-build-isolation mpi4py

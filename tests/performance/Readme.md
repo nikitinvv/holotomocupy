@@ -14,7 +14,6 @@ that summarises one BH iteration.
 | `run_mosaic_polaris.sh` / `run_polaris.sh` | the same two runs as **PBS job scripts for Polaris** — `qsub` them; `mpiexec`/PALS launch and `nchunk` sized for a 40 GB card |
 | `set_affinity_gpu.sh`  | per-rank GPU pinning (`CUDA_VISIBLE_DEVICES = local_rank % ngpus`; Open MPI / SLURM / PMI) |
 | `set_affinity_gpu_polaris.sh` | the Polaris variant: `PMI_LOCAL_RANK`, GPUs numbered opposite the CPU NUMA nodes |
-| `env_polaris.sh`       | conda + venv + `MATHDX_ROOT` for the Polaris jobs, and the post-maintenance mpich-ABI workaround |
 | `parse_perf_log.py`    | reads the perf log; reports per-iter timing breakdown + max process / GPU memory |
 
 All four drivers carry their settings as plain assignments at the top of the
@@ -546,15 +545,11 @@ defaults:
 * the size (`N`, or `BIN` + `NTILE_V` / `NTILE_H`) and `NCHUNK` as plain
   assignments below the header, with the recommended values in a comment.
 
-Both scripts source **`env_polaris.sh`** rather than relying on `~/.bashrc`:
-the same activation the production jobs in
-`experimental/YY037A_mosaic/polaris_run.sh` use (`module use /soft/modulefiles;
-module load conda; conda activate base`, then the venv under
-`$HOME/venvs/<conda-module-version>`), plus `MATHDX_ROOT` — without it cuFFTDx
-is missing and propagation falls back to cuPy FFT, which makes the timings
-incomparable. It also carries the post-maintenance workarounds, marked
-`TEMPORARY` and safe to delete once the site is fixed: see
-[After an ALCF maintenance](#after-an-alcf-maintenance) below.
+Both scripts source `./env_polaris.sh` if you put one next to them, so the
+ranks do not depend on `~/.bashrc`; without that file they run in whatever
+environment `qsub` inherits. Either way `MATHDX_ROOT` has to point at a mathDx
+install — without it cuFFTDx is missing and propagation falls back to cuPy FFT,
+which makes the timings incomparable with the other machines.
 
 To run one, edit two things — `#PBS -l select=` and the size block — and submit
 (`#PBS -A` is already the 14238 allocation):
@@ -591,47 +586,6 @@ It echoes its rank→device choice, so check that line first if timings look
 halved: all four ranks on GPU 0 is the failure this wrapper exists to prevent.
 (The generic `set_affinity_gpu.sh` also understands `PMI_*`, but not the
 reversed numbering, and it aborts if it recognises no rank variable at all.)
-
-#### After an ALCF maintenance
-
-Both failure modes below have already happened once and look nothing like a
-problem with the benchmark:
-
-* **`Lmod has detected the following error: The following module(s) are
-  unknown: "cray-hdf5-parallel/…" "gcc-native/14.2"`** while loading
-  `conda/<date>` — the conda module's dependencies were retired. Load `conda`
-  unpinned (`module load conda`), and if a version that should exist is missing
-  try `module --ignore_cache load …` first; the Lmod cache goes stale across
-  maintenances. `module avail conda` / `module spider conda` say what is
-  actually there.
-* **`ImportError: libmpi_gnu_123.so.12: cannot open shared object file`** on
-  `from mpi4py import MPI`, on every rank — mpi4py was built against the
-  cray-mpich of another compiler (`gnu_123` = GCC 12.3) and the current
-  `PrgEnv-gnu` puts a different one on the path. Check what still exists with
-  `ls -d /opt/cray/pe/mpich/*/ofi/gnu/*`. If the old ABI is still there, load
-  the matching `gcc-native`; if not, rebuild mpi4py in the venv:
-
-  ```bash
-  MPICC=cc pip install --force-reinstall --no-cache-dir --no-binary=mpi4py mpi4py
-  ```
-
-  The venv is keyed to the conda-module version (`$HOME/venvs/<version>`), so a
-  module bump silently points at a venv that was never created — the scripts
-  warn and fall back to the newest one instead of running on base conda.
-
-`env_polaris.sh` handles both automatically, and says so when it does:
-
-* if `module load conda` fails it sources
-  `/soft/applications/conda/*/mconda3/etc/profile.d/conda.sh` directly — the
-  conda install is fine, only the modulefile is broken;
-* it reads the missing `libmpi_gnu_XYZ.so` out of `ldd` on mpi4py's extension,
-  turns `XYZ` into a GCC version and prepends the matching
-  `/opt/cray/pe/mpich/*/ofi/gnu/<ver>/lib`. If that directory no longer exists
-  it stops the job with the rebuild command rather than letting `mpiexec` fail
-  on every rank.
-
-Both blocks are marked `TEMPORARY` — delete them once ALCF ships a working
-`conda` modulefile and mpi4py has been rebuilt against the current cray-mpich.
 
 Sanity-check the environment before spending a job on the benchmark:
 
@@ -737,9 +691,8 @@ The 2 × 3 shape skips the otherwise natural 64-node point on purpose: there
 #### Copy-paste: complete job scripts (PBS)
 
 Each job is one `qsub` of one of the two scripts, with the header and the size
-block edited to match a row of the tables above. `-A 14238` and the environment
-(`env_polaris.sh`) are already set; `-l filesystems` and the queue are the only
-other site-specific bits.
+block edited to match a row of the tables above. `-A 14238` is already set;
+`-l filesystems` and the queue are the only other site-specific bits.
 
 **Job 1 — mosaic bin 3, 1 × 5 (`select=1`, `debug`).** The shipped defaults:
 

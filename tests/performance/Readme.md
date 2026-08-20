@@ -555,8 +555,8 @@ incomparable. It also carries the post-maintenance workarounds, marked
 `TEMPORARY` and safe to delete once the site is fixed: see
 [After an ALCF maintenance](#after-an-alcf-maintenance) below.
 
-To run one, edit three things — `#PBS -A <project>`, `#PBS -l select=` and the
-size block — and submit:
+To run one, edit two things — `#PBS -l select=` and the size block — and submit
+(`#PBS -A` is already the 14238 allocation):
 
 ```bash
 qsub run_polaris.sh
@@ -736,8 +736,9 @@ The 2 × 3 shape skips the otherwise natural 64-node point on purpose: there
 #### Copy-paste: complete job scripts (PBS)
 
 Each job is one `qsub` of one of the two scripts, with the header and the size
-block edited to match a row of the tables above. Adjust `-A`, the `module` /
-`conda activate` lines and `-l filesystems` once — they are site-specific.
+block edited to match a row of the tables above. `-A 14238` and the environment
+(`env_polaris.sh`) are already set; `-l filesystems` and the queue are the only
+other site-specific bits.
 
 **Job 1 — mosaic bin 3, 1 × 5 (`select=1`, `debug`).** The shipped defaults:
 

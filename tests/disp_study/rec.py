@@ -74,7 +74,7 @@ def parse():
                    help='run this many first iterations with the probe and the positions '
                         'frozen, then release them. Tames the very first BH step when the '
                         'obj/prb ambiguity is still nearly unbroken (small --amp).')
-    p.add_argument('--mask', type=float, default=0, help='support mask radius (fraction of FOV)')
+    p.add_argument('--mask', type=float, default=1.1, help='support mask radius (fraction of FOV)')
     p.add_argument('--lam-prbfit',    type=float, default=2e-3, help='probe-fit regularisation')
     p.add_argument('--lam-laplacian', type=float, default=0.0,  help='Laplacian regularisation')
     p.add_argument('--pos-err', type=float, default=0.0,

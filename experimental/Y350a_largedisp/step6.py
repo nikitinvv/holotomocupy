@@ -91,7 +91,7 @@ logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
 reader.read_shrink(out=cl.shrink_nd)
-logger.info(cl.shrink_nd[:3,:])
+logger.debug(f"shrink[:, :3] = {cl.shrink_nd[:, :3]}")
 
 # --- Load initial variables (object, probe, positions) ------------------
 # Resume from the latest checkpoint if one exists; otherwise use the
@@ -117,10 +117,10 @@ else:
     reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 if args.pos_checkpoint:
     logger.info(f"Overriding positions from: {args.pos_checkpoint}")
-    logger.info(f'before {cl.vars['pos'][:1]=}')
+    logger.info(f"pos before override: {cl.vars['pos'][:1]}")
     reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
-    logger.info(f'after {cl.vars['pos'][:1]=}')
-    
+    logger.info(f"pos after  override: {cl.vars['pos'][:1]}")
+
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")
 vars = cl.BH(writer)

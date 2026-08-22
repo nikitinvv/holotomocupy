@@ -146,9 +146,13 @@ n = args.n if args.n is not None else n0
 sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
 stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
 
-# Auto-detect number of flat / dark frames by counting files at angle 0
-nref  = len(glob.glob(f'{dname0}/ref*_0000.*'))
-ndark = len(glob.glob(f'{dname0}/darkend*.*'))
+# Auto-detect number of flat / dark frames per batch.
+#   refs  -> {dname}/ref{BATCH:04d}_{ANGLE:04d}.edf   (ANGLE = 0 or ntheta)
+#   darks -> {dname}/darkend{BATCH:04d}.edf
+# The patterns are anchored on a digit so partially-processed dirs holding
+# refHST*/dark.edf averages are not counted as extra batches.
+nref  = len(glob.glob(f'{dname0}/ref[0-9]*_0000.edf'))
+ndark = len(glob.glob(f'{dname0}/darkend[0-9]*.edf'))
 
 # Stitched object size (same at all steps that use it: 4, 5), overrideable via --nobj
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
@@ -207,8 +211,6 @@ else:
         white1_ds = [fid.create_dataset(f'/exchange/data_white_end{k}',   shape=(nref,  n, n),  dtype='uint16') for k in range(ndist)]
         dark_ds   = [fid.create_dataset(f'/exchange/data_dark{k}',        shape=(ndark, n, n),  dtype='uint16') for k in range(ndist)]
         theta_ds  = fid.create_dataset('/exchange/theta',  shape=(ntheta, ndist), dtype='float32')
-        shifts_ds = fid.create_dataset('/exchange/shifts', shape=(ntheta, ndist, 2), dtype='float32')
-        attrs_ds  = fid.create_dataset('/exchange/attrs',  shape=(ntheta, ndist, 3), dtype='float32')
         vs_ds     = fid.create_dataset('/exchange/voxelsize',             shape=voxelsizes.shape, dtype='float32')
         z1_ds     = fid.create_dataset('/exchange/z1',                    shape=z1.shape,         dtype='float32')
         dpx_ds    = fid.create_dataset('/exchange/detector_pixelsize',    shape=(1,),             dtype='float32')
@@ -226,17 +228,12 @@ else:
         for k in range(ndist):
             dname = f'{path}/{pfile}_{k + 1}_'
 
-            shifts_all = np.loadtxt(f'{dname}/correct.txt',    dtype='float32')[:ntheta]
-            attrs_all  = np.loadtxt(f'{dname}/attributes.txt', dtype='float32')[:ntheta, :3]
-            shifts_ds[local_start:local_end, k] = shifts_all[local_start:local_end]
-            attrs_ds[local_start:local_end,  k] = attrs_all[local_start:local_end]
-
             if rank == 0:
                 for id in range(nref):
-                    white0_ds[k][id] = fabio.open(f'{dname}/ref{id:04}_0000.edf').data[sty:endy, stx:endx]
-                    white1_ds[k][id] = fabio.open(f'{dname}/ref{id:04}_{ntheta:04}.edf').data[sty:endy, stx:endx]
+                    white0_ds[k][id] = fabio.open(f'{dname}/ref{id:04d}_0000.edf').data[sty:endy, stx:endx]
+                    white1_ds[k][id] = fabio.open(f'{dname}/ref{id:04d}_{ntheta:04d}.edf').data[sty:endy, stx:endx]
                 for id in range(ndark):
-                    dark_ds[k][id]   = fabio.open(f'{dname}/darkend{id:04}.edf').data[sty:endy, stx:endx]
+                    dark_ds[k][id]   = fabio.open(f'{dname}/darkend{id:04d}.edf').data[sty:endy, stx:endx]
 
             norms = np.empty(len(local_ids), dtype='float64')
             for ii, id in enumerate(local_ids):
@@ -285,68 +282,79 @@ else:
         mask  = cp.abs(data - fdata) > fdata * threshold
         return cp.where(mask, fdata, data)
 
-    # --- Rank 0 reads flat/dark fields, computes ref_start and ref_end ------
+    # --- Rank 0 reads flat/dark fields, computes ref (start-of-scan whites) --
+    # Only the start-of-scan flats are used. The old pipeline blended
+    # ref_start -> ref_end linearly in angle; that blend tracked ring/beam drift
+    # but also dragged a slow intensity ramp into the normalised projections,
+    # which then fought with the per-distance amplitude matching in steps 4/5.
     if rank == 0:
         ref0_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
-        ref1_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
         dark_arr  = np.empty([ndark, ndist, n, n], dtype='float32')
         with h5py.File(fpath) as fid:
             for k in range(ndist):
                 ref0_arr[:, k]  = fid[f'/exchange/data_white_start{k}'][:, :n, :n]
-                ref1_arr[:, k]  = fid[f'/exchange/data_white_end{k}'][:, :n, :n]
                 dark_arr[:, k]  = fid[f'/exchange/data_dark{k}'][:, :n, :n]
 
         dark = np.mean(dark_arr, axis=0).astype('float32')   # [ndist, n, n]
-        dark_gpu = cp.array(dark)
 
-        def _process_ref(ref_raw):
-            r = cp.array(np.mean(ref_raw, axis=0).astype('float32')) - dark_gpu
-            r[r < 0] = 1e-3
-            r[:] = remove_outliers(r, radius, threshold)
-            return r
-
-        ref_start_gpu = _process_ref(ref0_arr)
-        ref_end_gpu   = _process_ref(ref1_arr)
-
-        # Cross-distance normalisation: scale all distances to distance 0 mean
-        mmr = ref_start_gpu.mean(axis=(1, 2))   # [ndist]
-        ref_start_gpu /= mmr[:, None, None] / mmr[0]
-        ref_end_gpu   /= mmr[:, None, None] / mmr[0]
-        # Normalise so ref_start mean == 1
-        ref_start_gpu /= mmr[0]
-        ref_end_gpu   /= mmr[0]
-
-        ref_start = ref_start_gpu.get()
-        ref_end   = ref_end_gpu.get()
+        ref = np.mean(ref0_arr, axis=0).astype('float32')    # [ndist, n, n]
+        ref_gpu = cp.array(ref) - cp.array(dark)
+        ref_gpu[ref_gpu < 0] = 1e-3
+        ref_gpu[:] = remove_outliers(ref_gpu, radius, threshold)
+        ref = ref_gpu.get()
     else:
-        ref_start = np.empty([ndist, n, n], dtype='float32')
-        ref_end   = np.empty([ndist, n, n], dtype='float32')
-        dark      = np.empty([ndist, n, n], dtype='float32')
+        ref  = np.empty([ndist, n, n], dtype='float32')
+        dark = np.empty([ndist, n, n], dtype='float32')
 
-    comm.Bcast(ref_start, root=0)
-    comm.Bcast(ref_end,   root=0)
-    comm.Bcast(dark,      root=0)
+    comm.Bcast(ref,  root=0)
+    comm.Bcast(dark, root=0)
 
-    dark_gpu      = cp.array(dark)
-    ref_start_gpu = cp.array(ref_start)
-    ref_end_gpu   = cp.array(ref_end)
-    mmr_start = ref_start_gpu.mean(axis=(1, 2)).get()  # [ndist]
-    mmr_end   = ref_end_gpu.mean(axis=(1, 2)).get()    # [ndist]
+    dark_gpu = cp.array(dark)
 
-    # --- Rank 0: write pref / pref_end, delete any existing pdata ----------
+    # --- Per-projection target intensity: one fixed scalar per distance ------
+    # Rank 0 measures the mean of the *first* projection at each distance and
+    # broadcasts it; every projection at that distance is then rescaled to that
+    # same value. Constant-in-angle, unlike the old start->end interpolation, so
+    # projection-to-projection flux jitter is removed without adding a ramp.
+    if rank == 0:
+        mean_data_ref = np.zeros(ndist, dtype='float32')
+        with h5py.File(fpath) as fid:
+            for k in range(ndist):
+                data = cp.array(fid[f'/exchange/data{k}'][0, :n, :n].astype('float32'))
+                data -= dark_gpu[k]
+                data[data < 0] = 0
+                data = remove_outliers(data[None], radius, threshold)[0]
+                mean_data_ref[k] = float(data.mean())
+
+        # Cross-distance normalisation: scale everything to the distance-0 flat
+        # mean, then make that mean exactly 1.
+        mmr = np.mean(ref, axis=(1, 2))              # [ndist]
+        mean_data_ref *= mmr[0] / mmr[:]
+        ref           *= mmr[0] / mmr[:, None, None]
+        mean_data_ref /= mmr[0]
+        ref           /= mmr[0]
+        logger.info(f'step2: mean_data_ref = {mean_data_ref}')
+    else:
+        mean_data_ref = np.zeros(ndist, dtype='float32')
+
+    comm.Bcast(mean_data_ref, root=0)
+    comm.Bcast(ref,           root=0)
+
+    # --- Rank 0: write pref, delete any existing pdata ----------------------
     if rank == 0:
         with h5py.File(fpath, 'a') as fid:
-            for key, arr in (('/exchange/pref', ref_start), ('/exchange/pref_end', ref_end)):
-                if key in fid:
-                    del fid[key]
-                fid.create_dataset(key, data=arr)
+            if '/exchange/pref' in fid:
+                del fid['/exchange/pref']
+            fid.create_dataset('/exchange/pref', data=ref)
+            # Drop any legacy pref_end left by the old start/end-blend pipeline.
+            if '/exchange/pref_end' in fid:
+                del fid['/exchange/pref_end']
             for k in range(ndist):
                 if f'/exchange/pdata{k}' in fid:
                     del fid[f'/exchange/pdata{k}']
     comm.Barrier()
 
     # --- All ranks write pdata in parallel ---------------------------------
-    t_scale = max(ntheta - 1, 1)
     # Create output datasets first so all metadata is committed before data I/O
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         for k in range(ndist):
@@ -363,14 +371,11 @@ else:
                 data = cp.array(fid[f'/exchange/data{k}'][j:end, :n, :n].astype('float32'))
                 data -= dark_gpu[k]
                 data[data < 0] = 0
-                # data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True)
                 data[:] = remove_outliers(data, radius, threshold)
 
-                t = cp.arange(j, end, dtype='float32') / t_scale
-                target = ((1 - t) * float(mmr_start[k]) + t * float(mmr_end[k]))[:, None, None]
                 _mean = data.mean(axis=(1, 2), keepdims=True)
                 _mean[_mean == 0] = 1
-                data *= target / _mean
+                data *= float(mean_data_ref[k]) / _mean
                 data[~cp.isfinite(data)] = 1
 
                 pdata_ds[k][j:end] = data.get()
@@ -404,9 +409,15 @@ if rank == 0:
     else:
         logger.info('Step 3: combining shifts...')
 
-        logger.info(f'Step 3: reading shifts      from {fpath}  [/exchange/shifts]')
-        with h5py.File(fpath) as fid:
-            shifts = fid['/exchange/shifts'][:]   # [ntheta, ndist, 2]
+        # Encoder displacements come straight from the raw scan dirs (one
+        # correct.txt per distance, [ntheta, 2]) rather than from a copy stashed
+        # in the HDF5 at step 1 — so step 3 can be re-run after the shift files
+        # are updated, without redoing the EDF conversion.
+        shifts = np.empty([ntheta, ndist, 2], dtype='float32')
+        for k in range(ndist):
+            dname = f'{path}/{pfile}_{k + 1}_'
+            logger.info(f'Step 3: reading shifts      from {dname}/correct.txt')
+            shifts[:, k] = np.loadtxt(f'{dname}/correct.txt', dtype='float32')[:ntheta]
 
         # --- Encoder (random) shifts → object-plane pixels ---
         # axis 2 is (y, x) in detector pixels; swap to (row, col) and convert
@@ -441,7 +452,10 @@ if rank == 0:
         else:
             logger.info(f'Step 3: reading motion      from {_motion_path}')
             raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-            motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
+            # norm_magnifications (not eff_*) to stay consistent with the encoder
+            # shifts above: both are the initial coordinates the later
+            # corrections are measured against.
+            motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
             motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
@@ -485,51 +499,51 @@ else:
     # --- Rank 0 reads ref and full shift array; broadcast to all ranks ----
     if rank == 0:
         with h5py.File(fpath) as fid:
-            ref     = fid['/exchange/pref'][:, :n, :n].astype('float32')     # [ndist, n, n]
-            ref_end = fid['/exchange/pref_end'][:, :n, :n].astype('float32') if '/exchange/pref_end' in fid else ref.copy()
-            r       = fid['/exchange/cshifts_final'][:].astype('float32')
+            ref = fid['/exchange/pref'][:, :n, :n].astype('float32')     # [ndist, n, n]
+            r   = fid['/exchange/cshifts_final'][:].astype('float32')
         r[..., 1] += rotation_center_shift
     else:
-        ref     = np.empty([ndist, n, n], dtype='float32')
-        ref_end = np.empty([ndist, n, n], dtype='float32')
-        r       = np.empty([ntheta, ndist, 2], dtype='float32')
+        ref = np.empty([ndist, n, n], dtype='float32')
+        r   = np.empty([ntheta, ndist, 2], dtype='float32')
 
-    comm.Bcast(ref,     root=0)
-    comm.Bcast(ref_end, root=0)
-    comm.Bcast(r,       root=0)
+    comm.Bcast(ref, root=0)
+    comm.Bcast(r,   root=0)
 
     # --- Rank 0 writes binned refs ----------------------------------------
     if rank == 0:
-        ref0     = ref.copy()
-        ref0_end = ref_end.copy()
+        ref0 = ref.copy()
         with h5py.File(fpath, 'a') as fid:
             for bin in range(nlevels):
-                for key, arr in ((f'/exchange/pref_{bin}', ref0), (f'/exchange/pref_end_{bin}', ref0_end)):
-                    if key in fid:
-                        del fid[key]
-                    fid.create_dataset(key, data=arr)
-                ref0     = 0.5 * (ref0[..., ::2]     + ref0[..., 1::2])
-                ref0     = 0.5 * (ref0[..., ::2, :]  + ref0[..., 1::2, :])
-                ref0_end = 0.5 * (ref0_end[..., ::2]    + ref0_end[..., 1::2])
-                ref0_end = 0.5 * (ref0_end[..., ::2, :] + ref0_end[..., 1::2, :])
-
-            # Delete existing pdata{k}_{bin} datasets
-            for bin in range(nlevels):
-                for k in range(ndist):
-                    if f'/exchange/pdata{k}_{bin}' in fid:
-                        del fid[f'/exchange/pdata{k}_{bin}']
+                if f'/exchange/pref_{bin}' in fid:
+                    del fid[f'/exchange/pref_{bin}']
+                fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
+                # Drop legacy pref_end_{bin} from the old start/end-blend pipeline
+                # (reader.read_ref averages it in when present).
+                if f'/exchange/pref_end_{bin}' in fid:
+                    del fid[f'/exchange/pref_end_{bin}']
+                ref0 = 0.5 * (ref0[..., ::2]    + ref0[..., 1::2])
+                ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
-    cl_shift = Shift(n, nobj, n, nobj, 'complex64')
+    cl_shift = Shift(n, nobj, n, nobj)
     cref     = cp.array(ref)
-    cref_end = cp.array(ref_end)
-    t_scale  = max(ntheta - 1, 1)
+
+    # Inter-distance amplitude matching is a low-frequency operation: matching
+    # the raw ratio images couples it to speckle and edge detail, which differ
+    # between distances by construction. Smooth both data and flat with the same
+    # Gaussian first so the ratio carries only the slow illumination trend.
+    fwhm_ref    = 17.0 * (n / 2048)
+    sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
+    cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
-        data_out = [[fid.create_dataset(f'/exchange/pdata{k}_{bin}',
-                                        shape=(ntheta, n // 2**bin, n // 2**bin),
-                                        dtype='float32')
+        # require_dataset: step 4 can be re-run over an existing file without
+        # first deleting every pdata{k}_{bin} (a collective delete of TB-sized
+        # datasets is slow and leaves the file fragmented).
+        data_out = [[fid.require_dataset(f'/exchange/pdata{k}_{bin}',
+                                         shape=(ntheta, n // 2**bin, n // 2**bin),
+                                         dtype='float32', exact=True)
                      for k in range(ndist)]
                     for bin in range(nlevels)]
 
@@ -543,9 +557,8 @@ else:
             for k in range(ndist):
                 data[k] = cp.array(fid[f'/exchange/pdata{k}'][j, :n, :n].astype('float32'))
 
-            t = float(j) / t_scale
-            cref_chunk = (1 - t) * cref + t * cref_end
-            rdata = data / (cref_chunk + 1e-5)
+            data_smooth = cp.stack([ndimage.gaussian_filter(data[k], sigma_ref) for k in range(ndist)])
+            rdata = data_smooth / (cref_smooth + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])
@@ -576,6 +589,30 @@ else:
                                 tmp[pady0:-pady1, padx0:-padx1].mean())
                     tmp     *= mmm
                     data[k] *= mmm
+                    if k == 0:
+                        # A single scalar mmm cannot absorb a spatially varying
+                        # mismatch between the innermost distance and the rest.
+                        # Measure the ratio on a 3x3 grid of patches (corners of
+                        # the valid area + centre), bilinearly upsample it to the
+                        # object grid and apply it to both the stitched frame and
+                        # the detector-space data that step 6 will fit.
+                        cs   = min(nobj // 16, (nobj - pady0 - pady1) // 2, (nobj - padx0 - padx1) // 2)
+                        ch   = cs // 2
+                        midy = nobj // 2
+                        midx = nobj // 2
+                        ys   = [pady0, midy - ch, nobj - pady1 - cs]
+                        xs   = [padx0, midx - ch, nobj - padx1 - cs]
+                        prev = srdata[k + 1]
+                        R = cp.array([[float(prev[y:y+cs, x:x+cs].mean() /
+                                             (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                       for x in xs] for y in ys], dtype='float32')
+                        ratio_map = ndimage.zoom(R, nobj / 3, order=1)
+                        tmp *= ratio_map[:nobj, :nobj]
+                        ratio_crop = ratio_map[pady0:nobj-pady1, padx0:nobj-padx1]
+                        data[k] *= ndimage.zoom(ratio_crop,
+                                                (n / ratio_crop.shape[0],
+                                                 n / ratio_crop.shape[1]),
+                                                order=1)[:n, :n]
                     wx = cp.ones(nobj, dtype='float32')
                     wy = cp.ones(nobj, dtype='float32')
                     wx[:padx0]               = 0
@@ -679,8 +716,12 @@ else:
             ref = np.empty([ndist, n_bin, n_bin], dtype='float32')
         comm.Bcast(ref, root=0)
 
-        cref     = cp.array(ref)
-        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 'complex64')
+        cref        = cp.array(ref)
+        # Same low-pass as step 4, scaled with the bin level.
+        fwhm_ref    = 17.0 * (n_bin / 2048)
+        sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
+        cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
+        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin)
         npad_bin = n_bin // 16
         v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
         v_bin    = v_bin**5 * (126 - 420*v_bin + 540*v_bin**2 - 315*v_bin**3 + 70*v_bin**4)
@@ -693,7 +734,8 @@ else:
             data_j = cp.empty([ndist, n_bin, n_bin], dtype='float32')
             for k in range(ndist):
                 data_j[k] = cp.array(fid[f'/exchange/pdata{k}_{bin}'][j].astype('float32'))
-            rdata = data_j / (cref + 1e-5)
+            data_j_smooth = cp.stack([ndimage.gaussian_filter(data_j[k], sigma_ref) for k in range(ndist)])
+            rdata = data_j_smooth / (cref_smooth + 1e-5)
             srdata.fill(0)
             for k in range(ndist - 1, -1, -1):
                 shrink_jk  = float(shrink_nd[j, k])
@@ -719,6 +761,22 @@ else:
                     denom = tmp[pady0:-pady1, padx0:-padx1].mean() + 1e-10
                     mmm   = float(srdata[k+1][pady0:-pady1, padx0:-padx1].mean() / denom)
                     tmp  *= mmm
+                    if k == 0:
+                        # 3x3 spatially varying ratio correction, as in step 4.
+                        cs   = min(nobj_bin // 16,
+                                   (nobj_bin - pady0 - pady1) // 2,
+                                   (nobj_bin - padx0 - padx1) // 2)
+                        ch   = cs // 2
+                        midy = nobj_bin // 2
+                        midx = nobj_bin // 2
+                        ys   = [pady0, midy - ch, nobj_bin - pady1 - cs]
+                        xs   = [padx0, midx - ch, nobj_bin - padx1 - cs]
+                        prev = srdata[k + 1]
+                        R = cp.array([[float(prev[y:y+cs, x:x+cs].mean() /
+                                             (tmp[y:y+cs, x:x+cs].mean() + 1e-10))
+                                       for x in xs] for y in ys], dtype='float32')
+                        ratio_map = ndimage.zoom(R, nobj_bin / 3, order=1)
+                        tmp *= ratio_map[:nobj_bin, :nobj_bin]
                     wx = cp.ones(nobj_bin, dtype='float32')
                     wy = cp.ones(nobj_bin, dtype='float32')
                     wx[:padx0]                    = 0
@@ -753,17 +811,23 @@ else:
             logger.info(f'step5 bin={bin}: mm={mm_fixed:.6f}  global_bg={global_bg:.6f}')
 
         pad8 = nobj_bin // 8
+        # Save the stitched frames for the first n_srdata_save angles (not just
+        # angle 0) so the inter-distance matching can be inspected over a range
+        # of the scan. Layout is distance-major, then angle:
+        #   [d0_a0 .. d0_a19, d1_a0 .. d1_a19, ...]
+        n_srdata_save = min(20, ntheta)
         with h5py.File(fpath_srdata, 'a', driver='mpio', comm=comm) as fid_srdata:
             srdata_ds = fid_srdata.create_dataset(
                 f'/exchange/srdata_bin{bin}',
-                shape=(ndist, nobj_bin, nobj_bin),
+                shape=(ndist * n_srdata_save, nobj_bin, nobj_bin),
                 dtype='float32',
             )
             with h5py.File(fpath) as fid:
                 for i, j in enumerate(local_ids):
                     _stitch(fid, srdata, j)
-                    if j == 0:
-                        srdata_ds[:] = srdata.get()
+                    if j < n_srdata_save:
+                        for k in range(ndist):
+                            srdata_ds[k * n_srdata_save + j] = srdata[k].get()
                     pj  = cp.array(srdata)
                     pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
                     phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)

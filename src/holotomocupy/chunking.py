@@ -321,14 +321,20 @@ class Chunking:
         """res = Re<x, y>"""
         if isinstance(x, cp.ndarray):
             return redot(x, y).get()
-        res = cp.zeros(1, dtype="float32")
+        # 0-d, not shape (1,): gpu_batch classifies an output as chunked
+        # ("proper") by shape[axis_out] == size, so a (1,) accumulator is
+        # mistaken for a chunked output whenever size == 1 -- and chunked
+        # outputs are backed by *uninitialised* arena scratch, which turns this
+        # read-modify-write into garbage. `ndim > axis_out` is false for a 0-d
+        # array, so it can never alias, whatever the chunking length.
+        res = cp.zeros((), dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0)
         def _redot(self, res, x, y):
-            res[:] += redot(x, y)
+            res[...] += redot(x, y)
 
         _redot(self, res, x, y)
-        return res[0].get()
+        return res.get()[()]
 
     @timer
     def linear_batch(self, x, y, a, b, out=None):
@@ -351,15 +357,15 @@ class Chunking:
         if isinstance(x, cp.ndarray):
             _axpby(x, x, y, a, b)
             return redot(y, x).get()
-        res = cp.zeros(1, dtype="float32")
+        res = cp.zeros((), dtype="float32")   # 0-d — see redot_batch
 
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=2)
         def _linear_redot(self, out, res, x, y, a, b):
             _axpby(out, x, y, a, b)
-            res[:] += redot(y, out)
+            res[...] += redot(y, out)
 
         _linear_redot(self, x, res, x, y, a, b)
-        return res[0].get()
+        return res.get()[()]
 
     @timer
     def mulc_batch(self, out, x, a):

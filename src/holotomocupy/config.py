@@ -34,6 +34,11 @@ def parse_args(config_file):
         args.lam_prbfit    = cfg.getfloat("lam_prbfit")
         args.lam_laplacian = cfg.getfloat("lam_laplacian", fallback=0.0)
         args.rho = get_list(cfg, "rho", float)
+        # Optional rho tuning: False (default) -> args.rho used as-is; True ->
+        # BH first coordinate-searches rho[prb, pos] around args.rho with short
+        # trials of rho_estimate_niter iterations. See Rec.estimate_rho_coord.
+        args.estimate_rho       = cfg.getboolean("estimate_rho",       fallback=False)
+        args.rho_estimate_niter = cfg.getint    ("rho_estimate_niter", fallback=16)
         # Derive the CG beta/alpha from one Hessian sweep instead of three
         # (see the fused_hessian note on Rec). check_fused_hessian re-measures
         # every form the classic path would have measured and logs the relative

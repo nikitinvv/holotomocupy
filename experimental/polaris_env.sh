@@ -19,7 +19,9 @@ HTC_PREFIX=/lus/eagle/projects/APS_IRI/vvnikitin/sw/envs/htc
 module use /soft/modulefiles
 module load PrgEnv-gnu
 module load cray-mpich
-module load cudatoolkit-standalone
+# Pin the version: the site default is 12.2.2, but cupy in this env is built
+# for CUDA 13, so an unversioned load silently gives the wrong toolkit.
+module load cudatoolkit-standalone/13.0.1
 module load cray-hdf5-parallel
 
 # --- the line everything hinges on ---------------------------------------
@@ -52,5 +54,7 @@ conda activate "${HTC_PREFIX}"   # by full path: sw/envs is not conda's default 
 if [ "${HTC_ENV_CHECK:-0}" = "1" ]; then
     echo "python  : $(which python)"
     echo "libmpi  : $(ldd "$(python -c 'import mpi4py.MPI as m; print(m.__file__)')" 2>/dev/null | grep -i 'libmpi\.' || echo 'mpi4py did not import')"
-    python -c "import mpi4py, h5py, cupy; print('mpi4py', mpi4py.__version__, '| h5py', h5py.__version__, 'mpi=', h5py.get_config().mpi, '| cupy', cupy.__version__)"
+    # Import mpi4py.MPI, not just mpi4py: the bare package is pure Python and
+    # imports even when the compiled extension cannot find its libmpi.
+    python -c "from mpi4py import MPI; import mpi4py, h5py, cupy; print('mpi4py', mpi4py.__version__, MPI.Get_library_version().split(chr(10))[0], '| h5py', h5py.__version__, 'mpi=', h5py.get_config().mpi, '| cupy', cupy.__version__)"
 fi

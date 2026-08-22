@@ -49,6 +49,13 @@ module load cray-hdf5-parallel
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
 # Belt and braces: some cray-mpich versions leave libmpi.so.12 only here.
 [ -n "${CRAY_MPICH_DIR}" ] && export LD_LIBRARY_PATH="${CRAY_MPICH_DIR}/lib:${LD_LIBRARY_PATH}"
+# The ABI-versioned sonames the `cc` wrapper links against -- libmpi_gnu_123.so.12,
+# libhdf5_parallel_gnu_123.so.200 -- live in the shared PE lib dir, NOT in
+# $CRAY_MPICH_DIR/lib (which only has the unversioned libmpi_gnu.so.12).  A
+# cc-built mpi4py records the _123 soname, so this directory is mandatory.
+for d in /opt/cray/pe/lib64 /opt/cray/pe/lib64/cce /opt/cray/libfabric/*/lib64; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH}"
+done
 
 # GPU-aware MPI is deliberately OFF, and craype-accel-nvidia80 is not loaded.
 # holotomocupy never hands a device pointer to MPI: the only Alltoallw buffer is

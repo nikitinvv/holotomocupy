@@ -1257,7 +1257,7 @@ class Rec:
 
     def vis_debug(self, vars, i, writer=None):
         """Per-iter checkpoint write (pos-error plot bundled in)."""
-        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1): # or i <= self.start_iter:
+        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
             return
         writer.write_checkpoint(vars, i, self.norm_const, pos_init=self.pos_init)
 

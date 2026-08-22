@@ -92,17 +92,28 @@ def read_detector_pixelsize(h5path):
 def read_focustodetectordistance(h5path):
     return float(_read_h5_field(h5path, 'PTYCHO/focusToDetectorDistance')) * 1e-3
 
+# EDF headers are ASCII, open with '{', close with '}' and are padded to a
+# multiple of 512 B (2048 B for this detector).  Read one generous slab rather
+# than growing a bytes object 512 B at a time: the old loop scanned the whole
+# 32 MB frame with a quadratic `buf += chunk` whenever motor_pos was absent,
+# which turns one malformed file into a multi-minute stall inside the thread
+# pool, and then returned None so the failure surfaced far from its cause.
+_EDF_HEADER_MAX = 1 << 16
+
 def find_angle(fname):
     with open(fname, 'rb') as f:
-        buf = b''
-        while b'motor_pos' not in buf:
-            chunk = f.read(512)
-            if not chunk:
-                break
-            buf += chunk
-    for line in buf.decode('latin-1').split('\n'):
+        buf = f.read(_EDF_HEADER_MAX)
+    end = buf.find(b'}')
+    header = buf[:end] if end >= 0 else buf
+    for line in header.decode('latin-1').split('\n'):
         if 'motor_pos' in line:
+            # motor_mne = dummy somega sx sy sz focus ...  -> somega is field 3
+            # of "motor_pos = v0 v1 ..." (0='motor_pos', 1='=', 2=dummy).
             return float(line.split()[3])
+    raise ValueError(
+        f'no motor_pos line in the EDF header of {fname} '
+        f'(header {"terminated at " + str(end) + " B" if end >= 0 else "unterminated"}, '
+        f'read {len(buf)} B)')
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +215,6 @@ else:
         theta_vals = np.concatenate(all_theta_parts)
 
     with h5py.File(fpath, 'w', driver='mpio', comm=comm) as fid:
-
         # Collective: all ranks create every dataset
         data_ds   = [fid.create_dataset(f'/exchange/data{k}',             shape=(ntheta, n, n), dtype='uint16') for k in range(ndist)]
         white0_ds = [fid.create_dataset(f'/exchange/data_white_start{k}', shape=(nref,  n, n),  dtype='uint16') for k in range(ndist)]

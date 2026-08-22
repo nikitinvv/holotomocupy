@@ -261,7 +261,7 @@ class Reader:
                         bz = nz0 // self.nz
                         bn = n0 // self.n
                         prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
-                    out[k] = cp.array(prb)
+                    out[k] = cp.array(prb) if isinstance(out, cp.ndarray) else prb
                 if self.rank == 0:
                     print(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}', flush=True)
         else:
@@ -345,12 +345,20 @@ class Reader:
         if out_prb is None:
             out_prb = cp.array(prb_np)
         else:
-            out_prb[:] = cp.array(prb_np)
+            # vars['prb'] is a PINNED HOST buffer (see Rec.__init__), not a device
+            # array, so only wrap in cp.array when the caller really passed one.
+            out_prb[:] = cp.array(prb_np) if isinstance(out_prb, cp.ndarray) else prb_np
         del prb_np
         if scale > 1:
-            from cupyx.scipy.ndimage import shift
             shift_val = 0
-            out_prb[:] = shift(out_prb, shift=(0, 0, shift_val), order=3, mode='nearest')
+            if shift_val:
+                # Identity while shift_val == 0; kept so a sub-pixel probe
+                # re-centring can be reinstated. Resample on the GPU either way,
+                # then come back to the host if that is where out_prb lives.
+                from cupyx.scipy.ndimage import shift
+                shifted = shift(cp.asarray(out_prb), shift=(0, 0, shift_val),
+                                order=3, mode='nearest')
+                out_prb[:] = shifted if isinstance(out_prb, cp.ndarray) else shifted.get()
 
         # --- obj: z-batched read to cap peak CPU RAM ---
         # Old code read all nz_src slices into obj_re + obj_im + block at once,
@@ -549,5 +557,5 @@ class Reader:
         scale = 2 ** (-self.bin)
         for axis in [2, 1]:
             prb = np.repeat(prb, scale, axis=axis)
-        out[:] = cp.array(prb).astype('complex64')
+        out[:] = (cp.array(prb) if isinstance(out, cp.ndarray) else prb).astype('complex64')
         return out

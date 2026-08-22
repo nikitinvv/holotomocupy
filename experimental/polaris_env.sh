@@ -82,6 +82,44 @@ export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
 # libmpi_gtl_cuda, and set this to 1.
 export MPICH_GPU_SUPPORT_ENABLED=0
 
+# --- parallel HDF5 / MPI-IO on Lustre ------------------------------------
+# Every hang seen so far on Polaris has been at an h5py driver="mpio" call
+# (steps15 step 1 create, reader.read_data open).  None of this was needed on
+# tomo5; all of it is specific to /eagle being Lustre.
+#
+# 1. File locking.  HDF5 >=1.10 takes an flock() on open.  Lustre either does
+#    not honour it or serialises it across every rank, so a 40-96 rank open can
+#    block indefinitely.  ALCF's documented setting -- turn it off.  We are not
+#    mixing readers and writers on the same file, so nothing is at risk.
+export HDF5_USE_FILE_LOCKING=FALSE
+#
+# 2. ROMIO data sieving.  reader.read_data indexes with a list of theta ids
+#    (ds[ids, st:end]), which is an irregular selection.  With sieving ON,
+#    ROMIO fetches the whole enclosing span through a 512 KB sieve buffer, so a
+#    scattered read of a few GB turns into tens of GB of Lustre traffic; on
+#    writes it also does read-modify-write under a lock.  Disable both.
+#    Collective buffering is left enabled but is inert here: h5py issues
+#    independent I/O unless a `with ds.collective:` block is used.
+export MPICH_MPIIO_HINTS="${MPICH_MPIIO_HINTS:-*:romio_ds_read=disable:romio_ds_write=disable:romio_cb_read=enable:romio_cb_write=enable}"
+#
+# 3. Striping is NOT set here -- it is a property of the directory, inherited
+#    at file-create time, and must be set once per output dir BEFORE the file
+#    is written:
+#       lfs setstripe -c 8 -S 16M /eagle/APS_IRI/vnikitin/20250604/<...>_rec
+#    Default on eagle is stripe_count=1, i.e. the entire 134 GB
+#    <pfile>.h5 lands on a single OST and every rank contends for that one
+#    server.  Check an existing file with `lfs getstripe <file>`; if it says
+#    stripe_count 1 the file must be rewritten after re-striping the directory
+#    (changing the dir does not restripe files already in it).
+#
+# 4. Diagnostics: set HTC_MPIIO_STATS=1 to have cray-mpich print per-file
+#    MPI-IO counters at exit.  Noisy, but it is the fastest way to tell a
+#    genuinely blocked job from one that is merely doing 50x the I/O it should.
+if [ "${HTC_MPIIO_STATS:-0}" = "1" ]; then
+    export MPICH_MPIIO_STATS=1
+    export MPICH_MPIIO_TIMERS=1
+fi
+
 # --- conda LAST ----------------------------------------------------------
 # `conda activate` is a shell function defined by this hook; the condabin/conda
 # binary on its own cannot activate anything.

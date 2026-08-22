@@ -81,7 +81,14 @@ conda activate "${HTC_PREFIX}"   # by full path: sw/envs is not conda's default 
 # Set HTC_ENV_CHECK=1 to print what actually resolved.
 if [ "${HTC_ENV_CHECK:-0}" = "1" ]; then
     echo "python  : $(which python)"
-    echo "libmpi  : $(ldd "$(python -c 'import mpi4py.MPI as m; print(m.__file__)')" 2>/dev/null | grep -i 'libmpi\.' || echo 'mpi4py did not import')"
+    # grep libmpi without a trailing dot: the Cray soname is libmpi_gnu.so.12.
+    _mpiso=$(python -c 'import mpi4py.MPI as m; print(m.__file__)' 2>/dev/null)
+    if [ -n "${_mpiso}" ]; then
+        ldd "${_mpiso}" | grep -i 'libmpi' | sed 's/^/libmpi  : /'
+    else
+        echo "libmpi  : mpi4py.MPI failed to import"
+    fi
+    unset _mpiso
     # Import mpi4py.MPI, not just mpi4py: the bare package is pure Python and
     # imports even when the compiled extension cannot find its libmpi.
     python -c "from mpi4py import MPI; import mpi4py, h5py, cupy; print('mpi4py', mpi4py.__version__, MPI.Get_library_version().split(chr(10))[0], '| h5py', h5py.__version__, 'mpi=', h5py.get_config().mpi, '| cupy', cupy.__version__)"

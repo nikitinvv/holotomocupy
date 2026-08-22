@@ -15,6 +15,7 @@
 # mpi4py and h5py must be pip-compiled against the Cray wrappers, NOT installed
 # from conda-forge or a PyPI wheel:
 #
+#   module unload darshan          # see below -- required, not optional
 #   conda remove --force -y mpi4py mpich openmpi mpi
 #   MPICC=cc pip install --no-cache-dir --no-binary=mpi4py --no-build-isolation mpi4py
 #   HDF5_MPI=ON CC=cc pip install --no-cache-dir --no-binary=h5py --no-build-isolation h5py
@@ -40,6 +41,15 @@ module load cray-mpich
 # for CUDA 13, so an unversioned load silently gives the wrong toolkit.
 module load cudatoolkit-standalone/13.0.1
 module load cray-hdf5-parallel
+# Darshan MUST be unloaded.  The cc wrapper silently injects libdarshan.so.0
+# into everything it links, and the installed Darshan build carries a NEEDED
+# entry for libmpi_gnu_123.so.12 -- a cray-mpich version that no longer exists
+# on the system.  The result is that a correctly-built mpi4py still dies with
+#   ImportError: libmpi_gnu_123.so.12: cannot open shared object file
+# even though its own libmpi_gnu.so.12 resolves fine.  Unload before BOTH the
+# pip build and every job: the bad NEEDED entry is baked in at link time, so a
+# module unloaded only at run time does not help an already-linked extension.
+module unload darshan 2>/dev/null || true
 
 # --- the line everything hinges on ---------------------------------------
 # The Cray PE modules populate CRAY_LD_LIBRARY_PATH, NOT LD_LIBRARY_PATH.
@@ -49,13 +59,6 @@ module load cray-hdf5-parallel
 export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
 # Belt and braces: some cray-mpich versions leave libmpi.so.12 only here.
 [ -n "${CRAY_MPICH_DIR}" ] && export LD_LIBRARY_PATH="${CRAY_MPICH_DIR}/lib:${LD_LIBRARY_PATH}"
-# The ABI-versioned sonames the `cc` wrapper links against -- libmpi_gnu_123.so.12,
-# libhdf5_parallel_gnu_123.so.200 -- live in the shared PE lib dir, NOT in
-# $CRAY_MPICH_DIR/lib (which only has the unversioned libmpi_gnu.so.12).  A
-# cc-built mpi4py records the _123 soname, so this directory is mandatory.
-for d in /opt/cray/pe/lib64 /opt/cray/pe/lib64/cce /opt/cray/libfabric/*/lib64; do
-    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH}"
-done
 
 # GPU-aware MPI is deliberately OFF, and craype-accel-nvidia80 is not loaded.
 # holotomocupy never hands a device pointer to MPI: the only Alltoallw buffer is

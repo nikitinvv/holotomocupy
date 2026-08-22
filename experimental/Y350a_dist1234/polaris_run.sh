@@ -21,21 +21,17 @@ NTHREADS=4
 NDEPTH=8
 export NTOTRANKS=$(( NNODES * NRANKS ))
 
-SCRIPT_DIR="$(pwd)"
+# Directory the job was submitted from (PBS_O_WORKDIR when submitted via qsub;
+# falls back to the script's own directory for local ./polaris_run.sh testing).
+# Plain $(pwd) does NOT work: PBS starts the job in $HOME, not where you qsub'd.
+SCRIPT_DIR="${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 rec_dir="$(dirname "${SCRIPT_DIR}")"
 
-# snapshot only py and conf files into a dated folder inside rec_dir
-scripts_dir="${rec_dir}/scripts$(date +%Y-%m-%d_%H-%M-%S)"
-mkdir -p "${scripts_dir}"
-cp "${SCRIPT_DIR}"/*.py   "${scripts_dir}/" 2>/dev/null || true
-cp "${SCRIPT_DIR}"/*.conf "${scripts_dir}/" 2>/dev/null || true
-
 cd "${rec_dir}"
-exec > >(tee "${scripts_dir}/slurm-${PBS_JOBID}.out" "${SCRIPT_DIR}/slurm-${PBS_JOBID}.out") 2>&1
+exec > >(tee "${SCRIPT_DIR}/slurm-${PBS_JOBID}.out") 2>&1
 
 echo "Sample dir:  ${SCRIPT_DIR}"
 echo "Rec dir:     ${rec_dir}"
-echo "Snapshot:    ${scripts_dir}"
 echo "Jobid: $PBS_JOBID"
 echo "Running on host: $(hostname)"
 echo "Running on nodes: $(cat $PBS_NODEFILE)"

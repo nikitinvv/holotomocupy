@@ -20,6 +20,17 @@
 #   MPICC=cc pip install --no-cache-dir --no-binary=mpi4py --no-build-isolation mpi4py
 #   HDF5_MPI=ON CC=cc pip install --no-cache-dir --no-binary=h5py --no-build-isolation h5py
 #
+# The remaining dependencies are pure/simple and install normally -- but pin
+# numpy to the installed version so pip cannot upgrade it and break the cupy /
+# h5py ABI:
+#
+#   NPV=$(python -c "import numpy; print(numpy.__version__)")
+#   pip install --no-cache-dir "numpy==${NPV}" \
+#       fabio tifffile psutil matplotlib matplotlib-scalebar nvtx
+#
+# (nvtx is a hard import in rec_mpi.py / rec_nfp_mpi.py, so step6 needs it even
+# though nothing profiles by default.)
+#
 # Why: cray-mpich 9.1.0 ships libmpi_gnu.so.12 and an unversioned libmpi.so,
 # but NO libmpi.so.12.  conda-forge mpi4py and the PyPI wheel are both linked
 # against stock MPICH's libmpi.so.12, so they can never resolve here no matter

@@ -134,6 +134,35 @@ to catch".
 That is a stronger argument for letting BH refine the positions on this scan
 than on largedisp, where the sample really does just drift.
 
+### Feeding the drift back into the reconstruction
+
+`--export-correct3d` writes the fit where step 3 of `steps15.py` looks for it,
+`{path}/{pfile}_/correct_correct3D.txt`, and the next run of steps 1–5 folds it
+into `shifts_final` along with the random, rhapp and motion shifts:
+
+```bash
+mpirun -n 4 ./set_affinity_gpu.sh python estimate_drift.py config_steps15.conf \
+    --export-correct3d              # --export-deg 5 by default
+```
+
+`../AtomiumL1_largedisp/README.md` documents the file in full; the three things
+worth repeating are that the export is a **plain** polynomial with no orbit
+term taken out (`A·cos θ + B·sin θ` in x is exactly a rigid translation of the
+object, so keeping it only re-centres the volume laterally), that the sign and
+the unbinned units were measured rather than assumed, and that the columns are
+**x then y** because step 3 reads the file as `np.loadtxt(...)[:ntheta, ::-1]`.
+
+The exported curve is the **black dashed line** on `drift_bin2.png`, in all four
+angle panels, so it can be read against the measured points and the orbit-free
+fits; the dx drift panel is where the difference shows, the export sweeping
+22.7 px against the orbit-free 8.5 px.
+
+Written 2026-08-23: x ptp 22.67 px, y ptp 26.37 px, rms residual 2.55 / 4.68 px.
+The x amplitude is larger than the orbit-free 8.5 px in the table above because
+the 15.8 px orbit is now inside the exported curve; y is unchanged at 26.4 px.
+Given the structure function, this file removes the slow part and leaves the
+~4.7 px rms wander for BH's position refinement.
+
 ## Open items
 
 1. **`paganin=120` is inherited, not measured.** Taken from the `AtomiumS2`
@@ -150,8 +179,10 @@ than on largedisp, where the sample really does just drift.
    is therefore disabled and the probe starts from the flat field — same as
    Y350a_HT. Enabling it needs a code change in `step0.py` plus a decision
    about modelling the aperture.
-4. **`shrink_list.mat` and `correct_correct3D.txt` are absent**, so shrink and
-   the 3-D correction default to zeros (steps15 warns). Same as Y350a_HT.
+4. **`shrink_list.mat` is absent**, so shrink defaults to zeros (steps15
+   warns). Same as Y350a_HT. `correct_correct3D.txt` was absent too until
+   `estimate_drift.py --export-correct3d` wrote one on 2026-08-23 (above);
+   steps 1-5 have to be rerun for it to take effect.
 5. **Bin 0 does not fit tomo5.** The 3264³ complex64 object is 278 GB against
    a 160 GB aggregate (4 x 40 GB). Bin 2 (4.3 GB) and bin 1 (35 GB) are fine.
    Either stage to Polaris for bin 0, or stop the ladder at bin 1

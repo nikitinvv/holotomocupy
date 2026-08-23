@@ -184,6 +184,21 @@ p.add_argument('--dump', type=int, default=0,
 p.add_argument('--stride', type=int, default=1,
                help='use every Nth projection (default 1 = all of them)')
 p.add_argument('--out', default=None, help='output directory (default: {path_out}/drift_bin{bin})')
+p.add_argument('--export-correct3d', action='store_true',
+               help='write the fitted drift as correct_correct3D.txt where step 3 '
+                    'of steps15.py looks for it, {path}/{pfile}_/.  A PLAIN '
+                    'polynomial is exported -- no orbit term is taken out first, '
+                    'whatever --no-orbit/--orbit-y say for the report above.  That '
+                    'is deliberate: A*cos(theta)+B*sin(theta) in x is exactly what a '
+                    'rigid translation of the object projects to, so leaving it in '
+                    'only re-centres the volume laterally and is tomographically '
+                    'consistent either way.')
+p.add_argument('--export-deg', type=int, default=5,
+               help='degree of the exported polynomial (default 5)')
+p.add_argument('--export-path', default=None,
+               help='write the export here instead of {path}/{pfile}_/correct_correct3D.txt')
+p.add_argument('--export-force', action='store_true',
+               help='overwrite an existing correct_correct3D.txt (refused otherwise)')
 a = p.parse_args()
 
 args = parse_args_steps15(a.config)
@@ -262,6 +277,15 @@ THR     = a.thr if a.thr is not None else {'grad': 0.0, 'quantile': 20.0}.get(SE
 ids   = np.arange(0, ntheta, a.stride)
 nsamp = len(ids)
 out_dir = a.out if a.out else f'{path_out}/drift_bin{bin}'
+
+# Where --export-correct3d will put the file, resolved and checked NOW rather
+# than after the 15 s of GPU work.  Every rank evaluates the same expression, so
+# a refusal exits all of them together instead of deadlocking on the barrier.
+export_path = ((a.export_path or f'{args.path}/{args.pfile}_/correct_correct3D.txt')
+               if a.export_correct3d else None)
+if export_path and os.path.exists(export_path) and not a.export_force:
+    raise SystemExit(f'{export_path} already exists -- '
+                     f'pass --export-force to replace it')
 tag     = f'drift_bin{bin}'
 
 ids_per_rank = np.array_split(ids, size)
@@ -757,6 +781,36 @@ orbit_x = fits[f'p{deg_hi}']['x'][3][1:] if ORBIT_X else None
 orbit_y = fits[f'p{deg_hi}']['y'][3][1:] if ORBIT_Y else None
 
 # ---------------------------------------------------------------------------
+# The curve that gets exported as correct_correct3D.txt
+# ---------------------------------------------------------------------------
+# Computed here rather than at the write, so the figure can draw it: it is not
+# any of the curves above.  A PLAIN polynomial through the raw centroid, no
+# orbit term taken out, because A*cos(theta)+B*sin(theta) in x is exactly what a
+# rigid translation of the object projects to -- keeping it only re-centres the
+# reconstructed volume laterally, which is tomographically consistent and one
+# less thing to get wrong.
+#
+# Fitted on the sampled good angles and evaluated on ALL ntheta of them, so a
+# run with --stride still produces a complete file; theta is normalised over the
+# whole scan, which makes every evaluation an interpolation.
+
+exp_fit = {}
+if a.export_correct3d:
+    edeg   = a.export_deg
+    th_all = np.asarray(theta_deg[:ntheta], dtype=np.float64)
+    t0, tspan = float(th_all.min()), float(np.ptp(th_all))
+    xn_all = 2 * (th_all - t0) / tspan - 1
+    xn_fit = 2 * (theta_s - t0) / tspan - 1
+    V_fit  = np.column_stack([xn_fit**k for k in range(edeg + 1)])
+    V_all  = np.column_stack([xn_all**k for k in range(edeg + 1)])
+    for key, meas in (('y', dy_un), ('x', dx_un)):
+        cf, *_ = np.linalg.lstsq(V_fit[good], meas[good], rcond=None)
+        cur    = V_all @ cf
+        cur   -= cur[0]                       # projection 0 stays where it is
+        exp_fit[key] = (cur, cf,
+                        float(np.sqrt(np.mean((meas[good] - V_fit[good] @ cf)**2))))
+
+# ---------------------------------------------------------------------------
 # The acceptance test
 # ---------------------------------------------------------------------------
 # The random +-300 px displacement is KNOWN and was already taken out by step 3,
@@ -845,6 +899,13 @@ for row, (key, meas, label, orb) in enumerate(
                         label=f'{name}{"+orbit" if orb else ""}   rms {rms:.1f} px')
         ax[row, 1].plot(theta_s, drift, '-', lw=1.8, color=COLORS[ci % len(COLORS)],
                         label=f'{name}   ptp {np.ptp(drift):.1f} px')
+    if key in exp_fit:
+        cur, _, rms = exp_fit[key]
+        ax[row, 0].plot(th_all, cur, '--', lw=1.8, color='k',
+                        label=f'EXPORTED deg {edeg}, no orbit removed   '
+                              f'rms {rms:.1f} px, ptp {np.ptp(cur):.1f} px')
+        ax[row, 1].plot(th_all, cur, '--', lw=1.8, color='k',
+                        label=f'EXPORTED   ptp {np.ptp(cur):.1f} px')
     ax[row, 0].set_ylabel(f'{label}  [unbinned px]')
     ax[row, 0].legend(fontsize=8, loc='best')
     ax[row, 0].grid(alpha=0.3)
@@ -986,5 +1047,61 @@ for deg in a.degrees:
                 f'   dx {np.ptp(fits[f"p{deg}"]["x"][1]):.2f} px')
 logger.info(f'  raw centroid peak-to-peak: dy {np.ptp(dy_un[good]):.2f} px   '
             f'dx {np.ptp(dx_un[good]):.2f} px  (unbinned)')
+
+
+# ---------------------------------------------------------------------------
+# Writing the export
+# ---------------------------------------------------------------------------
+# Step 3 does
+#     raw_3d = np.loadtxt(f'{path}/{pfile}_/correct_correct3D.txt')[:ntheta, ::-1]
+#     shifts_final = random_shifts + rhapp_shifts + motion_shifts \
+#                    + np.tile(raw_3d[:, None], (1, ndist, 1))
+# so the file is ntheta rows x 2 columns, COLUMN 0 = x and COLUMN 1 = y (the
+# [::-1] flips them), in unbinned object-grid pixels, and the same row is used
+# for every distance.
+#
+# Sign.  Measured with a constant added to r at read time (PROBE_R experiment,
+# stride 50): r = (8,0) moved the binned centroid from y=254.024 to y=246.034
+# and r = (0,8) moved x from 262.869 to 254.874, i.e. centroid = const - r.  So
+# an excursion of +d has to be cancelled by adding +d to the shifts, and since
+# r = cshifts / 2**bin the number to write is d in unbinned px -- exactly the
+# dy_un / dx_un this script already reports, no rescaling.
+#
+# Unlike everything above, this fit has NO orbit term: the user asked for a
+# plain polynomial, and it is the right thing to export anyway -- A*cos+B*sin in
+# x is the projection of a rigid object translation, so keeping it just moves
+# the reconstructed volume sideways.
+
+if a.export_correct3d:
+    epath = export_path
+    out   = np.column_stack([exp_fit['x'][0], exp_fit['y'][0]])  # col0 = x, col1 = y
+
+    edir = os.path.dirname(epath)
+    if edir and not os.path.isdir(edir):
+        os.makedirs(edir, exist_ok=True)
+        logger.info(f'  created {edir}')
+    with open(epath, 'w') as f:
+        f.write(f'# acquisition drift for {args.pfile}, degree-{edeg} polynomial in theta\n')
+        f.write(f'# from {fpath} at bin {bin}, {int(good.sum())} of {ntheta} angles used\n')
+        f.write(f'# gradient-weighted centroid of the Paganin phase, seg={SEG} thr={THR:g}\n')
+        f.write('# NO orbit term removed -- a plain polynomial through the raw centroid\n')
+        f.write('# columns: x  y   in UNBINNED object-grid px, zero at projection 0\n')
+        f.write('# read by step 3 of steps15.py as np.loadtxt(...)[:ntheta, ::-1]\n')
+        for key in ('x', 'y'):
+            cur, cf, rms = exp_fit[key]
+            f.write(f'# {key}: ptp {np.ptp(cur):.4f} px  rms residual {rms:.4f} px  '
+                    f'coef in xn = 2*(theta-{t0:g})/{tspan:g}-1, ascending = '
+                    f'{np.array2string(cf, precision=6, max_line_width=10**6)}\n')
+        for row in out:
+            f.write(f'{row[0]:14.6f}  {row[1]:14.6f}\n')
+
+    np.savetxt(f'{out_dir}/{tag}_correct3D.txt', out, fmt='%14.6f',
+               header='x  y  [unbinned px] -- copy of what went to '
+                      + epath)
+    logger.info(f'wrote {epath}  ({ntheta} x 2, degree {edeg}, no orbit removed)')
+    logger.info(f'  exported ptp: x {np.ptp(exp_fit["x"][0]):.2f} px   '
+                f'y {np.ptp(exp_fit["y"][0]):.2f} px   '
+                f'(rms residual x {exp_fit["x"][2]:.2f}  y {exp_fit["y"][2]:.2f} px)')
+    logger.info(f'  copy in {out_dir}/{tag}_correct3D.txt')
 
 comm.Barrier()

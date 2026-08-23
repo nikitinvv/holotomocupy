@@ -168,18 +168,36 @@ Both are printed at the end of every run and plotted:
    `std(diff)/√2` is the estimator's own noise with no assumption about the
    drift: **3.6 px (dy), 3.5 px (dx)** unbinned, i.e. under a binned pixel.
 
+The same statistic at longer lags is the structure function, printed as a table
+and the thing that says whether a polynomial is the right model at all:
+
+| lag [°] | 0.1 | 0.2 | 0.5 | 1 | 2 | 5 | 10 | 20 | 50 |
+|---|---|---|---|---|---|---|---|---|---|
+| dy | 3.63 | 3.64 | 3.81 | 3.83 | 4.01 | 4.15 | 4.55 | 4.84 | 4.85 |
+| dx | 3.53 | 3.45 | 3.53 | 3.46 | 3.58 | 4.08 | 4.44 | 5.13 | 6.02 |
+
+It is **flat** from 0.1° out to 5°, so on that timescale there is nothing but
+estimator noise and everything above it is the smooth drift the polynomial
+fits — which is exactly the case a polynomial model is for. `../AtomiumL1_HT`
+is the counter-example: there the same curve climbs from the first lag, and the
+fit residual is real motion. Compare the two before trusting either fit.
+
 ### What it found for this scan
+
+The script is shared with `../AtomiumL1_HT`, which runs it on the four-distance
+scan of the same sample two hours earlier. Develop it here — this is the harder
+case — and copy the file across.
 
 Measured (bin 2, all 1800 angles, defaults, **unbinned** px):
 
 | | dy | dx |
 |---|---|---|
-| raw centroid peak-to-peak | 36.8 | 34.7 |
+| raw centroid peak-to-peak | 36.8 | 34.8 |
 | off-axis orbit amplitude | — | 7.6 |
 | **drift ptp, deg 2** | **8.0** | **0.6** |
 | deg 3 | 10.0 | 7.3 |
-| deg 5 | 12.0 | 6.1 |
-| rms residual, deg 2 / 3 / 5 | 4.56 / 4.49 / 4.44 | 4.90 / 4.73 / 4.46 |
+| deg 5 | 12.0 | 6.0 |
+| rms residual, deg 2 / 3 / 5 | 4.56 / 4.49 / 4.44 | 4.92 / 4.75 / 4.48 |
 
 **The sample drifted about 10 px vertically and essentially not at all
 horizontally**, over 180° — a tenth of a percent of the field, and about 0.6 µm
@@ -206,11 +224,54 @@ bound on a real motion, not a calibrated number. Getting below it needs the
 object to stay inside the grid at every angle, i.e. `nobj > n` — see open
 item 5.
 
+### Feeding the drift back into the reconstruction
+
+`--export-correct3d` writes the fit where step 3 of `steps15.py` looks for it,
+`{path}/{pfile}_/correct_correct3D.txt`, and the next run of steps 1–5 folds it
+into `shifts_final` along with the random, rhapp and motion shifts:
+
+```bash
+mpirun -n 4 ./set_affinity_gpu.sh python estimate_drift.py config_steps15.conf \
+    --export-correct3d              # --export-deg 5 by default
+```
+
+Three things about that file differ from everything reported above, on purpose:
+
+* **No orbit is removed.** The export is a plain degree-5 polynomial through
+  the *raw* centroid, whatever `--no-orbit` / `--orbit-y` did to the report.
+  That is the right thing to apply: `A·cos θ + B·sin θ` in x is exactly what a
+  rigid translation of the object projects to, so keeping it only re-centres
+  the reconstructed volume laterally — tomographically consistent either way,
+  and one less thing to get wrong. It does mean the exported x amplitude
+  (13.5 px ptp) is larger than the orbit-free drift in the table above
+  (6.0 px); y is unchanged at 12.0 px, there being no orbit on y.
+* **Sign and units were measured, not assumed.** Adding a constant to `r` at
+  read time moves the centroid the other way (`r = (8,0)` took the binned
+  centroid from y = 254.02 to 246.03), i.e. `centroid = const − r`, so an
+  excursion of `+d` is cancelled by writing `+d`; and because `r = cshifts /
+  2**bin`, the number to write is `d` in **unbinned** px — exactly what the
+  script already reports, no rescaling.
+* **Column order is x, y.** Step 3 reads it as `np.loadtxt(...)[:ntheta, ::-1]`
+  and then tiles the same row across all distances.
+
+The file is 1800 rows, zero at projection 0, and refuses to overwrite an
+existing one without `--export-force` — checked before the GPU work, not after.
+`--export-path` sends it somewhere else for a dry run. A copy also lands in
+`{path_out}/drift_bin2/drift_bin2_correct3D.txt`, and the exported curve is
+drawn on `drift_bin2.png` as the **black dashed line** in all four angle panels,
+so it can be read against the measured points and the orbit-free fits. On the
+left it is parallel to the deg-5 fit rather than on top of it: the export is
+referenced to projection 0, the report's curves keep their own mean.
+
+Written 2026-08-23: x ptp 13.48 px, y ptp 11.98 px, rms residual 4.48 / 4.44 px.
+`{pfile}_/` did not exist for this scan and was created to hold it.
+
 ## Open items
 
 1. **`rotation_center_shift` is borrowed, not measured.** There is no PyHST
-   reconstruction of this scan (no `AtomiumL1_FT_large_rand_disp_014nm_/` aux
-   directory), so `-14.375964` comes from the HT scan's par file. Same sample,
+   reconstruction of this scan (the `AtomiumL1_FT_large_rand_disp_014nm_/` aux
+   directory holds nothing but the `correct_correct3D.txt` written above -- no
+   par file, no `rhapp.mat`), so `-14.375964` comes from the HT scan's par file. Same sample,
    same stage, two hours apart — plausible, but the axis can drift. Re-measure
    with `step5_center_sweep.py` (above) before the bin-0 run, and put the
    winner in `config_steps15.conf` **and** all three `config_step6_bin*.conf`.

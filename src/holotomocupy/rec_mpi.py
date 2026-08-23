@@ -256,6 +256,21 @@ class Rec:
           laplacian hessian3 (inp_pad=4):  2 obj-shape + 8 obj-slabs (two haloed
                                            inputs, g_pad and e_pad)
                                            (both only sized in when lam_laplacian > 0)
+          fwd_tomo / adj_tomo:             1 sinogram chunk + 1 obj-shape.  The
+                                           sinogram side is proj_tmp
+                                           [ntheta, local_nzobj, nobj] chunked on
+                                           axis 1, so one chunk carries EVERY
+                                           angle -- nchunk*ntheta*nobj, not
+                                           nchunk*nobj^2.  It grows linearly in
+                                           nobj while every other candidate grows
+                                           quadratically, so it dominates whenever
+                                           ntheta > nobj: a coarse bin of a
+                                           many-angle single-distance scan
+                                           (AtomiumL1_largedisp bin 2 is ntheta
+                                           1800 against nobj 512).  Omitting it
+                                           overran the pool by ~100 MB and
+                                           surfaced as cudaErrorInvalidValue
+                                           inside Chunking.p2g.
         linear_batch on vars['proj'] is 3 proj-shape — dominated by cascade.
         gen_sqrt_data (1 proj + ndistchunk data, as outputs) and min
         (1 proj + ndistchunk * small) are both under the cascade candidate.
@@ -266,7 +281,10 @@ class Rec:
         proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
         obj_bytes  = self.nchunk * obj_slab
         dist_bytes = ndistchunk * self._dist_bytes()
-        candidates = [3 * proj_bytes + dist_bytes, 3 * obj_bytes]  # cascade, lin_obj
+        tomo_bytes = self.nchunk * self.ntheta * self.nobj * obj_item + obj_bytes
+        candidates = [3 * proj_bytes + dist_bytes,   # cascade
+                      3 * obj_bytes,                 # lin_obj
+                      tomo_bytes]                    # fwd_tomo / adj_tomo
         if self.lam_laplacian > 0:
             candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
             candidates.append(2 * obj_bytes + 8 * obj_slab)        # laplacian hessian3

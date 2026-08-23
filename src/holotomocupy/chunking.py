@@ -36,6 +36,7 @@ def _axpby(out, x, y, a, b):
 class Chunking:
     def __init__(self, nbytes, chunk):
         self.gpu_mem = cp.cuda.alloc(nbytes)
+        self.nbytes  = nbytes
         self.stream  = [cp.cuda.Stream(non_blocking=True) for _ in range(3)]
         self.chunk   = chunk
 
@@ -299,6 +300,16 @@ class Chunking:
                 except Exception as e:
                     raise RuntimeError("Failed to allocate GPU buffers") from e
                 offset += nbytes
+        # cp.ndarray over a memptr does no bounds checking, so a pool that is
+        # too small for the call site hands back views pointing past the
+        # allocation and the failure only shows up later as an opaque
+        # cudaErrorInvalidValue inside p2g/g2p.  Say what actually went wrong.
+        if offset > self.nbytes:
+            raise RuntimeError(
+                f"chunking pool too small: {offset} bytes needed for "
+                f"double-buffered chunk={chunk} views, pool is {self.nbytes}. "
+                f"Rec._pool_bytes_for is missing this call site, or nchunk was "
+                f"raised after the pool was allocated.")
         return gpu, offset
 
     ####################### Slicing #########################

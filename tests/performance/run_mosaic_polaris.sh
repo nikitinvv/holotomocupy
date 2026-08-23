@@ -1,10 +1,10 @@
 #!/bin/bash
 #PBS -N holotomo_mosaic
-#PBS -l select=1:system=polaris
+#PBS -l select=32:system=polaris
 #PBS -l place=scatter
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:eagle
-#PBS -q debug
+#PBS -q prod
 #PBS -A 14238
 #PBS -j oe
 # Mosaic perf benchmark on Polaris (4 x A100 40 GB, 512 GB per node).  Same
@@ -22,7 +22,7 @@ set -eu
 cd "${PBS_O_WORKDIR:-$(dirname "$(readlink -f "$0")")}"
 [ -f ./env_polaris.sh ] && . ./env_polaris.sh
 
-BIN=3                               # n = nz = 2048>>bin, ntheta = 6000>>bin
+BIN=0                               # n = nz = 2048>>bin, ntheta = 6000>>bin
 NTILE_V=1                           # tile rows
 NTILE_H=5                           # tiles per row
 NDIST_TILE=4                        # distances per tile -> ndist = v*h*4
@@ -32,7 +32,7 @@ NDIST_TILE=4                        # distances per tile -> ndist = v*h*4
 #     select (1x5)     1    1    8
 #     select (2x5)     1    2   16
 #     nchunk          32    8    2
-NCHUNK=32
+NCHUNK=4
 NDISTCHUNK=0                        # 0 = all distances share one proj upload
 NODES=1                             # only used outside a job (--plan); inside
                                     # one the node count comes from PBS

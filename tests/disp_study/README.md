@@ -93,9 +93,40 @@ beam.  The reconstruction never sees this: it still starts from `prb = 1` and
 refines the probe itself, so the sweep measures how much the *available*
 illumination diversity matters, not how good the initial guess was.
 
-Case directories are named `amp<amp>_ndist<N>[_prbs<sigma>]`; the `_prbs`
-suffix is left off at the default smoothness, so the directories of a pure
+Case directories are named `amp<amp>_ndist<N>[_prbs<sigma>][_objs<sigma>]`; each
+suffix is left off at its default smoothness, so the directories of a pure
 displacement sweep keep the names they already have.
+
+## The object-smoothness parameter
+
+`--obj-smooth` is the same knob for the sample instead of the illumination: the
+standard deviation, in **object voxels**, of the isotropic Gaussian low-pass the
+phantom is passed through after its shells and beads are stamped in.  Same
+convention, `exp(-2 pi^2 sigma^2 |v|^2)` with `v` in cycles per voxel, and the
+same default `1/(pi*sqrt(2)) = 0.2251` — bit-for-bit the `exp(-|v|^2)` filter
+that has been baked into the phantom since `../holotomo3d/test.py`, so the
+default phantom is unchanged and every volume already cached on disk is still
+reused.
+
+Unlike the probe's sigma, this one is in voxels of the object grid, so it means
+the same physical blur whatever `nobj` is; at this geometry an object voxel and
+a detector pixel are the same size in the sample, so the two sigmas are directly
+comparable numbers.  `0` leaves the shells hard-edged, a few voxels rounds off
+the thin outer layers and the small beads — it is the knob for "how much of what
+we are trying to resolve is actually there to resolve".
+
+    OBJ_SMOOTH=4 ./run_dose.sh          # the whole comparison on a blurred phantom
+    python gen_data.py --obj-smooth 4 ...
+
+The phantom cache is keyed on it (`common.phantom_id`), so a non-default value
+builds and caches its own volume rather than silently reusing the sharp one.  It
+has no effect on the brain test, which supplies its volume with `--obj-vol` and
+uses it as it is; `gen_data.py` warns if the two are combined.
+
+Not to be confused with `rec.py --obj-blur` (`OBJ_BLUR` in the run scripts): that
+one blurs the reconstruction's *starting guess* and never touches the data, while
+`--obj-smooth` blurs the ground truth itself and so changes what there is to
+reconstruct.  One is where the solver starts, the other is where it should end up.
 
 ## The phantom
 
@@ -153,6 +184,15 @@ detail recovered from the positional diversity, still has to be reconstructed �
 while keeping the first BH steps out of the flat region around `obj = 0`.  Use
 `--obj-init zeros` for a cold start and `--obj-init true` as an upper-bound
 reference.
+
+`rec.py`'s own default is 8 px; both dose comparisons use 20 (`OBJ_BLUR` in
+`run_dose.sh` and `run_dose_brain.sh`), so the phantom and the brain are scored
+from the same kind of start.  Note that `sigma = 0` is *not* a cold start —
+`gaussian_blur3d` is the identity there, so `--obj-blur 0` is exactly
+`--obj-init true` and hands the solver the exact ground truth.  The phantom runs
+in `/data3/vnikitin/dose_study_phantom` predate this default and were made that
+way: their NRMSEs measure how far BH drifts away from a perfect start, not how
+much detail it recovers, and are not comparable with the brain's.
 
 Each rank filters its own z-slab plus a halo of `4*sigma` slices, so the result
 is bit-for-bit what filtering the assembled volume would give; the cost is one
@@ -376,6 +416,21 @@ the top row, their error against the phantom below, with each column labelled by
 its projection count and relative dose.  An unfinished run keeps its column and
 leaves the panel blank, as in `make_figure.py`.
 
+Next to it goes `dose_ndist4_n512_ntheta450_zoom.png`: one detail region of that
+same horizontal slice, the multi-distance reconstruction above the
+single-distance one, drawn `interpolation='nearest'` in the same colour range as
+the main figure so the two textures can be compared pixel for pixel.  The region
+is `--zoom x0,y0,w,h` (default `680,450,200,200`) in pixels of the *uncropped*
+slice, so `--crop` does not move it; `--zoom off` skips the figure and
+`--zoom-box on` outlines the region on the reconstruction panels of the main
+figure.
+
+`run_dose.sh` does not use that default: it passes a `ZOOM_W`-wide box centred
+on the object grid (`604,604,200,200` at the standard `NOBJ = 1408`), since the
+phantom is generated centred in `NOBJ` and the middle is where its structure --
+the wedge edges and the shrinking bead row -- actually is. Set `ZOOM_W` for a
+different size or `ZOOM=x0,y0,w,h` (or `ZOOM=off`) to look somewhere else.
+
 There is no convergence plot: `conv.csv` records the data-fit residual, which is
 a sum over a different number of measurements in the two runs and is not
 comparable between them.
@@ -384,6 +439,39 @@ comparable between them.
 2.69 for geometric and 2.64 for linear spacing -- the same answer.  The real
 `Z1_ALL` spans a factor of 1.92, not 1.57, but the sum is dominated by the near
 distances either way.)
+
+### The input frames
+
+`show_data.py` draws the other end of the pipeline -- what the reconstruction is
+given rather than what it produced.  One column per distance, four rows:
+`|probe|`, `arg(probe)`, the intensity recorded at one angle (`--theta`, default
+the first), and that frame divided by the flat field.  It reads `data.h5` only,
+so it runs as soon as `gen_data.py` is done; no reconstruction needed.
+
+    python show_data.py --root /data3/vnikitin/dose_study_phantom \
+        --ndist 4 --ntheta 900 --amp 1 --prb-smooth 1 --tag phantom
+
+-> `data_ndist4_n1024_ntheta900_amp1_prbs1_phantom.png`.  The fourth row is the
+point of the figure: the ID16A probe's speckle is several times the sample's
+contrast, so in the raw frame the phantom is barely a texture on top of the
+illumination, and only the ratio shows the holograms -- and their fringes
+spreading, and the projection shrinking with the magnification, from the near
+distance to the far one.  `--flat off` drops that row.  `/data` and `/ref` hold
+the *square root* of intensity; the script squares them back, so the panels are
+intensities.
+
+Any amplitude will do -- the frames differ between them only by a sub-pixel to
+tens-of-pixels shift of the sample -- so `--amp 1` is the one worth keeping.
+Point `--ndist 1 --ntheta 2704` at the other leg of a dose-matched pair to see
+its single frame instead; its probe is the near-distance column of the four.
+
+`--root /data3/vnikitin/brain_dose_study --tag brain` does the same for the
+brain test, whose probe is the identical ID16A one -- the top two rows repeat.
+What differs is the sample: the phantom is a compact object in a blank field, so
+its hologram sits in an untouched background, while the brain block fills the
+field and only its edge fringes are strong.  Those edges set the colour range
+and flatten the tissue inside, so `--clip 99` is worth a look there; the figures
+in this folder keep the default 99.8 so the two samples stay comparable.
 
 ## The brain test
 

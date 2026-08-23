@@ -19,6 +19,10 @@ something else.  One figure lands in --out:
                                      reconstructions,
                         the horizontal (z = mid, tomographic) slice on the top
                         row and the error against the phantom below
+  ..._zoom.png          the same slice of the two reconstructions over the
+                        --zoom detail region only, one above the other, so the
+                        multi- and single-distance textures can be compared at
+                        1:1
 
 Serial, no MPI -- run it after run_dose.sh.
 """
@@ -53,6 +57,7 @@ def parse():
                    help='ranks the runs were split over, for that rounding')
     p.add_argument('--amp',        type=float, default=16.0)
     p.add_argument('--prb-smooth', type=float, default=2.0)
+    p.add_argument('--obj-smooth', type=float, default=C.OBJ_SMOOTH)
     p.add_argument('--n', type=int, default=None,
                    help='detector size to plot (default: whatever is on disk)')
     p.add_argument('--out', default=os.path.dirname(os.path.abspath(__file__)))
@@ -66,6 +71,13 @@ def parse():
                    help='percentile of |error| for the error-row colour range')
     p.add_argument('--crop', type=float, default=0.10,
                    help='fraction trimmed off each side of the slices')
+    p.add_argument('--zoom', default='680,450,200,200',
+                   help='x0,y0,w,h of the detail region of the second figure, '
+                        'in pixels of the *uncropped* slice (--crop does not '
+                        'move it); "off" skips that figure')
+    p.add_argument('--zoom-box', default='off', choices=['on', 'off'],
+                   help='also outline the --zoom region on the reconstruction '
+                        'panels of the main figure')
     p.add_argument('--conv', default='on', choices=['on', 'off'],
                    help='draw the convergence curves in the empty slot under the '
                         'ground truth (conv.csv of each reconstruction)')
@@ -92,10 +104,19 @@ def plural(k):
 runs = [(plural(a.ndist), a.ndist, a.ntheta, float(w.sum()) * a.ntheta),
         (plural(1),       1,       a.ntheta1, a.ntheta1 * 1.0)]
 
+zoom = None
+if a.zoom and a.zoom.lower() != 'off':
+    try:
+        zx, zy, zw, zh = (int(v) for v in a.zoom.replace('x', ',').split(','))
+    except ValueError:
+        raise SystemExit(f'--zoom wants x0,y0,w,h in pixels -- got {a.zoom!r}')
+    zoom = (zx, zy, zw, zh)
+
 
 def load(ndist, ntheta):
     """(slices, summary, ground truth, detector n, rec dir or a note) of one case."""
-    case = os.path.join(a.root, C.dose_case_name(ndist, ntheta, a.amp, a.prb_smooth))
+    case = os.path.join(a.root,
+                        C.dose_case_name(ndist, ntheta, a.amp, a.prb_smooth, a.obj_smooth))
     if not os.path.isdir(case):
         return None, {}, None, None, 'no data'
     got = {k: d for k, d in rec_dirs(case).items()
@@ -261,16 +282,82 @@ if ime is not None:
     fig.colorbar(ime, ax=ax[1].tolist(), fraction=0.012, pad=0.008, label='error')
 
 meta = next((c['s'] for c in cases if c['sl'] is not None), {})
+# only when it is not the phantom as it has always been -- otherwise it is one
+# more constant on every figure
+objs = abs(a.obj_smooth - C.OBJ_SMOOTH) > 1e-6
+objs_txt = f'object $\\sigma$ = {a.obj_smooth:g} voxel, ' if objs else ''
 fig.suptitle(
     f"equal-dose comparison: amp = ±{a.amp:g} px, probe $\\sigma$ = {a.prb_smooth:g} px, "
+    f"{objs_txt}"
     f"n={n}, {meta.get('niter', '?')} BH iterations\n"
     f"{plural(a.ndist)} × {a.ntheta} angles "
     f"(dose {float(w.sum()):.3f} × near-distance per projection)  vs  "
     f"1 distance × {a.ntheta1} angles", fontsize=12)
 
+if zoom is not None and a.zoom_box == 'on':
+    # the panels show the cropped slice, so the box moves with the crop
+    zx, zy, zw, zh = zoom
+    for c, axo in zip(cases, ax[0, (1 if gt is not None else 0):]):
+        if c['sl'] is None:
+            continue
+        ny, nx = c['sl'][0].shape[:2]
+        oy, ox = (int(round(a.crop * v)) for v in (ny, nx))
+        axo.add_patch(plt.Rectangle((zx - ox - 0.5, zy - oy - 0.5), zw, zh,
+                                    fill=False, ec='yellow', lw=0.8))
+
 tag = (f'_n{n}_ntheta{a.ntheta}_amp{a.amp:g}'
        + (f'_prbs{a.prb_smooth:g}' if a.prb_smooth else '')
+       + (f'_objs{a.obj_smooth:g}' if objs else '')
        + (f'_{a.tag}' if a.tag else ''))
 png = os.path.join(a.out, f'dose_ndist{a.ndist}{tag}.png')
 fig.savefig(png, dpi=a.dpi, bbox_inches='tight')
 print(f'-> {png}')
+
+# --- the detail figure: the same region of both reconstructions, stacked ---
+if zoom is not None:
+    zx, zy, zw, zh = zoom
+    fz, az = plt.subplots(len(cases), 1, squeeze=False,
+                          figsize=(3.4, 3.4 * len(cases) + 0.9),
+                          gridspec_kw=dict(hspace=0.14))
+    imz = None
+    for r, c in enumerate(cases):
+        axz = az[r, 0]
+        axz.set_xticks([]); axz.set_yticks([])
+        img = None if c['sl'] is None else c['sl'][0]
+        if img is not None:
+            ny, nx = img.shape[:2]
+            y0, x0 = max(zy, 0), max(zx, 0)
+            y1, x1 = min(zy + zh, ny), min(zx + zw, nx)
+            if y1 <= y0 or x1 <= x0:
+                print(f"!! {c['lbl']}: the zoom region {zx},{zy},{zw},{zh} lies "
+                      f'outside the {nx}x{ny} px slice -- panel dropped')
+                img = None
+            else:
+                if (y1 - y0, x1 - x0) != (zh, zw):
+                    print(f"!! {c['lbl']}: the zoom region is clipped to the "
+                          f'{nx}x{ny} px slice -- showing x {x0}:{x1}, y {y0}:{y1}')
+                # nearest: at this magnification every pixel is the datum
+                imz = axz.imshow(img[y0:y1, x0:x1], cmap=a.cmap,
+                                 vmin=vmin, vmax=vmax, interpolation='nearest')
+                axz.set_title(f"{c['lbl']}, {c['ndist'] * c['ntheta']} projections"
+                              + (f",  NRMSE = {float(c['s'].get('nrmse_obj', 'nan')):.3f}"
+                                 if c['s'] else ''), fontsize=9)
+        if img is None:
+            for spine in axz.spines.values():
+                spine.set_visible(False)
+            axz.text(0.5, 0.5, f"{c['lbl']}\nnot available", transform=axz.transAxes,
+                     ha='center', va='center', fontsize=9, color='0.55')
+
+    if imz is not None:
+        # under the panels rather than beside them: the column is one panel
+        # wide, and a vertical bar would sit on top of the lower title
+        fz.colorbar(imz, ax=az[:, 0].tolist(), orientation='horizontal',
+                    fraction=0.045, pad=0.03, label=r'Re(obj) = $-\delta$')
+    fz.suptitle(f'detail: x {zx}:{zx + zw}, y {zy}:{zy + zh} of the '
+                f'horizontal slice\n'
+                f'amp = ±{a.amp:g} px, probe $\\sigma$ = {a.prb_smooth:g} px, '
+                f'{objs_txt}n={n}',
+                fontsize=11)
+    pngz = os.path.join(a.out, f'dose_ndist{a.ndist}{tag}_zoom.png')
+    fz.savefig(pngz, dpi=a.dpi, bbox_inches='tight')
+    print(f'-> {pngz}')

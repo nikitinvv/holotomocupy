@@ -3,7 +3,7 @@
 with random sample displacements.
 
 The phantom, the probe and the acquisition geometry are the ones from
-../holotomo3d/test.py.  Two study parameters:
+../holotomo3d/test.py.  Three study parameters:
 
 * `--amp` - the half-width (in detector pixels) of the uniform random
   displacement applied to the sample at every angle and every distance;
@@ -11,6 +11,10 @@ The phantom, the probe and the acquisition geometry are the ones from
   applied to the ID16A probe, i.e. how much structure the illumination still
   has.  0 = the measured probe, the default 0.2251 px = the mild filter
   ../holotomo3d/test.py uses, several px = an almost flat beam.
+* `--obj-smooth` - the same, in object voxels, for the phantom itself: how
+  sharp the edges are that the reconstruction has to recover.  0 = the raw
+  hard-edged shells, the default 0.2251 voxel = the same mild filter.  Has no
+  effect with --obj-vol, which uses the volume as it is.
 
 `--ndist 1` (the default) gives the single-distance case the study is about.
 
@@ -18,7 +22,7 @@ Run (one rank per GPU):
 
     mpirun -np 4 ./set_affinity_gpu.sh python gen_data.py --amp 16 --prb-smooth 2
 
-Output: {out}/amp{amp}_ndist{ndist}[_prbs{smooth}]/data.h5  (layout in common.py).
+Output: {out}/amp{amp}_ndist{ndist}[_prbs{s}][_objs{s}]/data.h5  (layout in common.py).
 """
 
 import argparse
@@ -54,6 +58,10 @@ def parse():
     p.add_argument('--prb-smooth', type=float, default=C.PRB_SMOOTH,
                    help='sigma [detector px] of the Gaussian blur applied to the probe; '
                         '0 = the measured probe, the default reproduces holotomo3d/test.py')
+    p.add_argument('--obj-smooth', type=float, default=C.OBJ_SMOOTH,
+                   help='sigma [object voxels] of the Gaussian blur applied to the phantom; '
+                        '0 = hard edges, the default reproduces holotomo3d/test.py.  '
+                        'Ignored with --obj-vol, which takes the volume as it is.')
     p.add_argument('--ndist',  type=int,   default=1,   help='number of propagation distances')
     p.add_argument('--n',      type=int,   default=512, help='detector size [px]')
     p.add_argument('--ntheta', type=int,   default=900, help='number of projection angles')
@@ -110,7 +118,8 @@ detector_pixelsize = C.detector_pixelsize(n)
 # (already -delta-like) values into obj_im.
 span       = n
 delta_beta = a.delta / a.beta
-out = a.out or os.path.join(C.OUT_ROOT, C.case_name(a.amp, a.ndist, a.prb_smooth))
+out = a.out or os.path.join(C.OUT_ROOT,
+                            C.case_name(a.amp, a.ndist, a.prb_smooth, a.obj_smooth))
 path = os.path.join(out, 'data.h5')
 
 # The ground-truth object depends only on (nobj, delta, beta) for the phantom,
@@ -127,7 +136,7 @@ path = os.path.join(out, 'data.h5')
 # next to the datasets (the parent of --out), not in C.OUT_ROOT: run_study.sh
 # points --out at its own root, and the file is a full nobj^3 volume
 obj_id = (C.volume_id(a.obj_vol, span, a.obj_scale, delta_beta, nobj, nzobj)
-          if a.obj_vol else C.phantom_id())
+          if a.obj_vol else C.phantom_id(smooth=a.obj_smooth))
 default_cache = os.path.join(
     os.path.dirname(os.path.normpath(out)),
     (f'objvol_nobj{nobj}_scale{a.obj_scale:g}_{obj_id}.h5' if a.obj_vol else
@@ -140,6 +149,13 @@ if rank == 0:
     logger.info(f'  displacement amplitude : +-{a.amp:g} px  (edge-extension limit {amp_max:g} px)')
     logger.info(f'  probe smoothing        : sigma={a.prb_smooth:g} px'
                 f'{" (as measured)" if a.prb_smooth <= 0 else ""}')
+    if a.obj_vol:
+        if abs(a.obj_smooth - C.OBJ_SMOOTH) > 1e-6:
+            logger.warning(f'  --obj-smooth {a.obj_smooth:g} is ignored with --obj-vol: the '
+                           f'volume is used as it is, only the phantom is filtered')
+    else:
+        logger.info(f'  object smoothing       : sigma={a.obj_smooth:g} voxel'
+                    f'{" (hard edges)" if a.obj_smooth <= 0 else ""}')
     logger.info(f'  geometry               : {C.GEOMETRY}  '
                 f'({C.ENERGY:g} keV, focus-to-detector {C.FOCUSTODETECTORDISTANCE:g} m)')
     logger.info(f'  distances              : {a.ndist}  z1={C.Z1_ALL[:a.ndist]*1e3} mm')
@@ -244,7 +260,7 @@ def fill_object(ds_re, ds_im):
                       scale=a.obj_scale, delta_beta=delta_beta, log=logger.info)
     else:
         logger.info('generating the phantom')
-        obj = C.gen_object(nobj, a.delta, a.beta)
+        obj = C.gen_object(nobj, a.delta, a.beta, smooth=a.obj_smooth)
         ds_re[:] = obj.real
         ds_im[:] = obj.imag
         del obj
@@ -288,6 +304,7 @@ if rank == 0:
         f.attrs['delta'] = a.delta; f.attrs['beta'] = a.beta
         f.attrs['nobj_factor'] = nobj_factor
         f.attrs['prb_smooth'] = a.prb_smooth
+        f.attrs['obj_smooth'] = a.obj_smooth
         if a.obj_vol:
             f.attrs['obj_vol']   = a.obj_vol
             f.attrs['obj_scale'] = a.obj_scale

@@ -21,30 +21,57 @@
 # Because of the first, this writes to its own root; the old results are left
 # where they are.
 #
+# NOTE: OBJ_BLUR was 0 until 2026-08-23, and sigma=0 is the identity, so the runs
+# already in /data3/vnikitin/dose_study_phantom started from the exact ground
+# truth -- their NRMSEs measure drift away from a perfect start, not recovery.
+# The default is now 20 px, the brain test's value.  Rerunning overwrites those
+# rec_n*_ntheta* directories, the object blur not being part of any name.
+#
 #     ./run_dose.sh
 #     NTHETA=450 NITER=129 ./run_dose.sh      # a quick shakedown
 #     AMP=32 PRB_SMOOTH=1 ./run_dose.sh       # exactly the brain run's knobs
+#     OBJ_SMOOTH=4 ./run_dose.sh              # a deliberately blurred phantom
 #     FREEZE_POS=0 POS_ERR=2 ./run_dose.sh    # refine positions after all
 #
 set -e
 cd "$(dirname "$0")"
 
 NP=${NP:-4}                                   # MPI ranks (one GPU each)
-N=${N:-1024}                                  # detector size [px]
+N=${N:-512}                                  # detector size [px]
 AMP=${AMP:-16}                                # displacement half-width [px]
-PRB_SMOOTH=${PRB_SMOOTH:-2}                   # probe blur sigma [px], 0 = as measured
-NTHETA=${NTHETA:-900}                         # angles per distance, multi-distance scan
+PRB_SMOOTH=${PRB_SMOOTH:-1}                   # probe blur sigma [px], 0 = as measured
+# How sharp the phantom itself is -- a property of the DATA, applied once when
+# the ground truth is generated, so it changes what there is to reconstruct.
+# (Not to be confused with OBJ_BLUR below, which only blurs the reconstruction's
+# starting guess.)  The default is set from C.OBJ_SMOOTH once PYPATH exists, and
+# is the phantom as every run of this study has had it; only a value that differs
+# from it adds an _objs<sigma> suffix to the directory names.
+OBJ_SMOOTH=${OBJ_SMOOTH:-1}                    # phantom blur sigma [voxel], 0 = hard edges
+NTHETA=${NTHETA:-450}                         # angles per distance, multi-distance scan
 NDIST=${NDIST:-4}
 NITER=${NITER:-513}
 POS_ERR=${POS_ERR:-0}                         # initial position error [px]
 FREEZE_POS=${FREEZE_POS:-1}                   # 1 = do not refine positions at all
-OBJ_BLUR=${OBJ_BLUR:-0}                       # sigma of the initial object blur [px]
+# the reconstruction's INITIAL GUESS: the ground truth smoothed by this much, so
+# the solver starts from a low-frequency envelope and the detail the study is
+# about still has to be recovered.  Nothing to do with OBJ_SMOOTH above -- this
+# one never changes the data, only where BH starts.  20 px is the brain test's
+# value, so the two comparisons are on the same footing; 0 would hand the solver
+# the exact phantom (gaussian_blur3d is the identity at sigma <= 0), which makes
+# the NRMSE a measure of drift away from a perfect start rather than of recovery.
+OBJ_BLUR=${OBJ_BLUR:-20}                      # sigma of the initial object blur [px], 0 = start from the truth
 MARGIN=${MARGIN:-192}                         # blank border on each side of the object grid
 # The phantom is generated on the object grid, so NOBJ sets how much blank space
 # surrounds it -- same rule as the brain test, NOBJ = N + 2*MARGIN, and MARGIN
 # is also the cap on AMP.
 NOBJ=${NOBJ:-$(( N + 2 * MARGIN ))}
 PHOTONS=${PHOTONS:-0}                         # 0 = noiseless
+# Detail region of the _zoom figure, centred on the object grid: the phantom is
+# generated centred in NOBJ, so the middle is where its structure is, and a box
+# derived from NOBJ stays centred if N or MARGIN change.  Override ZOOM with a
+# literal x0,y0,w,h (or "off") to look somewhere else.
+ZOOM_W=${ZOOM_W:-150}                         # side of that box [px]
+ZOOM=${ZOOM:-$(( (NOBJ - ZOOM_W) / 2 )),$(( (NOBJ - ZOOM_W) / 2 )),$ZOOM_W,$ZOOM_W}
 CHECKPOINT_STEP=${CHECKPOINT_STEP:-32}
 ERROR_STEP=${ERROR_STEP:-32}                  # conv.csv row spacing = convergence-plot density
 # the two legs differ in ndist and ntheta, so the step sizes that balance object
@@ -82,9 +109,10 @@ export DISP_STUDY_GEOMETRY=${GEOMETRY:-brain}
 export DISP_STUDY_OUT="$OUT_ROOT"             # common.OUT_ROOT, e.g. for the object cache
 
 PYPATH="import sys;sys.path.insert(0,'.');import common as C;"
+OBJ_SMOOTH=${OBJ_SMOOTH:-$(python -c "${PYPATH}print(repr(C.OBJ_SMOOTH))")}
 NTHETA1=$(python -c "${PYPATH}print(int(round(C.dose_equivalent_ntheta($NTHETA, C.Z1_ALL[:$NDIST])/$NP))*$NP)")
 FACTOR=$(python -c "${PYPATH}print('%.4f' % (C.dose_weights(C.Z1_ALL[:$NDIST]).sum()))")
-name_of() { python -c "${PYPATH}print(C.dose_case_name($1,$2,$AMP,$PRB_SMOOTH))"; }
+name_of() { python -c "${PYPATH}print(C.dose_case_name($1,$2,$AMP,$PRB_SMOOTH,$OBJ_SMOOTH))"; }
 
 DIR_M=$OUT_ROOT/$(name_of "$NDIST" "$NTHETA")     # the multi-distance scan
 DIR_1=$OUT_ROOT/$(name_of 1 "$NTHETA1")           # the dose-matched single-distance one
@@ -94,7 +122,8 @@ RUN="mpirun -np $NP ./set_affinity_gpu.sh python"
 
 echo "=============== dose-matched phantom comparison ==============="
 echo "  optics : $N x $N,  amp = +-$AMP px,  probe sigma = $PRB_SMOOTH px"
-echo "  object : phantom on a $NOBJ px grid (${MARGIN} px margin)"
+echo "  object : phantom on a $NOBJ px grid (${MARGIN} px margin), sigma = $(printf '%.4g' "$OBJ_SMOOTH") voxel"
+echo "  zoom   : $ZOOM (centre of the object grid)"
 echo "  recon  : $NITER BH iterations, obj blur $OBJ_BLUR px, positions $([ "$FREEZE_POS" = 1 ] && echo "frozen" || echo "refined from +-$POS_ERR px")"
 echo "  rho    : $([ "$ESTIMATE_RHO" = 1 ] && echo "searched, $RHO_NITER iters per trial" || echo "rec.py default")"
 echo "  dose of $NDIST distances = $FACTOR near-distance projections"
@@ -105,7 +134,8 @@ echo
 # --- the multi-distance scan -------------------------------------------------
 tag=$(basename "$DIR_M")
 $RUN gen_data.py --n "$N" --ntheta "$NTHETA" --ndist "$NDIST" --amp "$AMP" \
-    --prb-smooth "$PRB_SMOOTH" --nobj "$NOBJ" --photons "$PHOTONS" --out "$DIR_M" \
+    --prb-smooth "$PRB_SMOOTH" --obj-smooth "$OBJ_SMOOTH" \
+    --nobj "$NOBJ" --photons "$PHOTONS" --out "$DIR_M" \
     --nchunk $((NCHUNK_GEN / NDIST > 0 ? NCHUNK_GEN / NDIST : 1)) \
     2>&1 | tee -a "$OUT_ROOT/log_gen_${tag}.txt"
 $RUN rec.py --in "$DIR_M" --niter "$NITER" --pos-err "$POS_ERR" \
@@ -116,7 +146,8 @@ $RUN rec.py --in "$DIR_M" --niter "$NITER" --pos-err "$POS_ERR" \
 # --- the dose-matched single-distance scan -----------------------------------
 tag=$(basename "$DIR_1")
 $RUN gen_data.py --n "$N" --ntheta "$NTHETA1" --ndist 1 --amp "$AMP" \
-    --prb-smooth "$PRB_SMOOTH" --nobj "$NOBJ" --photons "$PHOTONS" --out "$DIR_1" \
+    --prb-smooth "$PRB_SMOOTH" --obj-smooth "$OBJ_SMOOTH" \
+    --nobj "$NOBJ" --photons "$PHOTONS" --out "$DIR_1" \
     --nchunk "$NCHUNK_GEN" \
     2>&1 | tee -a "$OUT_ROOT/log_gen_${tag}.txt"
 $RUN rec.py --in "$DIR_1" --niter "$NITER" --pos-err "$POS_ERR" \
@@ -129,7 +160,8 @@ $RUN rec.py --in "$DIR_1" --niter "$NITER" --pos-err "$POS_ERR" \
 # is the phantom's own
 python compare_dose.py --root "$OUT_ROOT" --ndist "$NDIST" --ntheta "$NTHETA" \
     --ntheta1 "$NTHETA1" --np "$NP" --amp "$AMP" --prb-smooth "$PRB_SMOOTH" \
-    --tag phantom $VRANGE --crop 0.10 --dpi "$DPI"
+    --obj-smooth "$OBJ_SMOOTH" \
+    --tag phantom $VRANGE --crop 0.10 --zoom "$ZOOM" --dpi "$DPI"
 
 echo
 echo "=============== summary ==============="

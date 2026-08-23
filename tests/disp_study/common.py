@@ -285,16 +285,36 @@ def layer_table(n=512, nobj_factor=1.2, radii=LAYER_RADII, values=LAYER_VALUES):
     return '\n'.join(lines)
 
 
-def phantom_id(radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS):
+# The third study parameter is how sharp the sample itself is.  The phantom is
+# built from hard-edged shells and beads and then low-pass filtered, so the edges
+# it presents to the reconstruction are as smooth as this one number says.
+# Same convention as PRB_SMOOTH below: the filter is exp(-2 pi^2 sigma^2 |v|^2)
+# with v in cycles per voxel, so sigma = 1/(pi*sqrt(2)) is exactly the exp(-|v|^2)
+# filter ../holotomo3d/test.py (and every run of this study so far) used - that
+# value is the default, and it is a very mild blur.  Unlike PRB_SMOOTH, sigma is
+# in voxels of the *object* grid, so it means the same physical blur whatever
+# nobj is; at the standard geometry an object voxel and a detector pixel are the
+# same size in the sample, so the two sigmas are directly comparable numbers.
+OBJ_SMOOTH = float(1.0 / (np.pi * np.sqrt(2.0)))   # ~0.2251 voxel == legacy exp(-|v|^2)
+
+
+def phantom_id(radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS, smooth=OBJ_SMOOTH):
     """Short hash of the phantom specification, used to key the phantom cache —
-    edit any of the shells or the beads and the cached volume is not reused."""
+    edit any of the shells or the beads and the cached volume is not reused.
+
+    The smoothing is folded in only when it differs from the default, so every
+    phantom already cached on disk keeps the id stored in its attrs and is still
+    reused; a non-default blur can never collide with one of them."""
     h = hashlib.md5(np.asarray(radii, dtype='float32').tobytes() +
                     np.asarray(amps,  dtype='float32').tobytes() +
                     np.asarray(beads, dtype='float32').tobytes())
+    if abs(float(smooth) - OBJ_SMOOTH) > 1e-6:
+        h.update(np.float32(smooth).tobytes())
     return h.hexdigest()[:8]
 
 
-def gen_object(n, delta, beta, radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS):
+def gen_object(n, delta, beta, radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS,
+               smooth=OBJ_SMOOTH):
     obj  = np.zeros((n, n, n), dtype=np.float32)
     amps = np.asarray(amps, dtype=np.float32)
     dil  = np.asarray(radii, dtype=np.float32) / 256.0 * n
@@ -332,12 +352,19 @@ def gen_object(n, delta, beta, radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS):
     obj = np.roll(obj, -int(ROLL_UNITS[2]) * n // 256, axis=2)
     obj = np.roll(obj, -int(ROLL_UNITS[1]) * n // 256, axis=1)
     np.maximum(obj, 0, out=obj)
-    v = (np.arange(-n//2, n//2, dtype=np.float32) / n)
-    vx, vy, vz = np.meshgrid(v, v, v, indexing="ij")
-    filt = fftshift(np.exp(-1.0 * (vx*vx + vy*vy + vz*vz)).astype(np.float32))
-    fu = fftn((obj))
-    obj = ifftn((fu * filt)).real
-    obj[obj < 0] = 0
+    if smooth > 0:
+        # exp(-2 pi^2 sigma^2 |v|^2), v in cycles/voxel — the same transfer
+        # function probe_lowpass() applies to the illumination.  Built by
+        # broadcasting rather than meshgrid: three n^3 grids are 11 GB apiece at
+        # nobj=1408, and one array is all the filter needs.
+        v  = (np.arange(-n//2, n//2, dtype=np.float32) / n)      # cycles / voxel
+        v2 = v * v
+        r2 = v2[:, None, None] + v2[None, :, None] + v2[None, None, :]
+        r2 *= -2.0 * np.pi**2 * float(smooth)**2
+        filt = fftshift(np.exp(r2, out=r2))
+        fu = fftn((obj))
+        obj = ifftn((fu * filt)).real
+        obj[obj < 0] = 0
     return (obj * (-delta + 1j*beta)).astype(np.complex64, copy=False)
 
 
@@ -620,15 +647,17 @@ def gaussian_blur3d(vol, sigma, gpu=None, band_bytes=1 << 29):
 
 
 # --- naming -----------------------------------------------------------------
-def case_name(amp, ndist, prb_smooth=PRB_SMOOTH):
-    """Directory name of one (amp, ndist, probe-smoothness) case.
+def case_name(amp, ndist, prb_smooth=PRB_SMOOTH, obj_smooth=OBJ_SMOOTH):
+    """Directory name of one (amp, ndist, probe-, object-smoothness) case.
 
-    The probe suffix is left off at the default smoothness, so the directories of
-    the pure displacement sweep keep the names they already have on disk.
+    Each smoothness suffix is left off at its default, so the directories of the
+    pure displacement sweep keep the names they already have on disk.
     """
     name = f'amp{float(amp):g}_ndist{int(ndist)}'
     if abs(float(prb_smooth) - PRB_SMOOTH) > 1e-6:
         name += f'_prbs{float(prb_smooth):g}'
+    if abs(float(obj_smooth) - OBJ_SMOOTH) > 1e-6:
+        name += f'_objs{float(obj_smooth):g}'
     return name
 
 
@@ -703,7 +732,7 @@ def read_slices(path):
         return d[d.shape[0] // 2], d[:, d.shape[1] // 2]
 
 
-def dose_case_name(ndist, ntheta, amp, prb_smooth=PRB_SMOOTH):
+def dose_case_name(ndist, ntheta, amp, prb_smooth=PRB_SMOOTH, obj_smooth=OBJ_SMOOTH):
     """Directory name of one case of the dose-matched comparison.
 
     Unlike case_name(), ntheta is in the name: the whole point of the comparison
@@ -712,6 +741,8 @@ def dose_case_name(ndist, ntheta, amp, prb_smooth=PRB_SMOOTH):
     name = f'ndist{int(ndist)}_ntheta{int(ntheta)}_amp{float(amp):g}'
     if abs(float(prb_smooth) - PRB_SMOOTH) > 1e-6:
         name += f'_prbs{float(prb_smooth):g}'
+    if abs(float(obj_smooth) - OBJ_SMOOTH) > 1e-6:
+        name += f'_objs{float(obj_smooth):g}'
     return name
 
 

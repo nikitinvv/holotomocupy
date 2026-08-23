@@ -59,6 +59,9 @@ def parse():
     p.add_argument('--prb-smooths', default=None,
                    help='space- or comma-separated probe blur sigmas [px] '
                         f'(default: only the standard probe, {C.PRB_SMOOTH:.4g} px)')
+    p.add_argument('--obj-smooth', type=float, default=C.OBJ_SMOOTH,
+                   help='object blur sigma [voxels] of the cases to plot; not swept, '
+                        f'one value per figure (default {C.OBJ_SMOOTH:.4g} voxel)')
     p.add_argument('--n',      type=int, default=None,
                    help='detector size to plot (default: whichever covers the most cases)')
     p.add_argument('--ntheta', type=int, default=None,
@@ -131,6 +134,7 @@ out_dir = a.out
 amps    = numbers(a.amps)
 smooths = numbers(a.prb_smooths) if a.prb_smooths else [C.PRB_SMOOTH]
 combos  = [(amp, s) for amp in amps for s in smooths]
+objs = abs(a.obj_smooth - C.OBJ_SMOOTH) > 1e-6   # a non-default phantom sharpness
 vary_amp = len(amps) > 1
 vary_smooth = len(smooths) > 1
 vary_prb = len(smooths) > 1
@@ -138,7 +142,7 @@ vary_prb = len(smooths) > 1
 # --- which (n, ntheta) group to plot ----------------------------------------
 groups = {}                                   # (n, ntheta) -> {(amp, s): rec_dir}
 for amp, s in combos:
-    case_dir = os.path.join(a.root, C.case_name(amp, a.ndist, s))
+    case_dir = os.path.join(a.root, C.case_name(amp, a.ndist, s, a.obj_smooth))
     for key, d in rec_dirs(case_dir).items():
         if last_checkpoint(d) is not None:
             groups.setdefault(key, {})[(amp, s)] = d
@@ -163,6 +167,8 @@ if not vary_amp:
     tag += f'_amp{amps[0]:g}'
 if not vary_smooth:
     tag += f'_prbs{smooths[0]:g}'
+if objs:
+    tag += f'_objs{a.obj_smooth:g}'
 if a.tag:
     tag += f'_{a.tag}'
 nlbl = f'n={n}, ntheta={ntheta}' if n else 'n, ntheta unrecorded'
@@ -184,7 +190,7 @@ def label(amp, s, gen=None):
 cases, gt, gt_from = [], None, None
 for amp, s in combos:
     rdir = sel.get((amp, s))
-    data_h5 = os.path.join(a.root, C.case_name(amp, a.ndist, s), 'data.h5')
+    data_h5 = os.path.join(a.root, C.case_name(amp, a.ndist, s, a.obj_smooth), 'data.h5')
     # summary.txt is written once rec.py is through its last iteration, so its
     # absence is what tells a finished case from one still on the GPU
     done = rdir is not None and os.path.isfile(os.path.join(rdir, 'summary.txt'))
@@ -344,11 +350,12 @@ if show_prb:
 meta = next(c['s'] for c in cases if not c['pending'])
 swept = ('displacement amplitude and probe smoothness' if vary_amp and vary_prb else
          'probe smoothness' if vary_prb else 'random displacement amplitude')
+objs_txt = f'object $\\sigma$={a.obj_smooth:g} voxel, ' if objs else ''
 note = ('' if not multi_gen else
         '\n[A]/[B]… mark different ground-truth phantoms, [?] one that has since been '
         'overwritten — NRMSEs across them are NOT comparable')
 fig.suptitle(f"single-distance reconstruction vs {swept} "
-             f"(ndist={a.ndist}, {nlbl}, "
+             f"(ndist={a.ndist}, {nlbl}, {objs_txt}"
              f"{meta.get('niter','?')} BH iterations){note}", fontsize=12)
 png = os.path.join(out_dir, f'slices_ndist{a.ndist}{tag}.png')
 fig.savefig(png, dpi=a.dpi, bbox_inches='tight')
@@ -442,6 +449,7 @@ if have:
              f", probe $\\sigma$={smooths[0]:g} px" if not vary_prb else
              f", amp=±{amps[0]:g} px")
     fig2.suptitle(f'ndist={a.ndist}, {nlbl}{fixed}'
+                  + (f", object $\\sigma$={a.obj_smooth:g} voxel" if objs else '')
                   + ('\nsegments scored against different phantoms are not joined'
                      if len(blocks) > 1 else ''), fontsize=11)
     ax2.grid(True, which='both', alpha=0.3)

@@ -110,8 +110,10 @@ nobj   = int(meta['nobj'])
 nzobj  = int(meta['nzobj'])
 ntheta = int(meta['ntheta'])
 ndist  = int(meta['ndist'])
-# datasets written before --prb-smooth existed all used the legacy filter
+# datasets written before --prb-smooth / --obj-smooth existed all used the
+# legacy filter, which is exactly what the two defaults reproduce
 prb_smooth   = float(meta.get('prb_smooth', C.PRB_SMOOTH))
+obj_smooth   = float(meta.get('obj_smooth', C.OBJ_SMOOTH))
 prb_contrast = np.atleast_1d(np.asarray(meta.get('prb_contrast', [np.nan]), dtype='float64'))
 # the detector size and the number of angles go into the folder name, so runs at
 # different resolutions / angular sampling do not overwrite each other
@@ -130,6 +132,8 @@ if rank == 0:
     logger.info(f'  displacement amplitude : +-{float(meta["amp"]):g} px')
     logger.info(f'  probe smoothing        : sigma={prb_smooth:g} px   contrast '
                 + ', '.join(f'{c:.4f}' for c in prb_contrast))
+    logger.info(f'  object smoothing       : sigma={obj_smooth:g} voxel'
+                f'{"  (a real volume, unfiltered)" if "obj_vol" in meta else ""}')
     logger.info(f'  distances              : {ndist}   angles: {ntheta}')
     logger.info(f'  detector / object      : {n} x {n}   /   {nzobj} x {nobj} x {nobj}')
     # from the file's own geometry, not common.py's constants: a dataset made
@@ -321,6 +325,7 @@ if a.gt:
     if rank == 0:
         nrmse = np.sqrt(num / np.maximum(den, 1e-30))
         logger.warning(f'amp={float(meta["amp"]):g} px  prb_smooth={prb_smooth:g} px  '
+                       f'obj_smooth={obj_smooth:g} voxel  '
                        f'niter={a.niter}  '
                        f'NRMSE(obj)={nrmse[0]:.4f}  '
                        f'NRMSE(delta)={nrmse[1]:.4f}  NRMSE(beta)={nrmse[2]:.4f}  '
@@ -330,6 +335,7 @@ if a.gt:
                      f'amp {float(meta["amp"]):g}\n'
                      f'prb_smooth {prb_smooth:g}\n'
                      f'prb_contrast {prb_contrast[0]:.6f}\n'
+                     f'obj_smooth {obj_smooth:g}\n'
                      f'ndist {ndist}\n'
                      f'n {n}\n'
                      f'ntheta {ntheta}\n'

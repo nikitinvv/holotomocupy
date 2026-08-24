@@ -138,15 +138,14 @@ between them:
 
 ```
 band:      0.5  0.75  1.0  1.5  2.0  3.0     (units of n/256 px)
-at nobj=614: 1.2  1.8  2.4  3.6  4.8  7.2    voxels
+at n=512:  1.0  1.5   2.0  3.0  4.0  6.0     voxels
 ```
 
 The same set of feature sizes therefore appears at three depths, so a
 reconstruction can be scored not only on how thin a layer it still resolves but
 on **how deep** it still resolves it — the innermost band is what an ill-posed
-single-distance problem loses first.  0.5 units is 1.2 voxels at the default
-grid, i.e. right at the sampling limit; it is meant to be the layer that
-disappears.  `common.layer_table()` prints the full listing.
+single-distance problem loses first.  0.5 units is 1 voxel at `n = 512`, i.e.
+right at the sampling limit; it is meant to be the layer that disappears.  `common.layer_table()` prints the full listing.
 
 ### Small features in the middle
 
@@ -158,7 +157,7 @@ three-armed cross through the middle of the sample.
 ```
 distance from centre:  5.0   10.0   14.5   18.0   20.5   22.5   (units of n/256 px)
 bead radius:           2.0    1.4    1.0    0.7    0.5    0.35
-diameter at nobj=614:  9.6    6.7    4.8    3.4    2.4    1.7    voxels
+diameter at n=512:     8.0    5.6    4.0    2.8    2.0    1.4    voxels
 ```
 
 Bead value is 6, above every shell value, so the contrast never vanishes
@@ -168,6 +167,19 @@ back through both, so the beads always land in the mid slices the figures show.
 The arm along `a2` appears in both slices, the `a1` arm in the horizontal one
 and the `a0` arm in the vertical one.  `common.bead_table()` prints the listing;
 the spec is `common.BEAD_DIST` / `BEAD_RAD` / `BEAD_VALUE`.
+
+### Size on the grid, and the margin
+
+The phantom is generated at the **detector** size `n` (`common.gen_object(n)`)
+and then written into the middle of the `nzobj x nobj x nobj` object grid with
+zeros around it (`common.write_centered`) — the same placement `fill_volume`
+makes for `--obj-vol`, which rescales the source array to `span = n` px wide and
+centres it.  So all the feature sizes above are fixed by `n` alone, and `nobj`
+buys nothing but blank border: `MARGIN = (nobj - n)/2` is room for the sliding
+crop, not a change of sample.  (Before 2026-08-23 the phantom was built on the
+`nobj` grid instead, so raising the margin shrank the sample relative to the
+field of view; datasets generated before that date are not comparable with ones
+generated after it.)
 
 The whole specification lives in `common.LAYER_THICK` / `LAYER_VALUES` /
 `BEAD_*`, and `common.phantom_id()` hashes all of it into the phantom-cache
@@ -228,15 +240,17 @@ Single- and four-rank runs now agree to seven digits.
 ```
 
 The ground-truth object is a deterministic function of things that do not vary
-across a sweep — `(nobj, delta, beta)` for the phantom, `(source file, nobj,
+across a sweep — `(n, delta, beta)` for the phantom, `(source file, nobj,
 scale, delta/beta)` for a real `--obj-vol` — so `gen_data.py` builds it once and
 caches it beside the datasets, as
-`phantom_nobj<nobj>_delta<delta>_beta<beta>_<hash>.h5` or
+`phantom_n<n>_delta<delta>_beta<beta>_<hash>.h5` or
 `objvol_nobj<nobj>_scale<scale>_<hash>.h5`; every later case copies it back slab
 by slab instead of rebuilding it (`--phantom-cache none` to disable, or point it
 at another file).  The hash covers everything the result depends on, including
 the source file's size and mtime, so a replaced volume or an edited phantom
-never reads back a stale cache.  Caching a real volume matters most: rescaling
+never reads back a stale cache.  The phantom cache holds the bare `n^3` sample,
+not the padded grid, so one cached phantom serves every margin; the `--obj-vol`
+cache is the whole rescaled `nobj^3` grid, which is what `fill_volume` streams.  Caching a real volume matters most: rescaling
 the 3072³ source reads the whole 116 GB file, ~150 s of mostly disk, and
 `run_dose_brain.sh` alone generates twice.
 
@@ -426,9 +440,9 @@ slice, so `--crop` does not move it; `--zoom off` skips the figure and
 figure.
 
 `run_dose.sh` does not use that default: it passes a `ZOOM_W`-wide box centred
-on the object grid (`604,604,200,200` at the standard `NOBJ = 1408`), since the
-phantom is generated centred in `NOBJ` and the middle is where its structure --
-the wedge edges and the shrinking bead row -- actually is. Set `ZOOM_W` for a
+on the object grid (`277,277,150,150` at the standard `NOBJ = 704`, `ZOOM_W =
+150`), since the phantom sits centred in `NOBJ` and the middle is where its
+structure -- the wedge edges and the shrinking bead row -- actually is. Set `ZOOM_W` for a
 different size or `ZOOM=x0,y0,w,h` (or `ZOOM=off`) to look somewhere else.
 
 There is no convergence plot: `conv.csv` records the data-fit residual, which is

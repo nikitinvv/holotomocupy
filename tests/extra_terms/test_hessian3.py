@@ -108,7 +108,7 @@ def test_laplacian_hessian3():
     local_nzobj = cl_mpi.local_nzobj
     obj_size = nzobj * nobj**2
 
-    lt = LaplacianTerm(lam, obj_size, local_nzobj, nobj, 'complex64',
+    lt = LaplacianTerm(lam, obj_size, local_nzobj, nobj,
                        cl_mpi, cl.gpu_batch, grad_pad=True)
     # write through the views exactly as alloc_arrays wires them up
     lt.grads_view[:] = fill((local_nzobj, nobj, nobj), 'complex64', 10 + rank)

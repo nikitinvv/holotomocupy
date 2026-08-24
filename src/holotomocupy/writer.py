@@ -21,6 +21,11 @@ class Writer:
 
     Attrs on the root group:
       iter
+
+    Two preview TIFFs go alongside it, in {path_out}/checkpoints_tiff/:
+      checkpoint_{iter:04}_obj_re.tiff       (nobj, nobj)   -- z = nzobj//2
+      checkpoint_{iter:04}_obj_re_vert.tiff  (nzobj, nobj)  -- y = nobj//2,
+                                             the vertical cut through the axis
     """
 
     def __init__(self, path_out, comm,
@@ -110,6 +115,15 @@ class Writer:
             # vars['pos'] is [ndist, local_ntheta, 2]; on-disk format is [ntheta, ndist, 2].
             ds_pos[self.st_theta:self.end_theta] = np.ascontiguousarray(pos.transpose(1, 0, 2))
 
+        # Vertical (y = mid) slice, assembled from the ranks' own z slabs rather
+        # than read back out of the file: the horizontal slice below is one
+        # contiguous row of obj_re, but a vertical one is nzobj scattered reads
+        # (3264 of them at bin 0), and every rank already holds its part of it.
+        vmid    = self.nobj // 2
+        v_local = self._cpu(vars['obj'][:, vmid, :].real).astype('float32')
+        v_local *= np.float32(norm_const)
+        v_parts = self.comm.gather(v_local, root=0)
+
         # prb written by rank 0 only via serial driver after mpio block closes
         self.comm.Barrier()
         if self.rank == 0:
@@ -125,6 +139,11 @@ class Writer:
             tiff_path = os.path.join(self.tiff_dir, f"checkpoint_{i:04}_obj_re.tiff")
             tifffile.imwrite(tiff_path, slice_re)
             logger.info(f"Writer: mid-slice TIFF saved → {tiff_path}")
+
+            # ... and the vertical one, (nzobj, nobj), through the rotation axis
+            vert_path = os.path.join(self.tiff_dir, f"checkpoint_{i:04}_obj_re_vert.tiff")
+            tifffile.imwrite(vert_path, np.concatenate(v_parts, axis=0))
+            logger.info(f"Writer: vertical-slice TIFF saved → {vert_path}")
 
         if pos_init is not None:
             self._save_pos_errors_plot(vars['pos'] - pos_init, i)

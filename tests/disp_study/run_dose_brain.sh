@@ -44,8 +44,9 @@ OBJ_BLUR=${OBJ_BLUR:-20}                      # sigma of the initial object blur
 OBJ_SCALE=${OBJ_SCALE:-1}                    # multiplies the stored volume
 MARGIN=${MARGIN:-192}                         # blank border on each side of the object grid
 # The whole 3072 px source array is rescaled to the detector width N (1/3 at
-# N=1024), and the reconstruction grid adds MARGIN blank px on each side:
-#   NOBJ = N + 2*MARGIN,  1280 px at N=1024.
+# N=1024), and the object grid adds MARGIN blank px on each side:
+#   NOBJ = N + 2*MARGIN,  1408 px at N=1024 and MARGIN=192.
+# (run_dose.sh, the phantom leg, defaults to MARGIN=96 at N=512.)
 NOBJ=${NOBJ:-$(( N + 2 * MARGIN ))}
 PHOTONS=${PHOTONS:-0}                         # 0 = noiseless
 CHECKPOINT_STEP=${CHECKPOINT_STEP:-32}

@@ -49,7 +49,7 @@ PRB_SMOOTH=${PRB_SMOOTH:-1}                   # probe blur sigma [px], 0 = as me
 OBJ_SMOOTH=${OBJ_SMOOTH:-1}                    # phantom blur sigma [voxel], 0 = hard edges
 NTHETA=${NTHETA:-450}                         # angles per distance, multi-distance scan
 NDIST=${NDIST:-4}
-NITER=${NITER:-513}
+NITER=${NITER:-33}
 POS_ERR=${POS_ERR:-0}                         # initial position error [px]
 FREEZE_POS=${FREEZE_POS:-1}                   # 1 = do not refine positions at all
 # the reconstruction's INITIAL GUESS: the ground truth smoothed by this much, so
@@ -60,15 +60,32 @@ FREEZE_POS=${FREEZE_POS:-1}                   # 1 = do not refine positions at a
 # the exact phantom (gaussian_blur3d is the identity at sigma <= 0), which makes
 # the NRMSE a measure of drift away from a perfect start rather than of recovery.
 OBJ_BLUR=${OBJ_BLUR:-20}                      # sigma of the initial object blur [px], 0 = start from the truth
-MARGIN=${MARGIN:-192}                         # blank border on each side of the object grid
-# The phantom is generated on the object grid, so NOBJ sets how much blank space
-# surrounds it -- same rule as the brain test, NOBJ = N + 2*MARGIN, and MARGIN
-# is also the cap on AMP.
+MARGIN=${MARGIN:-64}                          # blank border on each side of the object grid
+# The phantom is generated at the DETECTOR size N and then centred in the object
+# grid with zeros around it, so the sample always fills the same fraction of the
+# field of view and MARGIN buys nothing but blank border -- room for the sliding
+# crop to read real object instead of mirrored edge data.  Same rule as the
+# brain test, NOBJ = N + 2*MARGIN, and MARGIN is the cap on AMP.
+#
+# One more thing MARGIN has to cover, on the multi-distance leg: a plane of
+# demagnification d back-maps a detector pixel onto d times as much object, and
+# at the default geometry the 4th distance has d = z1[3]/z1[0] = 1.921, so its
+# detector reads out to 0.46*N = 236 px (at N=512) past each edge of the N-px
+# core.  Anything past the grid edge is mirrored back in, which is harmless
+# exactly while the reflection lands in the blank border -- zeros mirror to
+# zeros, i.e. vacuum -- so
+#     MARGIN >= (0.46*N + AMP) / 2   =  126 px at N=512, AMP=16
+# keeps the far plane's data exact.  Below that the mirror starts folding real
+# sample back onto the far plane (the ndist=1 leg, d = 1, is never affected, so
+# it biases the comparison); the reconstruction separately drops out-of-grid
+# pixels from the data fit (mask_oob in rec_mpi), but that does not un-fold data
+# that was generated wrong.  Raise MARGIN to 128 for a strictly clean 4-distance
+# leg at N=512.
 NOBJ=${NOBJ:-$(( N + 2 * MARGIN ))}
 PHOTONS=${PHOTONS:-0}                         # 0 = noiseless
 # Detail region of the _zoom figure, centred on the object grid: the phantom is
-# generated centred in NOBJ, so the middle is where its structure is, and a box
-# derived from NOBJ stays centred if N or MARGIN change.  Override ZOOM with a
+# centred in NOBJ, so the middle is where its structure is, and a box derived
+# from NOBJ stays centred if N or MARGIN change.  Override ZOOM with a
 # literal x0,y0,w,h (or "off") to look somewhere else.
 ZOOM_W=${ZOOM_W:-150}                         # side of that box [px]
 ZOOM=${ZOOM:-$(( (NOBJ - ZOOM_W) / 2 )),$(( (NOBJ - ZOOM_W) / 2 )),$ZOOM_W,$ZOOM_W}
@@ -122,7 +139,7 @@ RUN="mpirun -np $NP ./set_affinity_gpu.sh python"
 
 echo "=============== dose-matched phantom comparison ==============="
 echo "  optics : $N x $N,  amp = +-$AMP px,  probe sigma = $PRB_SMOOTH px"
-echo "  object : phantom on a $NOBJ px grid (${MARGIN} px margin), sigma = $(printf '%.4g' "$OBJ_SMOOTH") voxel"
+echo "  object : phantom at $N px, centred in a $NOBJ px grid (${MARGIN} px margin), sigma = $(printf '%.4g' "$OBJ_SMOOTH") voxel"
 echo "  zoom   : $ZOOM (centre of the object grid)"
 echo "  recon  : $NITER BH iterations, obj blur $OBJ_BLUR px, positions $([ "$FREEZE_POS" = 1 ] && echo "frozen" || echo "refined from +-$POS_ERR px")"
 echo "  rho    : $([ "$ESTIMATE_RHO" = 1 ] && echo "searched, $RHO_NITER iters per trial" || echo "rec.py default")"

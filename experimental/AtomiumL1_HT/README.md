@@ -146,22 +146,35 @@ mpirun -n 4 ./set_affinity_gpu.sh python estimate_drift.py config_steps15.conf \
 ```
 
 `../AtomiumL1_largedisp/README.md` documents the file in full; the three things
-worth repeating are that the export is a **plain** polynomial with no orbit
-term taken out (`A·cos θ + B·sin θ` in x is exactly a rigid translation of the
-object, so keeping it only re-centres the volume laterally), that the sign and
-the unbinned units were measured rather than assumed, and that the columns are
-**x then y** because step 3 reads the file as `np.loadtxt(...)[:ntheta, ::-1]`.
+worth repeating are that the export is the degree-5 fit to the **centre of mass
+itself** (the left-hand column of the figure), evaluated at every angle; that it
+is a **plain** polynomial with no orbit term taken out (`A·cos θ + B·sin θ` in x
+is exactly a rigid translation of the object, so keeping it only re-centres the
+volume laterally); and that **nothing is added to or taken off it** — no
+re-zeroing at projection 0, no mean-centring, just the fit as `lstsq` returned
+it. The columns are **x then y**, because step 3 reads the file as
+`np.loadtxt(...)[:ntheta, ::-1]`.
 
-The exported curve is the **black dashed line** on `drift_bin2.png`, in all four
-angle panels, so it can be read against the measured points and the orbit-free
-fits; the dx drift panel is where the difference shows, the export sweeping
-22.7 px against the orbit-free 8.5 px.
+The exported curve is the **black dashed line** on the two left-hand panels of
+`drift_bin2.png`, drawn exactly as written.
 
-Written 2026-08-23: x ptp 22.67 px, y ptp 26.37 px, rms residual 2.55 / 4.68 px.
-The x amplitude is larger than the orbit-free 8.5 px in the table above because
-the 15.8 px orbit is now inside the exported curve; y is unchanged at 26.4 px.
-Given the structure function, this file removes the slow part and leaves the
-~4.7 px rms wander for BH's position refinement.
+Written 2026-08-23: ptp x 22.67 px, y 26.37 px; largest value in the file x
+18.67, y 15.09 px; rms residual 2.55 / 4.68 px. The x amplitude is larger than
+the orbit-free 8.5 px in the table above because the 15.8 px orbit is now inside
+the exported curve; y is unchanged at 26.4 px. Given the structure function,
+this file removes the slow part and leaves the ~4.7 px rms wander for BH's
+position refinement.
+
+Two notes on how this particular file was produced. A `steps15.py` run held the
+h5 open when the un-centred version was written, so instead of re-measuring, the
+constant was put back into the mean-centred export written earlier the same day
+(x −5.3198, y +2.8229 px) — cross-checked against the polynomial coefficients
+stored in its own header, the two routes agreeing to 1e-5 px. The previous file
+is beside it as `correct_correct3D.txt.meancentred.bak`, and `drift_bin2.png`
+in this directory is still the older, mean-centred figure; one 15 s rerun of
+`estimate_drift.py --export-correct3d --export-force` once the h5 is free
+regenerates both. And because that `steps15.py` run was already past step 3 when
+the file changed, **its** output carries the mean-centred shifts, not these.
 
 ## Open items
 

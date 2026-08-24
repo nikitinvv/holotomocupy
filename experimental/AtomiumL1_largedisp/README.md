@@ -235,35 +235,57 @@ mpirun -n 4 ./set_affinity_gpu.sh python estimate_drift.py config_steps15.conf \
     --export-correct3d              # --export-deg 5 by default
 ```
 
-Three things about that file differ from everything reported above, on purpose:
+It is a degree-5 polynomial least-squares fitted to the measured centre of
+mass on the sampled angles and evaluated at **all** `ntheta` of them, so a run
+with `--stride` still writes a complete file and every evaluation is an
+interpolation. Three things about it differ from everything reported above, on
+purpose:
 
-* **No orbit is removed.** The export is a plain degree-5 polynomial through
-  the *raw* centroid, whatever `--no-orbit` / `--orbit-y` did to the report.
-  That is the right thing to apply: `A·cos θ + B·sin θ` in x is exactly what a
-  rigid translation of the object projects to, so keeping it only re-centres
-  the reconstructed volume laterally — tomographically consistent either way,
-  and one less thing to get wrong. It does mean the exported x amplitude
-  (13.5 px ptp) is larger than the orbit-free drift in the table above
-  (6.0 px); y is unchanged at 12.0 px, there being no orbit on y.
+* **It is the fit to the centre of mass itself**, the left-hand column of the
+  figure — not to any orbit-free or re-referenced version of it.
+* **No orbit is removed.** A plain degree-5 polynomial through the *raw*
+  centroid, whatever `--no-orbit` / `--orbit-y` did to the report. That is the
+  right thing to apply: `A·cos θ + B·sin θ` in x is exactly what a rigid
+  translation of the object projects to, so keeping it only re-centres the
+  reconstructed volume laterally — tomographically consistent either way, and
+  one less thing to get wrong. It does mean the exported x amplitude (13.5 px
+  ptp) is larger than the orbit-free drift in the table above (6.0 px); y is
+  unchanged at 12.0 px, there being no orbit on y.
+* **Nothing is added to or taken off the curve.** What `lstsq` returns is what
+  is written — no re-zeroing at projection 0, no mean-centring. The one
+  reference already in the numbers is the measurement's own: `dy_un` / `dx_un`
+  are the centroid *relative to projection 0*, which is a property of the data,
+  not a choice the export makes. On this scan that shows up as a pedestal — the
+  dy cloud sits about 20 px below projection 0, so the exported y runs around
+  −21 px while spanning only 12.0 px — and it is harmless: a constant common to
+  all angles in y just translates the reconstructed volume. In x it is less
+  inert (a common constant moves the rotation axis, competing with
+  `rotation_center_shift`), but here the exported x constant is small.
 * **Sign and units were measured, not assumed.** Adding a constant to `r` at
   read time moves the centroid the other way (`r = (8,0)` took the binned
   centroid from y = 254.02 to 246.03), i.e. `centroid = const − r`, so an
   excursion of `+d` is cancelled by writing `+d`; and because `r = cshifts /
   2**bin`, the number to write is `d` in **unbinned** px — exactly what the
   script already reports, no rescaling.
-* **Column order is x, y.** Step 3 reads it as `np.loadtxt(...)[:ntheta, ::-1]`
-  and then tiles the same row across all distances.
 
-The file is 1800 rows, zero at projection 0, and refuses to overwrite an
-existing one without `--export-force` — checked before the GPU work, not after.
-`--export-path` sends it somewhere else for a dry run. A copy also lands in
-`{path_out}/drift_bin2/drift_bin2_correct3D.txt`, and the exported curve is
-drawn on `drift_bin2.png` as the **black dashed line** in all four angle panels,
-so it can be read against the measured points and the orbit-free fits. On the
-left it is parallel to the deg-5 fit rather than on top of it: the export is
-referenced to projection 0, the report's curves keep their own mean.
+Column order is **x, y**: step 3 reads the file as
+`np.loadtxt(...)[:ntheta, ::-1]` and then tiles the same row across all
+distances. It is 1800 rows and refuses to overwrite an existing one without
+`--export-force` — checked before the GPU work, not after. `--export-path` sends
+it somewhere else for a dry run. A copy also lands in
+`{path_out}/drift_bin2/drift_bin2_correct3D.txt`, and the exported curve is the
+**black dashed line** on the two left-hand panels of `drift_bin2.png`, drawn
+exactly as written.
 
-Written 2026-08-23: x ptp 13.48 px, y ptp 11.98 px, rms residual 4.48 / 4.44 px.
+The figure is two columns: the measured centre of mass with its fits on the
+left, the reliability trace and the acceptance test on the right. The
+orbit-free "drift" panels that used to occupy the right column are gone — they
+showed the same polynomials with a constant and an `A·cos θ + B·sin θ` taken
+out, which is not what is exported and only invited the comparison. The orbit
+amplitude is still reported, in the left panels' titles and in the text table.
+
+Written 2026-08-23: ptp x 13.48 px, y 11.98 px; largest value in the file x
+7.20, y 21.57 px (the y pedestal above); rms residual 4.48 / 4.44 px.
 `{pfile}_/` did not exist for this scan and was created to hold it.
 
 ## Open items

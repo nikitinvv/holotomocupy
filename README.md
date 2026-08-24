@@ -324,7 +324,8 @@ At each `vis_step` interval (when `vis_step != -1` and `i > start_iter`), the fo
 | File | Content |
 |---|---|
 | `checkpoint_{iter:04}.h5` | Full object (real + imag), probe, positions |
-| `checkpoint_{iter:04}_obj_re.tiff` | Middle z-slice of `obj_re` for quick visual check |
+| `checkpoint_{iter:04}_obj_re.tiff` | Middle z-slice of `obj_re`, `(nobj, nobj)`, for a quick visual check |
+| `checkpoint_{iter:04}_obj_re_vert.tiff` | Middle y-slice of `obj_re`, `(nzobj, nobj)` -- the vertical cut through the rotation axis |
 
 The log also records the mean absolute position error per distance at each checkpoint:
 

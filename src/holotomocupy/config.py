@@ -39,6 +39,21 @@ def parse_args(config_file):
         # trials of rho_estimate_niter iterations. See Rec.estimate_rho_coord.
         args.estimate_rho       = cfg.getboolean("estimate_rho",       fallback=False)
         args.rho_estimate_niter = cfg.getint    ("rho_estimate_niter", fallback=16)
+
+        # -1 (default) keeps estimate_rho_coord's trials silent; N > 0 logs the
+        # error every N iterations inside each trial.
+        args.rho_trial_error_step = cfg.getint("rho_trial_error_step", fallback=-1)
+        # Out-of-grid detector pixels. eff_demag = (1+shrink)/norm_magnification
+        # is > 1 for every plane but the reference one, so a detector pixel maps
+        # back to an object-grid coordinate that falls outside the grid whenever
+        # nobj < n*max(eff_demag). Those pixels carry no object information --
+        # only whatever the shift kernel's boundary condition invents -- so by
+        # default they are dropped from the data fit (Rec._build_data_mask,
+        # which logs the surviving fraction per distance). mask_oob_margin is
+        # extra slack in detector pixels on top of the worst-case position
+        # shift, covering pos drift while the positions are refined.
+        args.mask_oob        = cfg.getboolean("mask_oob",        fallback=True)
+        args.mask_oob_margin = cfg.getfloat  ("mask_oob_margin", fallback=2.0)
         # Derive the CG beta/alpha from one Hessian sweep instead of three
         # (see the fused_hessian note on Rec). check_fused_hessian re-measures
         # every form the classic path would have measured and logs the relative

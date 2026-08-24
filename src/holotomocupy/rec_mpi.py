@@ -144,6 +144,7 @@ class Rec:
         if not hasattr(self, 'rho_estimate_niter'):
             self.rho_estimate_niter = 16
 
+
         # cuFFTDx JIT compile: rank 0 builds the .so, then all ranks proceed
         if self.rank == 0:
             cufftdx_precompile(2 * self.nz, 2 * self.n)
@@ -364,6 +365,12 @@ class Rec:
 
         self.shrink_nd = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
         self.eff_demag = cp.zeros((self.ndist, self.local_ntheta), dtype='float32')
+
+        # Out-of-grid detector mask, filled by _build_data_mask in precalc (see
+        # the F0 block). All-ones here so that any path which never reaches
+        # precalc -- gen_data.py, say -- keeps the unmasked objective exactly.
+        # ndist*nz*n*4 B: 4 MiB at bin 2, 67 MiB at bin 0.
+        self.data_mask = cp.ones((self.ndist, self.nz, self.n), dtype='float32')
     
     def BH(self, writer=None):
         vars  = self.vars
@@ -423,7 +430,10 @@ class Rec:
         # Silence trial logging / disable checkpoint writes for the duration.
         self.niter           = niter_trial
         self.start_iter      = 0
-        self.error_step      = -1
+        # Trials are silent by default; rho_trial_error_step=N logs the error
+        # every N iterations inside each trial, which is the only way to see
+        # whether a bad score is a slow descent or a first-step blow-up.
+        self.error_step      = int(getattr(self, 'rho_trial_error_step', -1))
         self.checkpoint_step = -1
 
         def _reset_trial():
@@ -511,10 +521,97 @@ class Rec:
             logger.warning(f'estimate_rho_coord: final rho = {base}')
         return history
 
+    def _build_data_mask(self, vars):
+        """Weight out the detector pixels whose object-grid footprint leaves
+        the grid.
+
+        F3 samples the object plane at
+
+            x = eff_demag*(tx - (n-1)/2) - r_x + (nobj-1)/2
+
+        and interpolates with a cubic B-spline, i.e. taps floor(x)-1 ..
+        floor(x)+2, so a pixel is fully supported only for 1 <= x < nobj-2 --
+        and likewise in y against nzobj. eff_demag = (1+shrink)/norm_mag is
+        > 1 for every plane but the reference one, so as soon as
+        nobj < n*max(eff_demag) the outer ring of the detector back-maps past
+        the edge of the object grid. What the model predicts there is decided
+        by the shift kernel's boundary condition (a mirrored copy of the
+        sample), not by the sample itself, so fitting those pixels only pushes
+        the residual into the probe and the in-grid object. This zeroes their
+        weight in F0 and in every derivative of it. Partial support counts as
+        no support: a pixel with two of its four taps in-grid returns a blend
+        of sample and boundary condition, which is wrong in its own way.
+
+        The mask is theta-independent by construction: eff_demag and the
+        positions are replaced by their worst case over all angles AND all
+        ranks (a global MPI max), plus mask_oob_margin pixels of slack. The
+        bound is symmetric in |tx - (n-1)/2|, which makes it a *sufficient*
+        condition -- it may discard a pixel or two more than strictly
+        necessary at the border, and never keeps one that is not fully
+        supported.
+
+        Frozen for the whole level: rebuilding it mid-run would change F
+        between iterations, so the errors in conv.csv would no longer be
+        comparable. The margin is what covers positions drifting while they
+        are refined.
+        """
+        if not getattr(self, 'mask_oob', True):
+            self.data_mask[:] = 1
+            if self.rank == 0:
+                logger.warning("data mask: disabled (mask_oob=False)")
+            return
+
+        margin = float(getattr(self, 'mask_oob_margin', 2.0))
+
+        # Worst case over the local angles, then over ranks. pos is (y, x).
+        if self.local_ntheta > 0:
+            loc_ed = cp.asnumpy(self.eff_demag).max(axis=1)
+            loc_r  = np.abs(np.asarray(vars['pos'])).max(axis=1)
+        else:
+            loc_ed = np.zeros(self.ndist, dtype='float32')
+            loc_r  = np.zeros((self.ndist, 2), dtype='float32')
+        buf = np.concatenate([loc_ed.ravel(), loc_r.ravel()]).astype('float32')
+        self.cl_mpi.comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.MAX)
+        ed_max = buf[:self.ndist]
+        r_max  = buf[self.ndist:].reshape(self.ndist, 2)
+
+        # A tap set {floor(v)-1 .. floor(v)+2} fits in [0, N-1] iff
+        # 1 <= v < N-2; centred on (N-1)/2 that is a half-width of
+        # min((N-1)/2 - 1, (N-3) - (N-1)/2) about the grid centre.
+        cx, cy = (self.nobj - 1) * 0.5, (self.nzobj - 1) * 0.5
+        half_x = min(cx - 1.0, (self.nobj  - 3) - cx)
+        half_y = min(cy - 1.0, (self.nzobj - 3) - cy)
+
+        ax = np.abs(np.arange(self.n,  dtype='float64') - (self.n  - 1) * 0.5)
+        ay = np.abs(np.arange(self.nz, dtype='float64') - (self.nz - 1) * 0.5)
+
+        for k in range(self.ndist):
+            mx = ed_max[k] * ax <= half_x - r_max[k, 1] - margin
+            my = ed_max[k] * ay <= half_y - r_max[k, 0] - margin
+            self.data_mask[k] = cp.asarray(np.outer(my, mx).astype('float32'))
+
+        if self.rank == 0:
+            frac = cp.asnumpy(self.data_mask.mean(axis=(1, 2)))
+            for k in range(self.ndist):
+                logger.warning(
+                    f"data mask dist {k}: eff_demag<={ed_max[k]:.5f} "
+                    f"|pos|<={r_max[k].max():.2f}px margin={margin:g}px -> "
+                    f"keeps {100 * frac[k]:.1f}% of the pixels")
+            logger.warning(
+                f"data mask: keeps {100 * frac.mean():.1f}% of the data. F0 still "
+                f"divides by the FULL ntheta*ndist*nz*n, so reported errors scale "
+                f"with that fraction and are not comparable with an unmasked run.")
+            if frac.mean() < 0.999:
+                logger.warning(
+                    f"data mask: nobj={self.nobj} < n*max(eff_demag)="
+                    f"{self.n * ed_max.max():.0f}; the discarded pixels are real "
+                    f"measurements that only a larger object grid can use.")
+
     def precalc(self, vars):
         """One-time setup at the start of BH: shrinkage, obj normalization,
         pos snapshot, initial proj from fwd_tomo + redist."""
         self.eff_demag[:] = (1 + self.shrink_nd) / cp.array(self.norm_magnifications[:, None])
+        self._build_data_mask(vars)
 
         # normalize obj to work with normal operators (restored at BH exit)
         vars["obj"] /= self.norm_const
@@ -1002,55 +1099,74 @@ class Rec:
         return stats
 
 
-    ####### F0(x0) = 1/n\||x0|-d\|_2^2
+    ####### F0(x0) = 1/n\|m\cdot(|x0|-d)\|_2^2
+    #
+    # m = self.data_mask[self._dist_idx] is the out-of-grid detector mask built
+    # by _build_data_mask: 1 where the pixel's object-grid footprint lies inside
+    # the grid, 0 where it does not. It is [nz, n] -- theta-independent, so it
+    # broadcasts against the [chunk, nz, n] arrays the cascade kernels carry --
+    # and it is read off self rather than threaded through the four batched call
+    # sites, the same way self._dist_idx already reaches F1 via cl_prop.D.
+    # All four functions below weight the POINTWISE term before the reduction,
+    # so they stay the exact derivatives of the masked F0.
+    #
+    # The 1/data_size normalization deliberately still counts every detector
+    # pixel, masked or not. Renormalizing by the surviving count would silently
+    # rescale lam_prbfit, lam_laplacian and rho, all of which are tuned against
+    # the current magnitude of F0; instead _build_data_mask logs the surviving
+    # fraction so the errors in conv.csv stay interpretable.
     @staticmethod
     @cp.fuse()
-    def _F0_fused(x, d):
+    def _F0_fused(x, d, m):
         t = cp.abs(x) - d
-        return t * t
+        return m * t * t
 
     @nvtx.annotate("F0", color="green")
     def F0(self, x, d):
         """In: (x0), Out: const"""
-        return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
+        return 1 / self.data_size * cp.sum(
+            self._F0_fused(x, d, self.data_mask[self._dist_idx]))
 
     @staticmethod
     @cp.fuse()
-    def _dF0_fused(x, d):
-        return x - d * (x / cp.abs(x))
+    def _dF0_fused(x, d, m):
+        return m * (x - d * (x / cp.abs(x)))
 
     @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
         """In: (x0,y0), Out: const"""
-        return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
+        return 2 / self.data_size * redot(
+            self._dF0_fused(x, d, self.data_mask[self._dist_idx]), y)
 
     @staticmethod
     @cp.fuse()
-    def _d2F_dF0_fused(x, y, z, w, d):
+    def _d2F_dF0_fused(x, y, z, w, d, m):
         absval = cp.abs(x)
         l0 = x / absval
         d0 = d / absval
         v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
         if w is not None:
             v += reprod(x - d * l0, w)
-        return v
+        return m * v
 
     @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
         """In: (x0,y0,z0,w0), Out: const"""
-        return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
+        return 2 / self.data_size * cp.sum(
+            self._d2F_dF0_fused(x, y, z, w, d, self.data_mask[self._dist_idx]))
 
     @staticmethod
     @cp.fuse()
-    def _gF0_fused(x, y, scale):
+    def _gF0_fused(x, y, m, scale):
         td = y * (x / cp.abs(x))
-        return scale * (x - td)
+        return (scale * m) * (x - td)
 
     @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
         """In: x, y = F0(F1(..(x)))), Out: y0"""
         x = self.apply_F_from(x, 1)
-        return self._gF0_fused(x, y, np.float32(2 / self.data_size))
+        return self._gF0_fused(x, y, self.data_mask[self._dist_idx],
+                               np.float32(2 / self.data_size))
     
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
     @nvtx.annotate("F1", color="green")

@@ -42,9 +42,9 @@ python -c "import holotomocupy, sys; print('holotomocupy:', holotomocupy.__file_
 
 # cd one level up, as polaris_run.sh does, so relative paths behave the same
 cd "$(dirname "${SCRIPT_DIR}")"
-# mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
-#     python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}" \
-#     2>&1 | tee "${SCRIPT_DIR}/log_$(basename ${CONFIG} .conf).txt"
+mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
+    python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}" \
+    2>&1 | tee "${SCRIPT_DIR}/log_$(basename ${CONFIG} .conf).txt"
 
 mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
     python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" \

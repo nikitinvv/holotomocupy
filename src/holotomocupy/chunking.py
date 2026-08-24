@@ -167,6 +167,24 @@ class Chunking:
         gpu_mem = self.gpu_mem
         stream  = self.stream
 
+        # The three chunking streams are non-blocking, so they have NO ordering
+        # relationship with the stream the caller was on. That breaks the one
+        # invariant CuPy's memory pool relies on: a block freed on stream A may
+        # be handed straight back out on stream A, safe only because everything
+        # already queued on A runs first. A caller that leaves an unsynchronized
+        # kernel pending -- `out += term.energy_local(prb)` drops the device
+        # scalar it still has to read the moment the statement ends -- has that
+        # 4-byte block recycled into a chunked accumulator here, which the
+        # chunking streams then overwrite *while* the pending read is still
+        # queued. The pending kernel adds whatever partial sum it happens to
+        # find, so Rec.min returns F0 plus a few chunks of the unscaled
+        # regularizer (see tests/data_mask/probe_lap.py, PROOF mode).
+        # One event makes the pool's assumption true again.
+        _ev = cp.cuda.Event(disable_timing=True)
+        _ev.record(cp.cuda.get_current_stream())
+        for s in stream:
+            s.wait_event(_ev)
+
         nchunk = int(np.ceil(size / self.chunk))
 
         # pre-allocate double-buffered GPU arrays

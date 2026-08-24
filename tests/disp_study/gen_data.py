@@ -90,7 +90,8 @@ def parse():
     p.add_argument('--phantom-cache', default=None,
                    help='HDF5 file the ground-truth object (phantom or rescaled --obj-vol) '
                         'is cached in, so a sweep builds it only once (default: beside the '
-                        "datasets, named for nobj and a hash of everything it depends on; "
+                        "datasets, named for n -- nobj with --obj-vol -- and a hash of "
+                        "everything it depends on; "
                         "'none' rebuilds it every time)")
     p.add_argument('--out',    default=None,
                    help=f'output directory (default {C.OUT_ROOT}/amp<amp>_ndist<ndist>)')
@@ -112,18 +113,26 @@ nobj_factor = nobj / float(n)
 nzobj = nobj
 amp_max = (nobj - n) / 2
 detector_pixelsize = C.detector_pixelsize(n)
-# --obj-vol only: the whole source array is rescaled to the detector width, so
-# the sample is whatever fraction of that array is not air; nobj adds the blank
-# margin around it.  Plus the delta/beta ratio that turns the volume's
-# (already -delta-like) values into obj_im.
+# The ground truth is built at the DETECTOR size and then centred in the object
+# grid with zeros around it, so nobj adds a blank margin and nothing else:
+#   phantom   C.gen_object(span) on a span^3 grid -> C.write_centered
+#   --obj-vol the whole source array rescaled to span px wide by C.fill_volume,
+#             which centres and zero-pads it the same way; the sample is then
+#             whatever fraction of that array is not air.
+# The alternative -- generating on the nobj grid -- ties the sample's size to
+# the margin, so raising the margin silently shrinks the sample relative to the
+# field of view and changes what is being reconstructed.
 span       = n
+# ... plus the delta/beta ratio that turns --obj-vol's (already -delta-like)
+# values into obj_im.
 delta_beta = a.delta / a.beta
 out = a.out or os.path.join(C.OUT_ROOT,
                             C.case_name(a.amp, a.ndist, a.prb_smooth, a.obj_smooth))
 path = os.path.join(out, 'data.h5')
 
-# The ground-truth object depends only on (nobj, delta, beta) for the phantom,
-# and on (source file, nobj, span, scale, delta/beta) for a real volume -- in
+# The ground-truth object depends only on (n, delta, beta) for the phantom (it
+# is built at the detector size and padded, so not on the margin), and on
+# (source file, nobj, span, scale, delta/beta) for a real volume -- in
 # both cases on nothing that varies across a sweep, so the whole sweep can share
 # one copy: build it on the first run, read it back on every later one.  Worth
 # it either way, but most of all for --obj-vol: rescaling the 3072^3 source
@@ -134,13 +143,19 @@ path = os.path.join(out, 'data.h5')
 # phantom or a replaced source file can never make an old cache silently
 # reappear.
 # next to the datasets (the parent of --out), not in C.OUT_ROOT: run_study.sh
-# points --out at its own root, and the file is a full nobj^3 volume
+# points --out at its own root, and the file is a full n^3 volume (nobj^3 with
+# --obj-vol)
 obj_id = (C.volume_id(a.obj_vol, span, a.obj_scale, delta_beta, nobj, nzobj)
           if a.obj_vol else C.phantom_id(smooth=a.obj_smooth))
+# The phantom cache holds the span^3 CORE, not the padded grid: the core does
+# not depend on the margin, so one cached phantom serves every nobj, and the
+# file is (nobj/n)^3 smaller.  The --obj-vol cache still holds the whole
+# rescaled nobj^3 grid, which is what fill_volume streams out.
+cache_shape = (nzobj, nobj, nobj) if a.obj_vol else (span, span, span)
 default_cache = os.path.join(
     os.path.dirname(os.path.normpath(out)),
     (f'objvol_nobj{nobj}_scale{a.obj_scale:g}_{obj_id}.h5' if a.obj_vol else
-     f'phantom_nobj{nobj}_delta{a.delta:g}_beta{a.beta:g}_{obj_id}.h5'))
+     f'phantom_n{span}_delta{a.delta:g}_beta{a.beta:g}_{obj_id}.h5'))
 cache = None if a.phantom_cache == 'none' else (a.phantom_cache or default_cache)
 
 if rank == 0:
@@ -161,6 +176,8 @@ if rank == 0:
     logger.info(f'  distances              : {a.ndist}  z1={C.Z1_ALL[:a.ndist]*1e3} mm')
     logger.info(f'  detector / object grid : {n} x {n}   /   {nzobj} x {nobj} x {nobj}'
                 f'  (nobj = {nobj_factor:.4g} x n)')
+    logger.info(f'  ... sample / margin    : built at {span} px, centred in the grid '
+                f'with a {(nobj - span) // 2} px blank border')
     logger.info(f'  detector pixel         : {detector_pixelsize*1e9:.2f} nm '
                 f'({C.DETECTOR_NDET // n}x binned)')
     m0  = C.FOCUSTODETECTORDISTANCE / C.Z1_ALL[0]
@@ -179,9 +196,9 @@ if rank == 0:
     logger.info(f'  object cache           : {cache or "disabled"}'
                 f'{"" if not cache or os.path.isfile(cache) else "  (building it)"}')
     logger.info('=' * 62)
-    if a.obj_vol and span > nobj:
-        logger.warning(f'the sample is {span} px wide but the object grid is only {nobj} px: '
-                       f'it is cropped. Raise --nobj to at least {span}.')
+    if span > min(nobj, nzobj):
+        logger.warning(f'the sample is {span} px wide but the object grid is only '
+                       f'{nzobj} x {nobj}: it is cropped. Raise --nobj to at least {span}.')
     if a.amp > amp_max:
         logger.warning(f'amp={a.amp:g} exceeds (nobj-n)/2={amp_max:g}: the crop will sample '
                        f'mirrored edge data. Increase --nobj-factor.')
@@ -232,25 +249,24 @@ def fill_object(ds_re, ds_im):
     """Fill /obj_re,/obj_im of the new data file with the ground-truth object.
 
     With --obj-vol that is a rescaled slice-by-slice copy of a real volume,
-    otherwise the synthetic phantom.  Either way it is a deterministic function
-    of arguments that do not change across a sweep, so it is built on the first
+    otherwise the synthetic phantom.  Either way the sample is built at the
+    detector size and centred in the grid, and it is a deterministic function of
+    arguments that do not change across a sweep, so it is built on the first
     call and cached, and later calls copy it back slab by slab (which also keeps
     a cache hit down to one z-batch of memory instead of a whole nobj^3 volume).
     """
     if cache and os.path.isfile(cache):
         with h5py.File(cache, 'r') as g:
-            if (int(g.attrs.get('nobj', -1)) == nobj
+            if (tuple(g['obj_re'].shape) == cache_shape
                     and float(g.attrs.get('delta', np.nan)) == a.delta
                     and float(g.attrs.get('beta',  np.nan)) == a.beta
                     and str(g.attrs.get('phantom_id', '')) == obj_id):
                 logger.info(f'reading the object from {cache}')
-                batch = C.h5_batch(nobj * nobj * 4)
-                for i0 in range(0, nzobj, batch):
-                    i1 = min(i0 + batch, nzobj)
-                    ds_re[i0:i1] = g['obj_re'][i0:i1]
-                    ds_im[i0:i1] = g['obj_im'][i0:i1]
+                # straight through the datasets: write_centered reads them one
+                # z-batch at a time, so the core never has to be resident either
+                C.write_centered(ds_re, ds_im, g['obj_re'], g['obj_im'], nzobj, nobj)
                 return
-        logger.warning(f'{cache} holds an object for a different (nobj, delta, beta, source) '
+        logger.warning(f'{cache} holds an object of a different (shape, delta, beta, source) '
                        f'- rebuilding and overwriting it')
 
     if a.obj_vol:
@@ -260,9 +276,8 @@ def fill_object(ds_re, ds_im):
                       scale=a.obj_scale, delta_beta=delta_beta, log=logger.info)
     else:
         logger.info('generating the phantom')
-        obj = C.gen_object(nobj, a.delta, a.beta, smooth=a.obj_smooth)
-        ds_re[:] = obj.real
-        ds_im[:] = obj.imag
+        obj = C.gen_object(span, a.delta, a.beta, smooth=a.obj_smooth)
+        C.write_centered(ds_re, ds_im, obj.real, obj.imag, nzobj, nobj)
         del obj
 
     if cache:
@@ -273,21 +288,27 @@ def fill_object(ds_re, ds_im):
         # cache behind for the next run to read back as if it were complete
         os.makedirs(os.path.dirname(cache) or '.', exist_ok=True)
         tmp = f'{cache}.tmp{os.getpid()}'
+        cz, cy, cx = cache_shape
+        z0, y0, x0 = (nzobj - cz) // 2, (nobj - cy) // 2, (nobj - cx) // 2
         with h5py.File(tmp, 'w') as g:
-            g.attrs['nobj']  = nobj
+            g.attrs['n']     = n
+            g.attrs['span']  = span
+            if a.obj_vol:                 # the padded grid; the phantom cache is
+                g.attrs['nobj']  = nobj   # the bare core, and does not depend on it
+                g.attrs['nzobj'] = nzobj
             g.attrs['delta'] = a.delta
             g.attrs['beta']  = a.beta
             g.attrs['phantom_id'] = obj_id
-            gre = g.create_dataset('obj_re', (nzobj, nobj, nobj), dtype='float32')
-            gim = g.create_dataset('obj_im', (nzobj, nobj, nobj), dtype='float32')
-            batch = C.h5_batch(nobj * nobj * 4)
-            for i0 in range(0, nzobj, batch):
-                i1 = min(i0 + batch, nzobj)
-                gre[i0:i1] = ds_re[i0:i1]
-                gim[i0:i1] = ds_im[i0:i1]
+            gre = g.create_dataset('obj_re', cache_shape, dtype='float32')
+            gim = g.create_dataset('obj_im', cache_shape, dtype='float32')
+            batch = C.h5_batch(cy * cx * 4)
+            for i0 in range(0, cz, batch):
+                i1 = min(i0 + batch, cz)
+                gre[i0:i1] = ds_re[z0 + i0:z0 + i1, y0:y0 + cy, x0:x0 + cx]
+                gim[i0:i1] = ds_im[z0 + i0:z0 + i1, y0:y0 + cy, x0:x0 + cx]
         os.replace(tmp, cache)
         logger.info(f'object cached -> {cache}  '
-                    f'({2 * nzobj * nobj * nobj * 4 / 2**30:.1f} GiB)')
+                    f'({2 * cz * cy * cx * 4 / 2**30:.1f} GiB)')
 
 
 t0 = time.time()
@@ -303,6 +324,7 @@ if rank == 0:
         f.attrs['photons'] = a.photons
         f.attrs['delta'] = a.delta; f.attrs['beta'] = a.beta
         f.attrs['nobj_factor'] = nobj_factor
+        f.attrs['span'] = span      # the sample's width; nobj - span = 2 * margin
         f.attrs['prb_smooth'] = a.prb_smooth
         f.attrs['obj_smooth'] = a.obj_smooth
         if a.obj_vol:

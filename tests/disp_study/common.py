@@ -21,6 +21,13 @@ Sign/units conventions
   real object, so that is the practical limit; with the default nobj = 3n/2
   it is n/4 (= 64 px at n = 256), and the phantom itself starts leaving the
   field of view above ~0.15*n (= 38 px).
+* The ground-truth object is built at the DETECTOR size n -- `gen_object(n)`
+  for the phantom, `fill_volume(..., span=n)` for --obj-vol -- and only then
+  placed in the middle of the nzobj x nobj x nobj grid, with zeros around it
+  (`write_centered`).  nobj therefore sets nothing but the width of the blank
+  border: raising the margin buys room for the displacement crop instead of
+  shrinking the sample, and the sample keeps the same size relative to the
+  field of view whatever the margin is.
 """
 
 import os
@@ -170,9 +177,9 @@ def rotate3d_once(vol, ang_xy_deg=ROT_XY_DEG, ang_xz_deg=ROT_XZ_DEG, order=1):
 # sizes therefore appears at three depths, so a reconstruction can be scored not
 # only on how thin a layer it still resolves but on how far into the sample it
 # still resolves it; the innermost band is the one an ill-posed single-distance
-# problem loses first.  0.5 units is 1.2 px at the default nobj = 1.2*512, i.e.
-# right at the sampling limit - deliberately, it is the layer that is meant to
-# disappear.
+# problem loses first.  Radii are in n/256 px and the phantom is built on the
+# n-grid, so 0.5 units is 1 px at n = 512 whatever the margin is - right at the
+# sampling limit, deliberately: it is the layer that is meant to disappear.
 _BAND  = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0]        # one band, thinnest at the outside
 _SPACE = 5.0                                     # thick shell between two bands
 LAYER_R_OUTER = 49.5                             # outer radius of the whole object
@@ -234,11 +241,10 @@ def _bead_cross(dist=BEAD_DIST, rad=BEAD_RAD, value=BEAD_VALUE, origin=BEAD_CENT
 BEADS = _bead_cross()
 
 
-def bead_table(n=512, nobj_factor=1.2, beads=BEADS):
+def bead_table(n=512, beads=BEADS):
     """Human-readable listing of the bead sizes, in n/256 units and in voxels."""
-    nobj = int(round(nobj_factor * n / 2)) * 2
-    px   = nobj / 256.0
-    lines = [f'nobj={nobj}  (1 unit = {px:.3g} voxel)   {len(beads)} beads, '
+    px   = n / 256.0
+    lines = [f'n={n}  (1 unit = {px:.3g} voxel)   {len(beads)} beads, '
              f'value {BEAD_VALUE:g}',
              ' dist[u]  radius[u]  radius[px]  diameter[px]']
     for d, r in zip(BEAD_DIST, BEAD_RAD):
@@ -272,13 +278,12 @@ def layer_thicknesses(radii=LAYER_RADII):
     return -np.diff(np.asarray(radii, dtype=np.float32))
 
 
-def layer_table(n=512, nobj_factor=1.2, radii=LAYER_RADII, values=LAYER_VALUES):
+def layer_table(n=512, radii=LAYER_RADII, values=LAYER_VALUES):
     """Human-readable listing of the shells: outer radius, thickness, value — in
-    n/256 units and in voxels of the nobj grid the phantom is built on."""
-    nobj = int(round(nobj_factor * n / 2)) * 2
-    px   = nobj / 256.0
+    n/256 units and in voxels of the n-grid the phantom is built on."""
+    px   = n / 256.0
     th   = np.append(layer_thicknesses(radii), radii[-1])
-    lines = [f'nobj={nobj}  (1 unit = {px:.3g} voxel)',
+    lines = [f'n={n}  (1 unit = {px:.3g} voxel)',
              ' k   r_out[u]  r_out[px]  thick[u]  thick[px]  value']
     for k, (r, t, v) in enumerate(zip(radii, th, values)):
         lines.append(f'{k:2d}   {r:8.2f}  {r*px:9.2f}  {t:8.2f}  {t*px:9.2f}  {v:5.1f}')
@@ -366,6 +371,39 @@ def gen_object(n, delta, beta, radii=LAYER_RADII, amps=LAYER_AMPS, beads=BEADS,
         obj = ifftn((fu * filt)).real
         obj[obj < 0] = 0
     return (obj * (-delta + 1j*beta)).astype(np.complex64, copy=False)
+
+
+def write_centered(ds_re, ds_im, src_re, src_im, nzobj, nobj):
+    """Write a span^3 ground-truth object into the middle of the object grid.
+
+    `src_re` / `src_im` are the real and imaginary parts of the object as it was
+    built at the detector size -- arrays or open HDF5 datasets, normally of
+    shape (span, span, span) -- and they are copied into the centred core of the
+    (nzobj, nobj, nobj) /obj_re,/obj_im datasets, with 0 (transmission 1)
+    everywhere else.  This is the same placement fill_volume makes for
+    --obj-vol, so both kinds of ground truth follow the one rule: the sample is
+    generated for the detector, and the object grid only adds a blank margin.
+
+    One destination z-batch is resident at a time, so a phantom that is itself
+    streamed off disk never needs the whole padded grid in memory.
+    """
+    sz, sy, sx = (int(v) for v in src_re.shape)    # cubic for both callers, but
+    if sz > nzobj or sy > nobj or sx > nobj:       # not assumed to be
+        raise ValueError(f'object of {sz} x {sy} x {sx} px does not fit in a '
+                         f'{nzobj} x {nobj} x {nobj} grid')
+    z0, y0, x0 = (nzobj - sz) // 2, (nobj - sy) // 2, (nobj - sx) // 2
+    batch = min(h5_batch(nobj * nobj * 4), nzobj)
+    buf   = np.zeros((batch, nobj, nobj), dtype='float32')
+    for i0 in range(0, nzobj, batch):
+        i1 = min(i0 + batch, nzobj)
+        k  = i1 - i0
+        j0, j1 = i0 - z0, i1 - z0                  # the same rows within the core
+        c0, c1 = max(j0, 0), min(j1, sz)           # ... clipped to it (empty = border)
+        for ds, src in ((ds_re, src_re), (ds_im, src_im)):
+            buf[:k] = 0
+            if c1 > c0:
+                buf[c0 - j0:c1 - j0, y0:y0 + sy, x0:x0 + sx] = src[c0:c1]
+            ds[i0:i1] = buf[:k]
 
 
 # --- probe ------------------------------------------------------------------

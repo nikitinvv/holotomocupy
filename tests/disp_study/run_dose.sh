@@ -49,7 +49,7 @@ PRB_SMOOTH=${PRB_SMOOTH:-1}                   # probe blur sigma [px], 0 = as me
 OBJ_SMOOTH=${OBJ_SMOOTH:-1}                    # phantom blur sigma [voxel], 0 = hard edges
 NTHETA=${NTHETA:-450}                         # angles per distance, multi-distance scan
 NDIST=${NDIST:-4}
-NITER=${NITER:-33}
+NITER=${NITER:-513}
 POS_ERR=${POS_ERR:-0}                         # initial position error [px]
 FREEZE_POS=${FREEZE_POS:-1}                   # 1 = do not refine positions at all
 # the reconstruction's INITIAL GUESS: the ground truth smoothed by this much, so

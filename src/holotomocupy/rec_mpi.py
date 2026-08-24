@@ -22,6 +22,9 @@ np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=".*peer.*")
 cupy.fft.config.get_plan_cache().set_size(0) # dont waste GPU memory
 
+# Floor for |x| in the amplitude data term, see the F0 block below.
+_ABS_EPS = np.float32(1e-20)
+
 
 class Rec:
     # B(y,z) = <y, H(vars)·z> is symmetric, so the three sweeps the classic path
@@ -544,9 +547,14 @@ class Rec:
         scores with self.min(). A trial that blows up (CUDA / RuntimeError, or a
         non-finite error) scores inf so the search steps past divergent rho.
 
+        Trial errors are memoised on the full rho vector, so the centre probe of
+        the second and third coordinates -- which is the vector that just won
+        the previous one -- is free.
+
         Updates self.rho_sq in place and restores the state so the outer BH loop
         starts clean. Costs one extra copy of vars (obj + proj dominate) for the
-        snapshot, and 3..(3 + 2*max_extend) trials of niter_trial iterations.
+        snapshot, and 3..(3 + 2*max_extend) trials of niter_trial iterations per
+        coordinate, minus one for each coordinate after the first.
         """
         snap_vars       = {k: v.copy() for k, v in vars.items()}
         snap_table      = self.table.copy()
@@ -589,14 +597,25 @@ class Rec:
                 err = float('inf')
             return err
 
+        # Errors keyed by the full rho vector, shared across coordinates: the
+        # winner of one coordinate is exactly the centre probe of the next, so
+        # without this the switch prb->pos->tp re-runs a trial it already has.
+        trial_cache = {}
+
         def _coord(base, idx, name, init):
-            cache = {}
+            seen = {}
             def probe(val):
-                if val in cache:
-                    return cache[val]
-                rv = list(base); rv[idx] = val
-                e  = _run_trial(rv)
-                cache[val] = e
+                rv  = list(base); rv[idx] = val
+                key = tuple(rv)
+                if key in trial_cache:
+                    e = trial_cache[key]
+                    seen.setdefault(val, e)
+                    if self.rank == 0:
+                        logger.warning(f'  {name}={val:g}  err={e:.4e} (cached)')
+                    return e
+                e = _run_trial(rv)
+                trial_cache[key] = e
+                seen[val] = e
                 if self.rank == 0:
                     logger.warning(f'  {name}={val:g}  err={e:.4e}')
                 return e
@@ -623,7 +642,7 @@ class Rec:
                 best = cur_v
             if self.rank == 0:
                 logger.warning(f'  -> best {name}={best:g}')
-            return best, sorted(cache.items())
+            return best, sorted(seen.items())
 
         base = [float(np.sqrt(self.rho_sq[k])) for k in ('obj', 'prb', 'pos', 'tp')]
         if self.rank == 0:
@@ -1341,6 +1360,19 @@ class Rec:
     # dependence on pos is ignored, which is why it must stay frozen.
     # 1/data_size still counts every pixel, masked or not: renormalizing would
     # silently rescale lam_prbfit, lam_laplacian and rho.
+    #
+    # |x| is clamped to _ABS_EPS before every division.  The mask multiplies the
+    # pointwise term LAST, so a pixel with |x|=0 would yield inf and then
+    # 0*inf = nan -- the mask converts the blow-up instead of removing it.  Those
+    # zeros only exist since mask_oob, and they sit exactly over the mirrored
+    # samples where |x| is meaningless.  The floor is picked for float32: the
+    # quotient d/|x| must stay well inside 3.4e38, so with d = O(1) and the
+    # y,z factors = O(1) a floor of 1e-20 leaves ~18 orders of headroom, while
+    # any physically meaningful amplitude here is O(0.1-10) -- the clamp is
+    # inert wherever the model is valid.  (l0 = x/max(|x|,eps) also stays
+    # bounded by 1 by construction.)  Do not push the floor much below this:
+    # 1e-30 is a perfectly representable float32, but d/1e-30 only leaves ~1e8
+    # of headroom before the products overflow to inf again.
     @staticmethod
     @cp.fuse()
     def _F0_fused(x, d, my, mx):
@@ -1356,7 +1388,7 @@ class Rec:
     @staticmethod
     @cp.fuse()
     def _dF0_fused(x, d, my, mx):
-        return (my * mx) * (x - d * (x / cp.abs(x)))
+        return (my * mx) * (x - d * (x / cp.maximum(cp.abs(x), _ABS_EPS)))
 
     @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
@@ -1367,7 +1399,7 @@ class Rec:
     @staticmethod
     @cp.fuse()
     def _d2F_dF0_fused(x, y, z, w, d, my, mx):
-        absval = cp.abs(x)
+        absval = cp.maximum(cp.abs(x), _ABS_EPS)
         l0 = x / absval
         d0 = d / absval
         v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
@@ -1384,7 +1416,7 @@ class Rec:
     @staticmethod
     @cp.fuse()
     def _gF0_fused(x, y, my, mx, scale):
-        td = y * (x / cp.abs(x))
+        td = y * (x / cp.maximum(cp.abs(x), _ABS_EPS))
         return (scale * (my * mx)) * (x - td)
 
     @nvtx.annotate("gF0", color="green")

@@ -94,7 +94,7 @@ a.focustodetectordistance = focustodetectordistance; a.z1 = z1
 a.theta = theta; a.ndist = ndist; a.ntheta = ntheta
 a.nz = n; a.n = n; a.nzobj = nobj; a.nobj = nobj
 a.mask = 1.1; a.lam_prbfit = 3.1e-3; a.lam_laplacian = c.lam_lap
-a.rho = [1, 0.05, 0.02]; a.niter = c.niter; a.start_iter = 0; a.nchunk = 16
+a.rho = [1, 0.05, 0.02, 0]; a.niter = c.niter; a.start_iter = 0; a.nchunk = 16
 a.checkpoint_step = -1; a.error_step = -1
 a.mask_oob = True; a.mask_oob_margin = 2
 a.check_fused_hessian = False
@@ -124,7 +124,7 @@ cl.vars['pos'][:] = (pos + pos_err)[cl.st_theta:cl.end_theta].transpose(1, 0, 2)
 
 vars = cl.vars
 cl.precalc(vars)
-cl.rho_sq = {'obj': 1.0, 'prb': c.rho_prb**2, 'pos': 0.02**2}
+cl.rho_sq = {'obj': 1.0, 'prb': c.rho_prb**2, 'pos': 0.02**2, 'tp': 0.0}
 cl.start_iter = 0
 
 proj2 = make_pinned(vars['proj'].shape, dtype='complex64')
@@ -201,7 +201,7 @@ for i in range(c.niter):
     if os.environ.get('PROOF', '0') == '1' and i == 0:
         from holotomocupy.utils import lap as _lap, redot as _redot
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         def accum():
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -209,18 +209,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             return out
         lt = self.cl_lap_term
         def go(keep_ep):
@@ -247,7 +247,7 @@ for i in range(c.niter):
     if os.environ.get('KERN', '0') == '1' and i == 0:
         from holotomocupy.utils import lap as _lap, redot as _redot, reprod as _reprod
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         def accum():
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -255,18 +255,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             return out
         lt = self.cl_lap_term
         KS = {
@@ -292,7 +292,7 @@ for i in range(c.niter):
     if os.environ.get('CANARY', '0') == '1' and i == 0:
         from holotomocupy.utils import lap as _lap, redot as _redot
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         mp = cp.get_default_memory_pool()
         nfab = [0]
         def accum():
@@ -302,18 +302,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             return out
         lt = self.cl_lap_term
         for r in range(2):
@@ -339,7 +339,7 @@ for i in range(c.niter):
     if os.environ.get('PTR', '0') == '1' and i == 0:
         from holotomocupy.utils import lap as _lap, redot as _redot
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         def accum():
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -347,18 +347,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             return out
         lt = self.cl_lap_term
         for r in range(3):
@@ -380,7 +380,7 @@ for i in range(c.niter):
         raise SystemExit(0)
     if os.environ.get('TAIL3', '0') == '1' and i == 0:
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         def accum():
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -388,18 +388,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             return out
         def V(tag, mode):
             r = []
@@ -426,7 +426,7 @@ for i in range(c.niter):
         raise SystemExit(0)
     if os.environ.get('TAIL2', '0') == '1' and i == 0:
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         def run(assert_g, do_ar, read_mid):
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -435,18 +435,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             mid = float(out[0]) if read_mid else None
             o = out[0]
             o += self.cl_prb_term.energy_local(prb)
@@ -464,7 +464,7 @@ for i in range(c.niter):
         raise SystemExit(0)
     if os.environ.get('TAIL', '0') == '1' and i == 0:
         cl.apply_step(vars, cl.etas, alpha)
-        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']
+        self = cl; prb = vars['prb']; pos = vars['pos']; proj = vars['proj']; tp = vars['tp']
         for r in range(12):
             out = cp.zeros(1, dtype="float32")
             for k0, k1 in self._dist_groups():
@@ -472,18 +472,18 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
                         out[:] += self.F0(self.apply_F_from(
-                            [c_prb[j], c_proj, c_pos[j]], 1), c_data[j])
+                            [c_prb[j], c_proj, c_pos[j], c_tp[j]], 1), c_data[j])
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             a1 = float(out[0])
             o = out[0]
             ep = self.cl_prb_term.energy_local(prb)
@@ -501,19 +501,20 @@ for i in range(c.niter):
         def mk(read_v, read_out, final_sync):
             def m(self, prb, obj, pos, proj):
                 out = cp.zeros(1, dtype="float32")
+                tp = self.vars['tp']
                 for k0, k1 in self._dist_groups():
                     nd = k1 - k0
                     self._assert_dist_group(nd)
                     @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                     def _md(self, out, c_proj, *a):
                         c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                        c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                        c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                         self.cl_shift.coeff_cache_reset()
                         for j in range(nd):
                             self._dist_idx = k0 + j
-                            self._eff_demag_chunk = c_ed[j]
+                            self._t_chunk = c_t
                             self.apply_F_cache_reset()
-                            x = [c_prb[j], c_proj, c_pos[j]]
+                            x = [c_prb[j], c_proj, c_pos[j], c_tp[j]]
                             y = self.apply_F_from(x, 1)
                             v = self.F0(y, c_data[j])
                             if read_v: float(v)
@@ -521,8 +522,8 @@ for i in range(c.niter):
                             if read_out: float(out[0])
                     ks = range(k0, k1)
                     _md(self, out, proj, *[pos[k] for k in ks],
-                        *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                        prb[k0:k1])
+                        *[self.data[k] for k in ks], self.t_local,
+                        prb[k0:k1], tp[k0:k1])
                 if final_sync: cp.cuda.Device().synchronize()
                 out = out[0]
                 if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -545,6 +546,7 @@ for i in range(c.niter):
         cl.apply_step(vars, cl.etas, alpha)
         def min_dbg(self, prb, obj, pos, proj):
             out = cp.zeros(1, dtype="float32")
+            tp = self.vars['tp']
             parts = []
             for k0, k1 in self._dist_groups():
                 nd = k1 - k0
@@ -552,13 +554,13 @@ for i in range(c.niter):
                 @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
                 def _md(self, out, c_proj, *a):
                     c_pos = a[0*nd:1*nd]; c_data = a[1*nd:2*nd]
-                    c_ed = a[2*nd:3*nd]; c_prb = a[3*nd]
+                    c_t = a[2*nd]; c_prb = a[2*nd+1]; c_tp = a[2*nd+2]
                     self.cl_shift.coeff_cache_reset()
                     for j in range(nd):
                         self._dist_idx = k0 + j
-                        self._eff_demag_chunk = c_ed[j]
+                        self._t_chunk = c_t
                         self.apply_F_cache_reset()
-                        x = [c_prb[j], c_proj, c_pos[j]]
+                        x = [c_prb[j], c_proj, c_pos[j], c_tp[j]]
                         y = self.apply_F_from(x, 1)
                         v = self.F0(y, c_data[j])
                         parts.append(float(v))
@@ -569,8 +571,8 @@ for i in range(c.niter):
                             parts.append(('BAD', before, float(v), after))
                 ks = range(k0, k1)
                 _md(self, out, proj, *[pos[k] for k in ks],
-                    *[self.data[k] for k in ks], *[self.eff_demag[k] for k in ks],
-                    prb[k0:k1])
+                    *[self.data[k] for k in ks], self.t_local,
+                    prb[k0:k1], tp[k0:k1])
             acc = float(out[0])
             pysum = sum(p for p in parts if not isinstance(p, tuple))
             nbad = sum(1 for p in parts if isinstance(p, tuple))
@@ -615,7 +617,7 @@ for i in range(c.niter):
                 d[nm] = float(np.asarray(a, dtype=np.complex128).sum().real
                               if np.iscomplexobj(a) else np.float64(a).sum())
             d['data'] = float(np.float64(cl.data).sum())
-            d['dmask'] = float(cp.asnumpy(cl.data_mask).astype(np.float64).sum())
+            d['dmask'] = float(np.float64(cl.mask_1d).sum())
             if hasattr(cl, 'cl_lap_term'):
                 d['u_pad'] = float(cl.cl_lap_term.u_pad.astype(np.complex128).sum().real)
                 d['e_pad'] = float(cl.cl_lap_term.e_pad.astype(np.complex128).sum().real)
@@ -684,7 +686,7 @@ for i in range(c.niter):
         print(f"              prb  sum,ss = {ck(vars['prb'])}")
         print(f"              pos  sum,ss = {ck(vars['pos'])}")
         print(f"              data sum,ss = {ck(cl.data)}")
-        print(f"              mask sum    = {float(cl.data_mask.sum())}")
+        print(f"              mask sum    = {float(np.float64(cl.mask_1d).sum())}")
         print(f"              eff_demag   = {cp.asnumpy(cl.eff_demag).ravel()[:8]}")
         raise SystemExit(0)
     if os.environ.get('WALK', '0') == '1' and i == 0 and hasattr(cl, 'cl_lap_term'):

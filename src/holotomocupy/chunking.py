@@ -1,7 +1,6 @@
 import cupy as cp
 import numpy as np
-import os
-from .utils import *
+from .utils import redot, timer
 
 def _axpby(out, x, y, a, b):
     """out = a*x + b*y, in place and with as few temporaries as the scalars allow.
@@ -167,19 +166,13 @@ class Chunking:
         gpu_mem = self.gpu_mem
         stream  = self.stream
 
-        # The three chunking streams are non-blocking, so they have NO ordering
-        # relationship with the stream the caller was on. That breaks the one
-        # invariant CuPy's memory pool relies on: a block freed on stream A may
-        # be handed straight back out on stream A, safe only because everything
-        # already queued on A runs first. A caller that leaves an unsynchronized
-        # kernel pending -- `out += term.energy_local(prb)` drops the device
-        # scalar it still has to read the moment the statement ends -- has that
-        # 4-byte block recycled into a chunked accumulator here, which the
-        # chunking streams then overwrite *while* the pending read is still
-        # queued. The pending kernel adds whatever partial sum it happens to
-        # find, so Rec.min returns F0 plus a few chunks of the unscaled
-        # regularizer (see tests/data_mask/probe_lap.py, PROOF mode).
-        # One event makes the pool's assumption true again.
+        # The chunking streams are non-blocking, so they have NO ordering relation
+        # with the caller's stream -- which breaks CuPy's pool invariant that a
+        # block freed on stream A is safe to reissue on A. A caller leaving an
+        # unsynchronized kernel pending (`out += term.energy_local(prb)` drops the
+        # device scalar it still has to read) gets that block recycled into a
+        # chunked accumulator and overwritten mid-read. One event restores the
+        # pool's assumption. See tests/data_mask/probe_lap.py.
         _ev = cp.cuda.Event(disable_timing=True)
         _ev.record(cp.cuda.get_current_stream())
         for s in stream:
@@ -350,12 +343,10 @@ class Chunking:
         """res = Re<x, y>"""
         if isinstance(x, cp.ndarray):
             return redot(x, y).get()
-        # 0-d, not shape (1,): gpu_batch classifies an output as chunked
-        # ("proper") by shape[axis_out] == size, so a (1,) accumulator is
-        # mistaken for a chunked output whenever size == 1 -- and chunked
-        # outputs are backed by *uninitialised* arena scratch, which turns this
-        # read-modify-write into garbage. `ndim > axis_out` is false for a 0-d
-        # array, so it can never alias, whatever the chunking length.
+        # 0-d, not shape (1,): gpu_batch calls an output chunked when
+        # shape[axis_out] == size, so a (1,) accumulator is misread as chunked
+        # whenever size == 1 -- and chunked outputs sit in *uninitialised* arena
+        # scratch. `ndim > axis_out` is false for a 0-d array, so it never aliases.
         res = cp.zeros((), dtype="float32")
 
         @self.gpu_batch(axis_out=0, axis_inp=0)

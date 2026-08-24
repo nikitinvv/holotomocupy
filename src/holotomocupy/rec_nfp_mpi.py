@@ -1,6 +1,7 @@
 import numpy as np
 import cupy as cp
 import os
+import time
 import tifffile
 import warnings
 import pandas as pd
@@ -10,12 +11,13 @@ import cupy.fft
 from .propagation import Propagation
 from .shift import Shift
 from .chunking import Chunking
-from .utils import *
-from .mpi_functions import *
+from .utils import (make_pinned, mshow, mshow_polar, mshow_pos, redot,
+                    reprod, timer, write_tiff)
+from .mpi_functions import MPIClass
 from .logger_config import logger
 
 np.set_printoptions(legacy="1.25")
-warnings.filterwarnings("ignore", message=f".*peer.*")
+warnings.filterwarnings("ignore", message=".*peer.*")
 cupy.fft.config.get_plan_cache().set_size(0)  # dont waste GPU memory
 
 
@@ -30,8 +32,8 @@ class RecNFP:
     Parallelisation: theta distributed across MPI ranks; prb/proj replicated.
     """
 
-    # Variables driven by the BH loop. Subclasses with extra variables (e.g.
-    # RecNFPDelta adds 'bd') override this and inherit BH unchanged.
+    # Variables driven by the BH loop. A subclass with extra variables can
+    # override this and inherit BH unchanged.
     _var_names = ("prb", "proj", "pos")
 
     def __init__(self, args):
@@ -39,8 +41,8 @@ class RecNFP:
         for key, value in vars(args).items():
             setattr(self, key, value)
 
-        # proj/obj arrays are complex64. RecNFPDelta temporarily flips this to
-        # 'float32' around alloc_arrays() so vars['proj'] comes out real-valued.
+        # proj/obj arrays are complex64. A subclass wanting a real-valued
+        # vars['proj'] can flip this to 'float32' around alloc_arrays().
         self.obj_dtype = 'complex64'
 
         # cascade: F0 ◦ F1 ◦ F2 ◦ F3
@@ -408,7 +410,7 @@ class RecNFP:
         x31, x32, x33 = x
         n = len(x33)
         c = self._tiled_coeff(x32, n)
-        m = cp.ones(n, dtype='float32')
+        m = cp.ones((n, 2), dtype='float32')
         return x31, self.cl_shift.curlySc(c, x33, m)
 
     def dF3(self, x, y, return_x=True):
@@ -417,7 +419,7 @@ class RecNFP:
         n  = len(x33)
         c  = self._tiled_coeff(x32, n)
         c1 = self._tiled_coeff(y32, n)
-        m  = cp.ones(n, dtype='float32')
+        m = cp.ones((n, 2), dtype='float32')
         y22 = self.cl_shift.dcurlySc(c, x33, m, c1, y33)
         if return_x:
             x22 = self.cl_shift.curlySc(c, x33, m)
@@ -433,8 +435,13 @@ class RecNFP:
         c  = self._tiled_coeff(x32, n)
         cy = self._tiled_coeff(y32, n)
         cz = self._tiled_coeff(z32, n)
-        m  = cp.ones(n, dtype='float32')
-        y22 = self.cl_shift.d2curlySc(c, x33, m, cy, y33, cz, z33)
+        m = cp.ones((n, 2), dtype='float32')
+        # Coefficients passed CROSSED: the fused kernel contracts each
+        # coefficient with the shift in its own slot, so the mixed second
+        # differential needs c_z against dr_y and c_y against dr_z. See the
+        # slot-pairing note in Shift.d2curlySc; d2F_dF1 above does the same
+        # crossing for the bilinear a*b. Same as Rec.d2F_dF3 in rec_mpi.py.
+        y22 = self.cl_shift.d2curlySc(c, x33, m, cz, y33, cy, z33)
         if w32 is not None:
             cw = self._tiled_coeff(w32, n)
             y22 = y22 + self.cl_shift.dcurlySc(c, x33, m, cw, w33)
@@ -446,7 +453,7 @@ class RecNFP:
         x31, x32, x33 = x
         n = len(x33)
         c = self._tiled_coeff(x32, n)
-        m = cp.ones(n, dtype='float32')
+        m = cp.ones((n, 2), dtype='float32')
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
         y32 = cp.zeros([self.nzobj, self.nobj], dtype='complex64')
         y32[:] = cp.sum(Deltapsi, axis=0)

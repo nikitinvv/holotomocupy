@@ -52,7 +52,7 @@ def parse():
                    help='output directory (default <in>/rec_n<n>_ntheta<ntheta>)')
     p.add_argument('--niter',  type=int, default=513, help='number of BH iterations')
     p.add_argument('--nchunk', type=int, default=8,  help='angles per GPU pass')
-    p.add_argument('--rho', default='1,0.05,0.00001',
+    p.add_argument('--rho', default='1,0.05,0.00001,0',
                    help='step-size scales for obj,prb,pos (comma separated)')
     p.add_argument('--freeze-prb', action='store_true',
                    help='keep the probe at its initial value (rho_prb <- --frozen-rho). '
@@ -60,6 +60,10 @@ def parse():
                         'with a rotationally symmetric object; combine with --prb-init true.')
     p.add_argument('--freeze-pos', action='store_true',
                    help='keep the positions at their initial value (rho_pos <- --frozen-rho)')
+    p.add_argument('--freeze-shrink', action='store_true',
+                   help='keep the shrinkage parameters at the fit of the stored '
+                        'profile (rho_tp <- --frozen-rho); the default rho already '
+                        'ends in 0, so this only matters with an explicit --rho')
     p.add_argument('--estimate-rho', action='store_true',
                    help='before the main loop, coordinate-search rho_prb and rho_pos '
                         'on a geometric grid around --rho, scoring each candidate with '
@@ -80,6 +84,13 @@ def parse():
     p.add_argument('--pos-err', type=float, default=0.0,
                    help='half-width of a uniform error added to the true positions [px]')
     p.add_argument('--pos-err-seed', type=int, default=77)
+    p.add_argument('--shrink-err', type=float, default=0.0,
+                   help='start the shrinkage parameters off by up to this much '
+                        '(uniform, added to both A and B of every distance and '
+                        'axis) instead of at the fit of the stored profile. '
+                        'This is what turns a --shrink-a/--shrink-b dataset '
+                        'into a recovery test for rho[3] > 0.')
+    p.add_argument('--shrink-err-seed', type=int, default=91)
     p.add_argument('--prb-init', default='ones', choices=['ones', 'true'],
                    help="'ones' = flat illumination, 'true' = start from the true probe")
     p.add_argument('--obj-init', default='blur', choices=['blur', 'zeros', 'true'],
@@ -89,6 +100,12 @@ def parse():
     p.add_argument('--obj-blur', type=float, default=8.0,
                    help='sigma [px] of the isotropic 3D Gaussian for --obj-init blur')
     p.add_argument('--checkpoint-step', type=int, default=32)
+    p.add_argument('--check-approx', action='store_true',
+                   help='on every checkpoint step, plot the real functional '
+                        'along the descent direction against the quadratic '
+                        'model that picked alpha, into '
+                        '{out}/check_approximation/. Costs 6 extra evaluations '
+                        'of the functional per triggered iteration.')
     p.add_argument('--error-step',      type=int, default=32)
     p.add_argument('--start-iter',      type=int, default=0)
     p.add_argument('--gt', action=argparse.BooleanOptionalAction, default=True,
@@ -119,11 +136,16 @@ prb_contrast = np.atleast_1d(np.asarray(meta.get('prb_contrast', [np.nan]), dtyp
 # different resolutions / angular sampling do not overwrite each other
 out    = a.out or os.path.join(os.path.dirname(in_path), f'rec_n{n}_ntheta{ntheta}')
 rho    = [float(v) for v in a.rho.split(',')]
+rho   += [0.0] * max(0, 4 - len(rho))      # rho[3] = tp (linear shrink), 0 = frozen
 if a.freeze_prb:
     rho[1] = a.frozen_rho
 if a.freeze_pos:
     rho[2] = a.frozen_rho
-rho_warmup = [rho[0], min(rho[1], a.frozen_rho), min(rho[2], a.frozen_rho)]
+if a.freeze_shrink:
+    rho[3] = a.frozen_rho
+# shrinkage is frozen through the warmup along with prb and pos: it is the
+# slowest-moving unknown and worth nothing before the object has any structure.
+rho_warmup = [rho[0], min(rho[1], a.frozen_rho), min(rho[2], a.frozen_rho), 0.0]
 
 if rank == 0:
     os.makedirs(out, exist_ok=True)
@@ -143,7 +165,8 @@ if rank == 0:
     logger.info(f'  detector pixel / voxel : {float(meta["detector_pixelsize"])*1e9:.2f} nm'
                 f'  /  {vox*1e9:.2f} nm   (field of view {n * vox * 1e6:.1f} um)')
     logger.info(f'  photons per pixel      : {float(meta["photons"]):g} (0 = noiseless)')
-    logger.info(f'  niter / rho            : {a.niter} / {rho}')
+    logger.info(f'  niter / rho            : {a.niter} / {rho}'
+                f'   (rho[3] = shrink)')
     if a.estimate_rho:
         logger.info(f'  rho estimation         : coordinate search on prb,pos '
                     f'({a.rho_estimate_niter} iters per trial)')
@@ -182,6 +205,7 @@ args.rho_estimate_niter = a.rho_estimate_niter
 args.niter           = a.niter
 args.nchunk          = a.nchunk
 args.checkpoint_step = a.checkpoint_step
+args.check_approx    = a.check_approx
 args.error_step      = a.error_step
 args.start_iter      = a.start_iter
 args.path_out        = out          # enables conv.csv
@@ -210,6 +234,10 @@ with h5py.File(in_path, 'r', driver='mpio', comm=comm) as f:
             cl.data[k, i0:i1] = f['data'][k, cl.st_theta + i0:cl.st_theta + i1]
     cl.ref[:] = cp.asarray(f['ref'][:])
     pos_true  = f['pos'][:].astype('float32')
+    # Datasets made before shrinkage was a variable have neither; then tp stays
+    # 0 and the reconstruction is the fixed no-shrink model as before.
+    shrink_gt = (f['shrink'][:].astype('float32')  if 'shrink'  in f else None)
+    tp_true   = (f['tp_true'][:].astype('float32') if 'tp_true' in f else None)
     prb_true  = (f['prb_abs'][:] * np.exp(1j * f['prb_phase'][:])).astype('complex64')
 comm.Barrier()
 if rank == 0:
@@ -258,6 +286,29 @@ if a.pos_err > 0:
     pos_start += (2.0 * a.pos_err) * (rng.random(pos_true.shape) - 0.5).astype('float32')
 C.set_pos(cl, pos_start)
 
+# Shrinkage starts from a least-squares fit of the stored profile -- exactly what
+# step6 does on real data -- so with rho[3] = 0 this run reproduces the generator.
+if shrink_gt is not None:
+    cl.shrink_nd[:] = cp.asarray(np.ascontiguousarray(
+        shrink_gt[cl.st_theta:cl.end_theta].transpose(1, 0, 2)))
+    cl.init_tp_from_shrink()
+
+# ... unless the run is a recovery test, which has to start somewhere wrong.
+# tp is a global variable, so every rank must apply the SAME perturbation --
+# hence a seeded generator rather than anything rank-dependent.
+if a.shrink_err > 0:
+    rng    = np.random.default_rng(a.shrink_err_seed)
+    tp_pert = cp.asnumpy(cl.vars['tp'])
+    tp_pert += ((2.0 * a.shrink_err)
+                * (rng.random(tp_pert.shape) - 0.5)).astype('float32')
+    cl.vars['tp'][:] = cp.asarray(tp_pert)
+    # keep the diagnostic profile in step with the variable it is derived from
+    cl.shrink_nd[:] = cp.asarray(np.ascontiguousarray(
+        cl._tp_to_shrink_local(cl.vars['tp']).transpose(1, 0, 2)))
+    if rank == 0:
+        logger.warning(f'shrink start perturbed by +-{a.shrink_err:g} '
+                       f'(seed {a.shrink_err_seed})')
+
 # --- run --------------------------------------------------------------------
 def run_bh(start, stop, rho_eff, estimate=False):
     """BH from iteration `start` to `stop` with the given step scales.
@@ -266,11 +317,12 @@ def run_bh(start, stop, rho_eff, estimate=False):
     scales simply by replacing it; precalc/postcalc are balanced, so calling
     BH more than once is safe.  With estimate=True the phase opens with
     Rec.estimate_rho_coord, which replaces rho_eff[1:] by the values it finds."""
-    cl.rho_sq    = {'obj': rho_eff[0]**2, 'prb': rho_eff[1]**2, 'pos': rho_eff[2]**2}
+    cl.rho_sq    = {'obj': rho_eff[0]**2, 'prb': rho_eff[1]**2,
+                    'pos': rho_eff[2]**2, 'tp':  rho_eff[3]**2}
     cl.estimate_rho = estimate
     cl.start_iter = start
     cl.niter      = stop
-    cl.BH(writer=writer)
+    cl.BH(writer=writer, shrink_gt=shrink_gt)
 
 pos_init0 = np.array(cl.vars['pos'])   # baseline for the final drift plot
 logger.info('running BH')
@@ -283,7 +335,7 @@ if a.warmup > 0:
         run_bh(n_warm, a.niter, rho, estimate=a.estimate_rho)
 else:
     run_bh(a.start_iter, a.niter, rho, estimate=a.estimate_rho)
-rho_used = [float(np.sqrt(cl.rho_sq[k])) for k in ('obj', 'prb', 'pos')]
+rho_used = [float(np.sqrt(cl.rho_sq[k])) for k in ('obj', 'prb', 'pos', 'tp')]
 if a.estimate_rho and rank == 0:
     logger.warning(f'rho actually used: {rho_used}')
 comm.Barrier()
@@ -293,7 +345,19 @@ if rank == 0:
 # Final state. obj has already been un-normalised by BH's postcalc, so the
 # writer must not scale it again -> norm_const = 1.
 cl.pos_init = pos_init0        # BH's precalc resets it at every phase
-writer.write_checkpoint(cl.vars, a.niter, 1.0, pos_init=cl.pos_init)
+writer.write_checkpoint(cl.vars, a.niter, 1.0, pos_init=cl.pos_init,
+                        shrink=cl._tp_to_shrink_local(cl.vars['tp']),
+                        shrink_init=cl._tp_to_shrink_local(cl.tp_init),
+                        shrink_gt=shrink_gt)
+
+# --- shrinkage recovery vs ground truth -------------------------------------
+if tp_true is not None and rank == 0:
+    tp_rec = cp.asnumpy(cl.vars['tp'])
+    for k in range(ndist):
+        for ax, nm in enumerate(('y', 'x')):
+            logger.warning(
+                f'shrink dist {k} {nm}: A {tp_true[k,0,ax]:+.4e} -> {tp_rec[k,0,ax]:+.4e}  '
+                f'B {tp_true[k,1,ax]:+.4e} -> {tp_rec[k,1,ax]:+.4e}')
 
 # --- quality vs ground truth ------------------------------------------------
 if a.gt:

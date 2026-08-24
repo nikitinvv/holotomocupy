@@ -146,7 +146,7 @@ nobj     = args_cli.nobj  if args_cli.nobj  else _ceil(_reach_h) >> bins
 
 
 # ── Fixed solver config (mirrors mosaic_brain/config_step6.conf) ────────────
-rho             = [1, 0.05, 0.02]
+rho             = [1, 0.05, 0.02, 0]
 mask            = 1.2
 lam_prbfit      = 3.1e-3
 lam_laplacian   = 0

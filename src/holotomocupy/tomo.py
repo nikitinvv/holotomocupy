@@ -27,6 +27,11 @@ class Tomo:
 
         mua = cp.array([mu], dtype="float32")
 
+        # Lazily-filled caches for the fbp path (filter response by name, cuFFT
+        # plan by shape). rec_mpi sets the global cupy plan cache size to 0.
+        self._filters   = {}
+        self._fft_plans = {}
+
         self.n      = n
         self.ntheta = len(theta)
         self.theta  = cp.array(theta.astype("float32"))
@@ -116,18 +121,15 @@ class Tomo:
             result = result.real
         return cp.ascontiguousarray(result)
 
-    def _filter_sino(self, data, filter_name):
-        """Apply a 1-D frequency-domain filter along the detector axis (last axis).
+    def _fbp_filter(self, filter_name):
+        """1-D frequency response for `filter_name`, built once and cached.
 
-        Parameters
-        ----------
-        data : cupy ndarray, shape [ntheta, nz, n], float32 or complex64
-        filter_name : str  — 'ramp', 'shepp', or 'parzen'
-
-        Returns
-        -------
-        Filtered array with the same shape and dtype as `data`.
+        Depends only on n, so rebuilding it per call (as this used to) is pure
+        waste on the fbp path.
         """
+        h = self._filters.get(filter_name)
+        if h is not None:
+            return h
         n  = self.n
         f  = cp.fft.fftfreq(n).astype('float32')   # f in [-0.5, 0.5)
         af = cp.abs(f)*4*n
@@ -152,14 +154,45 @@ class Tomo:
                 f"Unknown filter '{filter_name}'. Choose: ramp, shepp, parzen."
             )
 
-        # Apply along last axis; preserve dtype throughout
-        d_fft  = cp.fft.fft(data, axis=-1)
-        d_fft *= h.astype(d_fft.dtype)         # broadcast [n] over [ntheta, nz, n]
-        result = cp.fft.ifft(d_fft, axis=-1)
+        h = h.astype('complex64')
+        self._filters[filter_name] = h
+        return h
+
+    def _filter_sino(self, data, filter_name):
+        """Apply a 1-D frequency-domain filter along the detector axis (last axis).
+
+        Parameters
+        ----------
+        data : cupy ndarray, shape [ntheta, nz, n], float32 or complex64
+        filter_name : str  — 'ramp', 'shepp', or 'parzen'
+
+        Returns
+        -------
+        Filtered array with the same shape and dtype as `data`.
+        """
+        h = self._fbp_filter(filter_name)
+        # One temporary instead of three: the complex64 view allocates it, the
+        # filter multiply is in place, and both transforms run in place. rec_mpi
+        # sets the global cuFFT plan cache to 0, so the plan is memoized here.
+        d = data if data.dtype == cp.complex64 else data.astype('complex64')
+        with self._fft_plan(tuple(d.shape)):
+            out  = cufft.fft(d, axis=-1, overwrite_x=(d is not data))
+            out *= h
+            out  = cufft.ifft(out, axis=-1, overwrite_x=True)
 
         if cp.iscomplexobj(data):
-            return result.astype(data.dtype)
-        return result.real.astype(data.dtype)
+            return out.astype(data.dtype, copy=False)
+        return out.real.astype(data.dtype, copy=False)
+
+    def _fft_plan(self, shape):
+        """cuFFT C2C plan over the last axis for `shape`, memoized."""
+        plan = self._fft_plans.get(shape)
+        if plan is None:
+            _tmp = cp.empty(shape, dtype='complex64')
+            plan = cufft.get_fft_plan(_tmp, axes=(-1,), value_type='C2C')
+            self._fft_plans[shape] = plan
+            del _tmp
+        return plan
 
     def fbp(self, data, filter_name='ramp'):
         """Filtered back-projection: apply a 1-D filter then RT.

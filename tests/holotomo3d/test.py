@@ -128,7 +128,7 @@ args.nobj                    = nobj                    # object volume width/dep
 # --- solver / regularisation ---
 args.mask        = 0.9              # support mask radius as fraction of field of view
 args.lam_prbfit  = 2e-3            # probe-fit regularisation weight
-args.rho         = [1, 0.05, 0.02] # gradient step-size scales for [obj, prb, pos]
+args.rho         = [1, 0.05, 0.02, 0] # gradient step-size scales for [obj, prb, pos, tp]
 args.niter       = 129             # total number of BH iterations
 args.nchunk      = 16              # projections/slices processed per GPU pass (tune to GPU memory)
 args.checkpoint_step = 16          # save checkpoint every N iterations (-1 = never)

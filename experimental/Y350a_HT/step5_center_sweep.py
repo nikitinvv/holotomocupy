@@ -252,18 +252,18 @@ def _stitch(rdata, srdata, j, r, r_gpu):
     blend.  Line-for-line steps15.py's `_stitch` after the ratio."""
     srdata.fill(0)
     for k in range(ndist - 1, -1, -1):
-        shrink_jk  = float(shrink_nd[j, k])
-        eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
-        mag = cp.array(1.0 / eff_mag_jk).astype('float32')
+        shrink_jk  = shrink_nd[j, k]                      # (2,) y, x
+        eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)   # (2,)
+        mag = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]
         tmp = rdata[k].astype('complex64')
         tmp = cl_shift.curlySback(
             cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
         )[0].real
         tmp = cp.exp(tmp)
-        padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
-        pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])
-        padx1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 1])
-        pady1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 0])
+        padx0 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+        pady0 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+        padx1 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+        pady1 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
         padx0 = min(nobj_bin, max(0, padx0)) + 5
         pady0 = min(nobj_bin, max(0, pady0)) + 5
         padx1 = min(nobj_bin, max(0, padx1)) + 5
@@ -347,7 +347,7 @@ with h5py.File(fpath, 'r') as fid:
             rdata = cp.array(cache[i]) if cache is not None else _rdata(fid, j)
             _stitch(rdata, srdata, j, r, r_gpu)
             pj    = cp.pad(srdata, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-            phase = multiPaganin(pj, dist_base * (1 + shrink_nd[j, :])**2,
+            phase = multiPaganin(pj, dist_base * (1 + shrink_nd[j].mean(axis=-1))**2,
                                  wavelength, voxelsize_bin, paganin, 0.01)
             sino[isf, j] = phase[pad8 + zmid, pad8:pad8 + nobj_bin].get()
             if j == 0:

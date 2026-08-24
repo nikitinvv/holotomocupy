@@ -50,13 +50,16 @@ logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
 reader.read_shrink(out=cl.shrink_nd)
+# Fit shrink(t) = A*t + B per (distance, axis) -- this is the starting
+# point of the shrinkage variable, refined further when rho[3] > 0.
+cl.init_tp_from_shrink()
 
 logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'],
-                           out_bd=cl.vars.get('bd'))
+                           out_bd=cl.vars.get('bd'), out_tp=cl.vars['tp'])
 elif getattr(args, 'init_vol', None):
     logger.info(f"Reading initial object from vol file: {args.init_vol}")
     reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))

@@ -84,6 +84,16 @@ def parse():
                         '"projected phase" line printed below is the thing to tune it on)')
     p.add_argument('--photons', type=float, default=0.0,
                    help='mean photons/pixel for Poisson noise (0 = noiseless)')
+    p.add_argument('--shrink-a', default='0',
+                   help='ground-truth shrinkage SLOPE A in shrink(t) = A*t + B, '
+                        't = theta_idx/(ntheta-1).  One value (all distances, both '
+                        'axes), two ("y,x"), or 2*ndist ("y0,x0,y1,x1,...").  '
+                        'A = 1e-3 means the sample is 0.1%% smaller at the last '
+                        'angle than at the first.')
+    p.add_argument('--shrink-b', default='0',
+                   help='ground-truth shrinkage OFFSET B, same broadcasting as '
+                        '--shrink-a.  B is the shrink already present at the first '
+                        'angle, which for real data grows with the distance index.')
     p.add_argument('--seed',   type=int,   default=10,  help='RNG seed for the displacements')
     p.add_argument('--nchunk', type=int,   default=4,  help='angles per GPU pass')
     p.add_argument('--prb-dir', default=C.PRB_DIR, help='directory with the ID16A probe TIFFs')
@@ -220,7 +230,7 @@ args.nobj    = nobj
 args.mask            = 0.9
 args.lam_prbfit      = 0.0
 args.lam_laplacian   = 0.0
-args.rho             = [1, 0.05, 0.02]
+args.rho             = [1, 0.05, 0.02, 0]
 args.niter           = 0
 args.nchunk          = a.nchunk
 args.checkpoint_step = -1
@@ -233,6 +243,37 @@ args.alloc_mode      = 'gen'
 cl = Rec(args)
 local_nzobj  = cl.end_obj - cl.st_obj
 local_ntheta = cl.end_theta - cl.st_theta
+
+
+# --- ground-truth shrinkage -------------------------------------------------
+def _shrink_par(text, name):
+    """Parse --shrink-a / --shrink-b into [ndist, 2] (y, x)."""
+    v = np.array([float(x) for x in str(text).split(',') if x.strip()], dtype='float32')
+    if v.size == 1:
+        return np.repeat(v, 2 * a.ndist).reshape(a.ndist, 2)
+    if v.size == 2:
+        return np.tile(v, (a.ndist, 1))
+    if v.size == 2 * a.ndist:
+        return v.reshape(a.ndist, 2)
+    raise SystemExit(f'{name}: give 1, 2 or {2*a.ndist} values, got {v.size}')
+
+tp_true = np.zeros((a.ndist, 2, 2), dtype='float32')
+tp_true[:, 0, :] = _shrink_par(a.shrink_a, '--shrink-a')
+tp_true[:, 1, :] = _shrink_par(a.shrink_b, '--shrink-b')
+# shrink over all angles, the shape read_shrink / the writer's plot expect
+t_all       = np.arange(a.ntheta, dtype='float32') / max(a.ntheta - 1, 1)
+shrink_true = (tp_true[None, :, 0, :] * t_all[:, None, None]
+               + tp_true[None, :, 1, :]).astype('float32')   # [ntheta, ndist, 2]
+has_shrink  = bool(np.any(tp_true))
+if rank == 0 and has_shrink:
+    for k in range(a.ndist):
+        logger.info(f'  shrink dist {k}: A=({tp_true[k,0,0]:+.4e}, {tp_true[k,0,1]:+.4e})  '
+                    f'B=({tp_true[k,1,0]:+.4e}, {tp_true[k,1,1]:+.4e})  (y, x)')
+cl.vars['tp'][:] = cp.asarray(tp_true)
+# shrink_nd is the diagnostic copy Rec keeps of the same profile; filling it
+# keeps the data mask and gen_sqrt_data's demagnification consistent.
+cl.shrink_nd[:] = cp.asarray(
+    np.ascontiguousarray(shrink_true[cl.st_theta:cl.end_theta].transpose(1, 0, 2)))
 
 # --- probe and true positions (identical on every rank) ---------------------
 prb = C.load_probe(n, a.ndist, a.prb_dir, smooth=a.prb_smooth)
@@ -326,6 +367,8 @@ if rank == 0:
         f.attrs['nobj_factor'] = nobj_factor
         f.attrs['span'] = span      # the sample's width; nobj - span = 2 * margin
         f.attrs['prb_smooth'] = a.prb_smooth
+        f.attrs['shrink_a'] = a.shrink_a
+        f.attrs['shrink_b'] = a.shrink_b
         f.attrs['obj_smooth'] = a.obj_smooth
         if a.obj_vol:
             f.attrs['obj_vol']   = a.obj_vol
@@ -336,6 +379,10 @@ if rank == 0:
         f.create_dataset('theta', data=args.theta)
         f.create_dataset('z1',    data=np.asarray(args.z1))
         f.create_dataset('pos',   data=pos)
+        # [ntheta, ndist, 2] (y, x), the same layout read_shrink expects, plus
+        # the (A, B) that generated it so rec.py can score the recovery.
+        f.create_dataset('shrink',  data=shrink_true)
+        f.create_dataset('tp_true', data=tp_true)
         f.create_dataset('prb_abs',   data=np.abs(prb).astype('float32'))
         f.create_dataset('prb_phase', data=np.angle(prb).astype('float32'))
         # datasets filled later / collectively
@@ -410,4 +457,7 @@ if rank == 0:
                 f'(sqrt intensity), mean {float(d.mean()):.4f}')
     logger.info(f'true displacements: max |y| = {np.abs(pos[...,0]).max():.3f} px, '
                 f'max |x| = {np.abs(pos[...,1]).max():.3f} px')
+    if has_shrink:
+        logger.info(f'true shrink: max |y| = {np.abs(shrink_true[...,0]).max():.4e}, '
+                    f'max |x| = {np.abs(shrink_true[...,1]).max():.4e}')
     logger.info(f'saved -> {path}  ({os.path.getsize(path)/1024**3:.2f} GB)')

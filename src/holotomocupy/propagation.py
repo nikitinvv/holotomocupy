@@ -2,10 +2,12 @@ import math
 import cupy as cp
 import cupyx.scipy.fft as cufft
 from .cuda_kernels import pad_fwd_kernel, pad_adj_kernel
+from .logger_config import logger
 try:
-    from .conv2d_cufftdx import Conv2DCUFFTDX, CUFFTDX_AVAILABLE
+    from .conv2d_cufftdx import Conv2DCUFFTDX, cufftdx_available
 except Exception:
-    CUFFTDX_AVAILABLE = False
+    def cufftdx_available():
+        return False
 
 
 class Propagation:
@@ -39,12 +41,12 @@ class Propagation:
         # cuFFTDx handle (optional — falls back to cuPy if unavailable).
         # JIT compilation is expected to have been done already by rank 0 via
         # cufftdx_precompile() in rec_mpi.py before this constructor is called.
-        self._use_cufftdx = CUFFTDX_AVAILABLE
+        self._use_cufftdx = cufftdx_available()
         if self._use_cufftdx:
             try:
                 self._conv2d = Conv2DCUFFTDX(2 * nz, 2 * n)
             except Exception as e:
-                print(f"  cuFFTDx unavailable ({e}), falling back to cuPy FFT.", flush=True)
+                logger.warning(f"cuFFTDx unavailable ({e}), falling back to cuPy FFT.")
                 self._use_cufftdx = False
         if not self._use_cufftdx:
             self._plan_2d = cufft.get_fft_plan(self._buf_big, axes=(-2, -1), value_type='C2C')

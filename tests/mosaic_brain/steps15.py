@@ -273,7 +273,8 @@ def _stitch(fids, jl, t):
     box = None
     for k in range(ndist_t - 1, -1, -1):           # widest footprint first
         eff_mag = norm_magnifications[k]           # no shrinkage
-        mag = cp.array([1.0 / eff_mag], dtype='float32')
+        # (1, 2): curlySback reads mag[2*tz + axis] -- y and x, equal here.
+        mag = cp.array([[1.0 / eff_mag, 1.0 / eff_mag]], dtype='float32')
         tmp = cl_shift.curlySback(
             cp.log(rdata[k][None].astype('complex64')), r_gpu[t][jl:jl + 1, k], mag
         )[0].real

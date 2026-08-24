@@ -96,7 +96,7 @@ with h5py.File(fpath) as fid:
 
 from holotomocupy.reader import load_shrink_from_mats
 shrink_nd = load_shrink_from_mats(path, pfile, ndist, ntheta)
-eff_magnifications = norm_magnifications / (1 + shrink_nd[0])
+eff_magnifications = norm_magnifications[:, None] / (1 + shrink_nd[0])   # [ndist, 2] (y, x)
 
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
 
@@ -110,7 +110,7 @@ data_dir  = f'{path_out}/data_bin{bin}'
 if rank == 0:
     logger.info(f'path={path}  pfile={pfile}  ntheta={ntheta}  ndist={ndist}  n={n}  nobj={nobj}')
     logger.info(f'bin={bin}  n_bin={n_bin}  nobj_bin={nobj_bin}')
-    logger.info(f'shrink[0]               = {[round(float(v), 6) for v in shrink_nd[0]]}')
+    logger.info(f'shrink[0]               = {np.round(np.asarray(shrink_nd[0], dtype='float64'), 6).tolist()}')
     os.makedirs(tiff_dir,  exist_ok=True)
     os.makedirs(rdata_dir, exist_ok=True)
     os.makedirs(data_dir,  exist_ok=True)
@@ -174,20 +174,20 @@ def _stitch(fid, srdata, j):
     rdata = data_j_smooth / (cref_chunk_smooth + 1e-5)
     srdata.fill(0)
     for k in range(ndist - 1, -1, -1):
-        shrink_jk  = float(shrink_nd[j, k])
-        eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
+        shrink_jk  = shrink_nd[j, k]                      # (2,) y, x
+        eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)   # (2,)
         if j%100==0:
             print(j,k,eff_mag_jk)
-        mag        = cp.array(1.0 / eff_mag_jk, dtype='float32')
+        mag        = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]
         tmp = rdata[k].astype('complex64')
         tmp = cl_shift.curlySback(
             cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
         )[0].real
         tmp = cp.exp(tmp)
-        padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
-        pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])
-        padx1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 1])
-        pady1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 0])
+        padx0 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+        pady0 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+        padx1 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+        pady1 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
         padx0 = min(nobj_bin, max(0, padx0)) + 5
         pady0 = min(nobj_bin, max(0, pady0)) + 5
         padx1 = min(nobj_bin, max(0, padx1)) + 5

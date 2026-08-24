@@ -18,6 +18,8 @@ class Writer:
       /prb_abs   (ndist, nz, n)     float32 — probe amplitude (from rank 0)
       /prb_phase (ndist, nz, n)     float32 — probe phase     (from rank 0)
       /pos     (ntheta, ndist, 2)   float32 — assembled from all ranks (theta-distributed)
+      /tp      (ndist, 2, 2)        float32 — linear shrink params (A, B) per axis
+                                              (from rank 0; tp is global)
 
     Attrs on the root group:
       iter
@@ -61,13 +63,16 @@ class Writer:
             return x.get()
         return np.asarray(x)
 
-    def write_checkpoint(self, vars, i, norm_const, pos_init=None):
-        """Save obj, prb, pos for iteration i to an HDF5 checkpoint file.
+    def write_checkpoint(self, vars, i, norm_const, pos_init=None,
+                         shrink=None, shrink_init=None, shrink_gt=None):
+        """Save obj, prb, pos, tp for iteration i to an HDF5 checkpoint file.
 
         Parameters
         ----------
         vars : dict
-            Reconstruction variables with keys 'obj', 'prb', 'pos'.
+            Reconstruction variables with keys 'obj', 'prb', 'pos' and,
+            when shrinkage is a variable, 'tp' (ndist, 2, 2) — GLOBAL, i.e.
+            identical on every rank, so rank 0 writes it.
             obj is expected to be scaled by 1/norm_const (as during iteration).
         i : int
             Iteration number, used in the filename.
@@ -76,11 +81,20 @@ class Writer:
         pos_init : array, optional
             Initial positions; when provided, a PNG of per-(theta, dist) drift
             is also saved under {path_out}/pos_errors/.
+        shrink, shrink_init : array, optional
+            This rank's shrink slices, (local_ntheta, ndist, 2). When both are
+            given, a PNG overlaying init vs current shrink per (dist, axis) is
+            saved under {path_out}/shrink/.
+        shrink_gt : array, optional
+            Full (ntheta, ndist, 2) ground truth, identical on every rank
+            (synthetic data only); drawn as a third curve on that PNG.
         """
         path = os.path.join(self.h5_dir, f"checkpoint_{i:04}.h5")
 
         pos = self._cpu(vars['pos'])
         prb = self._cpu(vars['prb'])
+        # tp is small (ndist, 2, 2) and global — same on every rank.
+        tp  = self._cpu(vars['tp']) if 'tp' in vars else None
 
         # mpio block: all ranks create datasets and write obj/pos collectively
         with h5py.File(path, 'w', driver="mpio", comm=self.comm) as f:
@@ -94,8 +108,11 @@ class Writer:
             ds_im = f.create_dataset('obj_im', shape=obj_shape, dtype='float32')
             ds_pos = f.create_dataset('pos', shape=(self.ntheta, self.ndist, 2), dtype='float32')
             prb_shape = (self.ndist, self.nz, self.n)
-            ds_prb_abs   = f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
-            ds_prb_phase = f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
+            f.create_dataset('prb_abs',   shape=prb_shape, dtype='float32')
+            f.create_dataset('prb_phase', shape=prb_shape, dtype='float32')
+            if tp is not None:
+                # Created collectively (mpio requires it), filled by rank 0 below.
+                f.create_dataset('tp', shape=tp.shape, dtype='float32')
 
             # Write obj in z-batches: avoids a full [local_nzobj, nobj, nobj] copy.
             # np.multiply(src, scalar, out=slab_buf) is zero-allocation per batch.
@@ -124,12 +141,14 @@ class Writer:
         v_local *= np.float32(norm_const)
         v_parts = self.comm.gather(v_local, root=0)
 
-        # prb written by rank 0 only via serial driver after mpio block closes
+        # prb + tp written by rank 0 only via serial driver after mpio block closes
         self.comm.Barrier()
         if self.rank == 0:
             with h5py.File(path, 'a') as f:
                 f['prb_abs'][:]   = np.abs(prb).astype('float32')
                 f['prb_phase'][:] = np.angle(prb).astype('float32')
+                if tp is not None:
+                    f['tp'][:] = tp.astype('float32')
         self.comm.Barrier()
         if self.rank == 0:
             logger.info(f"Writer: checkpoint saved → {path}")
@@ -147,6 +166,9 @@ class Writer:
 
         if pos_init is not None:
             self._save_pos_errors_plot(vars['pos'] - pos_init, i)
+
+        if shrink is not None and shrink_init is not None:
+            self._save_shrink_plot(shrink, shrink_init, i, shrink_gt=shrink_gt)
 
     def _save_pos_errors_plot(self, delta_local, i):
         """Gather per-(theta, dist) position drift across ranks; rank 0 logs stats and saves PNG."""
@@ -189,3 +211,48 @@ class Writer:
         fig.savefig(png_path, dpi=150)
         plt.close(fig)
         logger.info(f"pos error plot → {png_path}")
+
+    def _save_shrink_plot(self, shrink_local, shrink_init_local, i, shrink_gt=None):
+        """Gather per-(theta, dist) shrink across ranks and save a 2×ndist plot
+        overlaying init (dashed), current (solid), and — when provided — ground
+        truth (dotted). Row 0 = y axis, row 1 = x."""
+        if isinstance(shrink_local, cp.ndarray):
+            shrink_local = shrink_local.get()
+        if isinstance(shrink_init_local, cp.ndarray):
+            shrink_init_local = shrink_init_local.get()
+        all_curr = self.comm.gather(np.asarray(shrink_local),      root=0)
+        all_init = self.comm.gather(np.asarray(shrink_init_local), root=0)
+        # shrink_gt is a full-ntheta array, identical on every rank, so no gather.
+        if self.rank != 0:
+            return
+
+        # locals are [local_ntheta, ndist, 2]; concatenate along theta.
+        curr = np.concatenate(all_curr, axis=0)           # [ntheta, ndist, 2]
+        init = np.concatenate(all_init, axis=0)
+        gt   = None if shrink_gt is None else (
+            shrink_gt.get() if isinstance(shrink_gt, cp.ndarray) else np.asarray(shrink_gt))
+
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, self.ndist,
+                                 figsize=(5 * self.ndist, 6), squeeze=False)
+        theta_idx = np.arange(curr.shape[0])
+        for j in range(self.ndist):
+            for d, label in enumerate(['y', 'x']):
+                ax = axes[d, j]
+                ax.plot(theta_idx, init[:, j, d], label='init', linestyle='--', color='C1')
+                ax.plot(theta_idx, curr[:, j, d], label='current',              color='C0')
+                if gt is not None:
+                    ax.plot(theta_idx, gt[:, j, d], label='ground truth',
+                            linestyle=':', color='C2', linewidth=2)
+                ax.set_title(f"dist {j}, {label}")
+                ax.set_xlabel("theta index")
+                ax.set_ylabel("shrink")
+                ax.grid(True)
+                ax.legend(fontsize=8)
+        fig.tight_layout()
+        shrink_dir = os.path.join(self.path_out, "shrink")
+        os.makedirs(shrink_dir, exist_ok=True)
+        png_path = os.path.join(shrink_dir, f"shrink_{i:04}.png")
+        fig.savefig(png_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"shrink plot → {png_path}")

@@ -43,11 +43,16 @@ def load_octave_text_mat(fpath, varname):
 
 
 def load_shrink_from_mats(path, pfile, ndist, ntheta):
-    """Build [ntheta, ndist] shrink array from per-distance shrink_list.mat files.
+    """Build [ntheta, ndist, 2] shrink array from per-distance shrink_list.mat files.
 
     Each shrink_list.mat contains a (3,2) matrix; row 0 gives [h, v] incremental
     shrink from the previous distance plane. The per-angle shrink for distance k at
     angle j is linearly interpolated: cumulative[k] + increments[k] * j / ntheta.
+
+    The trailing axis is (y, x) = (v, h), matching the position convention: the
+    two directions are kept apart rather than averaged, because a sample that
+    settles vertically and one that dries horizontally are different geometries
+    and the reconstruction can now tell them apart.
     Returns a zero array if any mat file is missing.
     """
     increments = []
@@ -55,12 +60,14 @@ def load_shrink_from_mats(path, pfile, ndist, ntheta):
         mat_path = f'{path}/{pfile}_{k + 1}_/shrink_list.mat'
         if not os.path.exists(mat_path):
             logger.warning(f'shrink_list.mat not found, returning zeros: {mat_path}')
-            return np.zeros((ntheta, ndist), dtype='float32')
+            return np.zeros((ntheta, ndist, 2), dtype='float32')
         sl = load_octave_text_mat(mat_path, 'shrink_list')
-        increments.append(float(sl[0, 0] + sl[0, 1]) / 2)
-    cumulative = np.concatenate([[0.0], np.cumsum(increments)])[:ndist]
+        increments.append([float(sl[0, 1]), float(sl[0, 0])])   # (v, h) -> (y, x)
+    increments = np.array(increments, dtype='float64')                 # [ndist, 2]
+    cumulative = np.concatenate([np.zeros((1, 2)),
+                                 np.cumsum(increments, axis=0)])[:ndist]
     j_frac = np.arange(ntheta) / ntheta
-    shrink_nd = cumulative[None, :] + np.array(increments)[None, :] * j_frac[:, None]
+    shrink_nd = cumulative[None] + increments[None] * j_frac[:, None, None]
     return shrink_nd.astype('float32')
 
 
@@ -181,7 +188,7 @@ class Reader:
         obj_file = self.in_file.replace('.h5', '_obj.h5')
         if not os.path.exists(obj_file):
             obj_file = self.in_file
-        print(f"read object from {obj_file}")
+        logger.info(f"read object from {obj_file}")
         with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
             obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
             im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
@@ -212,7 +219,7 @@ class Reader:
         per-dist slicing.
         """
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
-            raw = fid[f'/exchange/cshifts_final'][
+            raw = fid['/exchange/cshifts_final'][
                 self.ids[self.st_theta:self.end_theta], :self.ndist
             ].astype('float32')      # [local_ntheta, ndist, 2]
         raw = np.ascontiguousarray(raw.transpose(1, 0, 2))    # [ndist, local_ntheta, 2]
@@ -227,20 +234,28 @@ class Reader:
         return out
 
     def read_shrink(self, out=None):
-        """Read [ndist, local_ntheta] shrink for this rank's theta-slice from HDF5.
+        """Read [ndist, local_ntheta, 2] shrink for this rank's theta-slice.
 
-        Stored on disk as [ntheta, ndist]; transposed on read so per-dist slices
-        are contiguous. Falls back to zeros if /exchange/shrink is not present.
+        Stored on disk as [ntheta, ndist, 2] with the trailing axis (y, x);
+        transposed on read so per-dist slices are contiguous. A legacy 2-D
+        [ntheta, ndist] dataset (written before shrinkage went per-axis) is
+        broadcast across both axes, which reproduces what it used to mean.
+        Falls back to zeros if /exchange/shrink is not present.
         """
         local_ntheta = self.end_theta - self.st_theta
         with h5py.File(self.in_file, 'r', driver="mpio", comm=self.comm) as fid:
             if '/exchange/shrink' not in fid:
-                data = cp.zeros((self.ndist, local_ntheta), dtype='float32')
+                data = cp.zeros((self.ndist, local_ntheta, 2), dtype='float32')
             else:
-                raw = fid['/exchange/shrink'][
-                    self.ids[self.st_theta:self.end_theta], :self.ndist
-                ].astype('float32')   # [local_ntheta, ndist]
-                data = cp.array(np.ascontiguousarray(raw.T))   # [ndist, local_ntheta]
+                ds  = fid['/exchange/shrink']
+                idx = self.ids[self.st_theta:self.end_theta]
+                if ds.ndim == 2:            # legacy [ntheta, ndist], axis-agnostic
+                    raw = ds[idx, :self.ndist].astype('float32')
+                    raw = np.repeat(raw[:, :, None], 2, axis=2)
+                else:
+                    raw = ds[idx, :self.ndist, :].astype('float32')
+                # [local_ntheta, ndist, 2] -> [ndist, local_ntheta, 2]
+                data = cp.array(np.ascontiguousarray(raw.transpose(1, 0, 2)))
         if out is not None:
             out[:] = data
         else:
@@ -263,7 +278,7 @@ class Reader:
                         prb = prb.reshape(self.nz, bz, self.n, bn).mean(axis=(1, 3))
                     out[k] = cp.array(prb) if isinstance(out, cp.ndarray) else prb
                 if self.rank == 0:
-                    print(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}', flush=True)
+                    logger.info(f'Probe read from {prb_file}, shape {tuple(_f["prb_amp"].shape)}')
         else:
             out[:] = 1
         return out
@@ -315,7 +330,8 @@ class Reader:
             cp.sqrt(raw, out=out)
         return out
 
-    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None, out_bd=None):
+    def read_checkpoint(self, path, out_obj=None, out_prb=None, out_pos=None,
+                        out_bd=None, out_tp=None):
         """Read a checkpoint saved at a coarser resolution and upsample.
 
         Scale is inferred automatically from checkpoint n vs self.n.
@@ -323,6 +339,10 @@ class Reader:
         prb  : upsampled in y and x by scale (repeat).
         obj  : upsampled in x and y by scale (repeat); z mapped by nearest-neighbour.
         pos  : multiplied by scale (pixel coords scale with resolution).
+        tp   : (ndist, 2, 2) shrinkage parameters (A, B), NOT scaled by binning --
+               shrink is a unitless ratio. A checkpoint written before shrinkage
+               became a variable has no /tp, in which case out_tp is left alone
+               and rank 0 logs a warning.
         """
         # --- infer scale and probe on rank 0, broadcast ---
         prb_np = np.empty((self.ndist, self.nz, self.n), dtype='complex64')
@@ -349,17 +369,6 @@ class Reader:
             # array, so only wrap in cp.array when the caller really passed one.
             out_prb[:] = cp.array(prb_np) if isinstance(out_prb, cp.ndarray) else prb_np
         del prb_np
-        if scale > 1:
-            shift_val = 0
-            if shift_val:
-                # Identity while shift_val == 0; kept so a sub-pixel probe
-                # re-centring can be reinstated. Resample on the GPU either way,
-                # then come back to the host if that is where out_prb lives.
-                from cupyx.scipy.ndimage import shift
-                shifted = shift(cp.asarray(out_prb), shift=(0, 0, shift_val),
-                                order=3, mode='nearest')
-                out_prb[:] = shifted if isinstance(out_prb, cp.ndarray) else shifted.get()
-
         # --- obj: z-batched read to cap peak CPU RAM ---
         # Old code read all nz_src slices into obj_re + obj_im + block at once,
         # which can exceed tens of GB per rank for large objects.
@@ -417,24 +426,56 @@ class Reader:
         else:
             out_pos[:] = cp.array(pos_up, dtype='float32') if isinstance(out_pos, cp.ndarray) else pos_up
 
-        # Optional scalar attribute (e.g. RecDelta's bd). Broadcast across ranks.
-        bd_arr = np.zeros(1, dtype='float32')
+        # Optional scalar attribute, broadcast across ranks. Skipped entirely
+        # unless the caller asked for it: it costs a second rank-0 open of the
+        # checkpoint plus a collective, and no solver in the package uses it.
+        bd_arr = np.full(1, np.nan, dtype='float32')
+        if out_bd is not None:
+            if self.rank == 0:
+                with h5py.File(path, 'r') as f:
+                    if 'bd' in f.attrs:
+                        bd_arr[0] = float(f.attrs['bd'])
+            self.comm.Bcast(bd_arr, root=0)
+            if not np.isnan(bd_arr[0]):
+                out_bd[0] = float(bd_arr[0])
+
+        tp_np = self._read_tp(path)
+        if out_tp is not None and tp_np is not None:
+            out_tp[:] = cp.asarray(tp_np) if isinstance(out_tp, cp.ndarray) else tp_np
+
+        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos,
+                'bd': float(bd_arr[0]), 'tp': tp_np}
+
+    def _read_tp(self, path):
+        """Rank-0 read of /tp from a checkpoint, broadcast to all ranks.
+
+        Returns None (and warns on rank 0) when the checkpoint predates the
+        shrinkage variable, so the caller can keep whatever tp it already has.
+        """
+        has = np.zeros(1, dtype='int32')
+        tp  = np.zeros((self.ndist, 2, 2), dtype='float32')
         if self.rank == 0:
             with h5py.File(path, 'r') as f:
-                if 'bd' in f.attrs:
-                    bd_arr[0] = float(f.attrs['bd'])
-                else:
-                    bd_arr[0] = float('nan')
-        self.comm.Bcast(bd_arr, root=0)
-        if out_bd is not None and not np.isnan(bd_arr[0]):
-            out_bd[0] = float(bd_arr[0])
+                if 'tp' in f:
+                    has[0] = 1
+                    tp[:] = f['tp'][:self.ndist].astype('float32')
+                elif not getattr(self, '_warned_no_tp', False):
+                    # once per reader: recompute_conv walks every checkpoint of
+                    # a level, and they are all legacy or all not
+                    self._warned_no_tp = True
+                    logger.warning(f'read_checkpoint: {path} has no /tp dataset '
+                                   f'(legacy checkpoint); leaving tp unchanged.')
+        self.comm.Bcast(has, root=0)
+        if not has[0]:
+            return None
+        self.comm.Bcast(tp, root=0)
+        return tp
 
-        return {'obj': out_obj, 'prb': out_prb, 'pos': out_pos, 'bd': float(bd_arr[0])}
-
-    def read_pos_checkpoint(self, path, out=None):
+    def read_pos_checkpoint(self, path, out=None, out_tp=None):
         """Read positions from a checkpoint file and upsample to current resolution.
 
-        Scale is inferred from the checkpoint probe size vs self.n.
+        Scale is inferred from the checkpoint probe size vs self.n. `out_tp`, if
+        given, additionally picks up the shrinkage parameters (unscaled).
         """
         if self.rank == 0:
             with h5py.File(path, 'r') as f:
@@ -455,6 +496,12 @@ class Reader:
             out = cp.array(pos_up)
         else:
             out[:] = cp.array(pos_up, dtype='float32') if isinstance(out, cp.ndarray) else pos_up
+
+        if out_tp is not None:
+            tp_np = self._read_tp(path)
+            if tp_np is not None:
+                out_tp[:] = (cp.asarray(tp_np) if isinstance(out_tp, cp.ndarray)
+                             else tp_np)
         return out
 
     def read_obj_unbin(self, out):

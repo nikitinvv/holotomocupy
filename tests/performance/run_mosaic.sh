@@ -15,7 +15,7 @@ set -eu
 cd "$(dirname "$(readlink -f "$0")")"
 
 NP=4                                # ranks = GPUs
-BIN=3                               # n = nz = 2048>>bin, ntheta = 6000>>bin
+BIN=2                               # n = nz = 2048>>bin, ntheta = 6000>>bin
 NTILE_V=1                           # tile rows
 NTILE_H=5                           # tiles per row
 NDIST_TILE=4                        # distances per tile -> ndist = v*h*4
@@ -24,7 +24,7 @@ NDIST_TILE=4                        # distances per tile -> ndist = v*h*4
 # Powers of two, from the 80 GB / 8-rank-node tables in Readme.md:
 #     bin       3    2    1    0
 #     nchunk   16   16    4    1
-NCHUNK=16
+NCHUNK=4
 # 0 = all ndist distances share one upload of a theta chunk of proj (the
 # default); 1 = the old outer-distance loop.  For these mosaic shapes the
 # chunking pool has enough object-plane headroom that all of them are free

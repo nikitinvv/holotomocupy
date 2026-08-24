@@ -1,24 +1,18 @@
 import numpy as np
 import cupy as cp
-import matplotlib.pyplot as plt
-import tifffile
 import os
 import time
+import logging
 import psutil
 from functools import wraps
 from .logger_config import logger
 
-from matplotlib_scalebar.scalebar import ScaleBar
+# matplotlib and tifffile are imported lazily inside the functions that need
+# them: they are only reached from interactive/diagnostic paths, and pulling
+# them in at import time costs every MPI rank ~0.5 s and ~100 MB of RSS.
 
 # Cached once — avoids a system call on every timed invocation
 _process = psutil.Process()
-
-
-def copy_to_pinned(data):
-    buf = cp.cuda.alloc_pinned_memory(data.nbytes)
-    buf = np.frombuffer(buf, dtype=data.dtype, count=data.size).reshape(data.shape)
-    buf[:] = data
-    return buf
 
 
 def make_pinned(shape, dtype):
@@ -29,18 +23,9 @@ def make_pinned(shape, dtype):
     return np.frombuffer(buf, dtype=dtype, count=n).reshape(shape, copy=False)
 
 
-def free_pinned():
-    """Hand freed pinned blocks back to the OS.
-
-    CuPy's pinned-memory pool keeps every block it has ever allocated on a free
-    list, so dropping a reference to a make_pinned array does not lower RSS --
-    and pinned pages cannot be swapped.  Call this after dropping a large one.
-    """
-    cp.get_default_pinned_memory_pool().free_all_blocks()
-
-
 def mshow(a, show=False, figsize=(6, 6), **args):
     if show:
+        import matplotlib.pyplot as plt
         if isinstance(a, cp.ndarray):
             a = a.get()
         fig, axs = plt.subplots(1, 1, figsize=figsize)
@@ -51,6 +36,8 @@ def mshow(a, show=False, figsize=(6, 6), **args):
 
 def mshow_complex(a, show=False, figsize=(14, 6), **args):
     if show:
+        import matplotlib.pyplot as plt
+        from matplotlib_scalebar.scalebar import ScaleBar
         if isinstance(a, cp.ndarray):
             a = a.get()
         fig, axs = plt.subplots(1, 2, figsize=figsize)
@@ -67,6 +54,7 @@ def mshow_complex(a, show=False, figsize=(14, 6), **args):
 
 def mshow_polar(a, show=False, figsize=(14, 6), **args):
     if show:
+        import matplotlib.pyplot as plt
         if isinstance(a, cp.ndarray):
             a = a.get()
         fig, axs = plt.subplots(1, 2, figsize=figsize)
@@ -81,6 +69,7 @@ def mshow_polar(a, show=False, figsize=(14, 6), **args):
 
 def mshow_pos(pos, show=False, figsize=(10, 4), **args):
     if show:
+        import matplotlib.pyplot as plt
         if isinstance(pos, cp.ndarray):
             pos = pos.get()
         _, ax = plt.subplots(1, 2, figsize=figsize)
@@ -95,6 +84,7 @@ def mshow_pos(pos, show=False, figsize=(10, 4), **args):
 
 def mshow_approx(t, err_real, err_approx, show=False):
     if show:
+        import matplotlib.pyplot as plt
         plt.figure(figsize=(4, 4))
         plt.plot(t, err_real,   "o-", label="real")
         plt.plot(t, err_approx, "x-", label="approx")
@@ -123,6 +113,7 @@ def lap(a, b, c):
 
 
 def write_tiff(a, name, **args):
+    import tifffile
     if isinstance(a, cp.ndarray):
         a = a.get()
     dirname = os.path.dirname(name)
@@ -132,13 +123,23 @@ def write_tiff(a, name, **args):
 
 
 def read_tiff(name):
+    import tifffile
     return tifffile.imread(name)[:]
 
 
 
 def timer(func):
+    """Log wall time and memory for a call, but only when DEBUG is enabled.
+
+    @timer sits on hot paths (redot_batch, linear_batch, hessian_cascade, ...)
+    that run many times per iteration, and the RSS query, memGetInfo() call and
+    f-string cost real time. The isEnabledFor() guard makes the decorator very
+    nearly free when DEBUG logging is off, which is the normal case.
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
+        if not logger.isEnabledFor(logging.DEBUG):
+            return func(*args, **kwargs)
         start  = time.time()
         result = func(*args, **kwargs)
         elapsed = time.time() - start

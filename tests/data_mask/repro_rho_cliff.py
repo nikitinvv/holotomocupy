@@ -130,7 +130,7 @@ a.nz = n; a.n = n; a.nzobj = nobj; a.nobj = nobj
 a.mask = 1.1
 a.lam_prbfit = 3.1e-3
 a.lam_laplacian = args_cli.lam_lap
-a.rho = [1, 0.05, 0.02]
+a.rho = [1, 0.05, 0.02, 0]
 a.niter = args_cli.niter; a.start_iter = 0
 a.nchunk = 16
 a.checkpoint_step = -1; a.error_step = -1
@@ -181,7 +181,7 @@ for rp in args_cli.rho_prb:
         v[:] = snap[k]
     for b in cl.grads.values(): b[:] = 0
     for b in cl.etas.values():  b[:] = 0
-    cl.rho_sq = {'obj': 1.0, 'prb': rp**2, 'pos': 0.02**2}
+    cl.rho_sq = {'obj': 1.0, 'prb': rp**2, 'pos': 0.02**2, 'tp': 0.0}
     cl.start_iter = 0
     cl.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"])
     print(f"--- rho_prb = {rp:g} " + "-"*84)

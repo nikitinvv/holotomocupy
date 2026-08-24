@@ -79,7 +79,7 @@ ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
     reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'],
-                           out_bd=cl.vars.get('bd'))
+                           out_bd=cl.vars.get('bd'), out_tp=cl.vars['tp'])
 elif getattr(args, 'init_vol', None):
     logger.info(f"Reading initial object from vol file: {args.init_vol}")
     reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))
@@ -95,7 +95,8 @@ else:
     reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 if args.pos_checkpoint:
     logger.info(f"Overriding positions from: {args.pos_checkpoint}")
-    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'],
+                               out_tp=cl.vars['tp'])
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

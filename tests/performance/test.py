@@ -66,7 +66,7 @@ ndist           = 4
 # log header and Rec all quote the same number.
 ndistchunk = min(ndistchunk, ndist) if ndistchunk > 0 else ndist
 niter           = args_cli.niter                # short — measures steady-state per-iter cost
-rho             = [1, 0.05, 0.02]
+rho             = [1, 0.05, 0.02, 0]
 mask            = 1.1
 lam_prbfit      = 1e-2                           # disable probe-fit regularization
 lam_laplacian   = 0

@@ -878,7 +878,13 @@ class Rec:
             # bottom = B(-g,-g) = Qgg, which the expansion below already gives at
             # beta = 0. etas is zero there, so the sweep measured Bge = Qee = 0
             # and only the ratio needs the special case (0/0).
-            beta = 0.0 if i == self.start_iter else Bge / Qee
+            #
+            # beta is floored at 0 (the Powell safeguard): Bge = B(g,e) < 0 means
+            # the new gradient and the old direction have negative curvature
+            # coupling, so beta*e points away from the descent direction rather
+            # than along it, and dropping it falls back to steepest descent for
+            # that iteration -- always a valid CG restart.
+            beta = 0.0 if i == self.start_iter else max(Bge / Qee, 0.0)
 
             if check and i > self.start_iter:
                 ref_beta = self._ref_beta(vars, grads, etas)

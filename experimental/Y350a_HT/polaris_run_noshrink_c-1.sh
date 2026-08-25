@@ -10,37 +10,38 @@
 
 # --- user configuration ---
 # ROTATION-CENTRE SWEEP, candidate rotation_center_shift = -1 (bin-0 detector px).
-# Generated 2026-08-25 from polaris_run_noshrink.sh; the only differences are the
-# default CONFIG, the job name, and that $SCRIPT is honoured so the same script
-# can drive steps15.py as well as step6.py.
+# Generated 2026-08-25 from polaris_run_noshrink.sh; the differences are the job
+# name and that the stages are hardcoded as consecutive mpiexec lines instead of
+# selected by $CONFIG, so one qsub walks the whole ladder for this centre.
 #
 # The main HT run used -10.386198 and its reconstruction says that is wrong, so
 # six candidates (0, -1, -2, -3, -4, -7) are each taken through the full ladder.
 # noshrink only -- rho[tp]=0 at every level.
 #
-# Order, once per centre:
-#     qsub -v CONFIG=config_steps15_c-1.conf,SCRIPT=steps15.py polaris_run_noshrink_c-1.sh
-#     qsub -v CONFIG=config_step6_bin2_noshrink_c-1.conf polaris_run_noshrink_c-1.sh  # iters   0- 512
-#     qsub -v CONFIG=config_step6_bin1_noshrink_c-1.conf polaris_run_noshrink_c-1.sh  # iters 512- 768
-#     qsub -v CONFIG=config_step6_bin0_noshrink_c-1.conf polaris_run_noshrink_c-1.sh  # iters 768-1024
+# One qsub per centre -- this script runs the whole ladder in sequence:
+#     qsub polaris_run_noshrink_c-1.sh
+# steps15 (step 5 only) -> step 6 bin 2 (iters 0-512) -> bin 1 (512-768).
+# bin 0 (768-1024) is the last mpiexec line, commented out: uncomment it when
+# you want full resolution for this centre.
 #
-# Queue: the PBS header below is the debug queue, 2 nodes, 59 min -- inherited
-# from polaris_run_noshrink.sh, where it is right for one step-6 level.  The
-# steps15/step-5 pass has never been timed on its own here, so if it hits the
-# wall, resubmit that one job to prod with a longer walltime; step 5 is not
-# restartable mid-way, it rewrites _obj.h5 from scratch each time.
+# Queue: the PBS header below is inherited from polaris_run_noshrink.sh --
+# debug, 2 nodes, 59 min, which is sized for ONE step-6 level.  This script
+# runs three stages back to back, so 59 min will not be enough; pick a queue
+# and walltime that fit before submitting.  If it does wall, nothing partial
+# is reusable: step 5 rewrites _obj.h5 from scratch, and each step-6 level
+# restarts from its config's fixed start_iter.
 #
 # The steps15 job is step 5 only (start_step=5, start_level_rec=2): steps 1-4 do
 # not depend on the centre, and re-running them would rewrite the shared 2.8 TB
 # Y350a_HT_nobin_020nm.h5 -- do NOT qsub a config here with start_step < 5.
 #
-# SEQUENTIAL ONLY.  Every centre reads and writes the SAME steps15 dir
-# ..._rec; only the step-6 path_out is per-centre.  The steps15 job
+# ONE CENTRE AT A TIME.  Every centre reads and writes the SAME steps15 dir
+# ..._rec; only the step-6 path_out is per-centre.  The steps15 stage
 # overwrites the shared Y350a_HT_nobin_020nm_obj.h5, which is the only place
-# the centre reaches step 6 (read at bin 2 with start_iter=0).  So: run this
-# centre's steps15, then its step-6 bin-2 job, and only then start the next
-# centre.  Its bin-1 and bin-0 jobs upsample the bin-2 checkpoint and never
-# reopen _obj.h5, so they may trail behind another centre's steps15 safely.
+# the centre reaches step 6 (read at bin 2 with start_iter=0).  Because this
+# script runs steps15 and bin 2 in the same job, that is safe -- as long as
+# two centres are never in flight at once.  Do not qsub the next centre until
+# this one has at least cleared its bin-2 stage.
 #
 # The first sweep steps15 destroys the main run's _obj.h5 (the -10.386198
 # volume).  That is recoverable -- re-run config_steps15.conf with
@@ -48,8 +49,6 @@
 #
 # The three step-6 levels share this centre's path_out
 # (..._rec6_noshrink_c-1), so each picks up the previous level's checkpoint.
-CONFIG=${CONFIG:-config_step6_bin2_noshrink_c-1.conf}
-SCRIPT=${SCRIPT:-step6.py}
 # Software environment (modules + conda env). See the Polaris setup notes.
 HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
 # --------------------------
@@ -116,4 +115,7 @@ fi
 # CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
 # source "/home/vvnikitin/venvs/${CONDA_NAME}/bin/activate"
 
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}"
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15_c-1.conf"
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2_noshrink_c-1.conf"
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1_noshrink_c-1.conf"
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0_noshrink_c-1.conf"

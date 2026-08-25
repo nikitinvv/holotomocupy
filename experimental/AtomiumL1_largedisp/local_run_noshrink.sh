@@ -46,9 +46,9 @@ cd "$(dirname "${SCRIPT_DIR}")"
 #     python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}" \
 #     2>&1 | tee "${SCRIPT_DIR}/log_$(basename ${CONFIG} .conf).txt"
 
-mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
-    python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2_noshrink.conf" \
-    2>&1 | tee "${SCRIPT_DIR}/log_$(basename config_step6_bin2_noshrink.conf .conf).txt"
+# mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
+#     python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2_noshrink.conf" \
+#     2>&1 | tee "${SCRIPT_DIR}/log_$(basename config_step6_bin2_noshrink.conf .conf).txt"
 
 mpirun -n "${NP}" "${SCRIPT_DIR}/set_affinity_gpu.sh" \
     python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1_noshrink.conf" \

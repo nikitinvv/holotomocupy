@@ -90,16 +90,30 @@ python show_geometry.py config_steps15.conf      # derived geometry + per-level 
 python scan_overview.py config_steps15.conf      # -> scan_overview.png
 python estimate_center.py config_steps15.conf    # -> center_estimate.png
 
-# 1. steps 1-5, once  (EDF->HDF5, preprocess, shifts, binned data, Paganin+FBP)
+# 1. the whole pipeline, one job
 #    Check the eagle quota first: start_level_rec=0 writes a 783 GB object
 #    volume and 268 GB of bin-0 projections.
-mpiexec -n <ranks> python steps15.py config_steps15.conf
-
-# 2. step 6, one level per job, in order
-qsub -v CONFIG=config_step6_bin2.conf polaris_run.sh   # 4x4, iters    0- 512
-qsub -v CONFIG=config_step6_bin1.conf polaris_run.sh   # 2x2, iters  512- 768
-qsub -v CONFIG=config_step6_bin0.conf polaris_run.sh   # 1x1, iters  768-1024
+qsub polaris_run.sh
 ```
+
+`polaris_run.sh` is a single PBS job with four sequential `mpiexec` calls:
+
+| # | stage | config | grid | iters | measured\* |
+|---|---|---|---|---|---|
+| 1 | `steps15.py` | `config_steps15.conf` | — | — | not timed |
+| 2 | `step6.py` | `config_step6_bin2.conf` | 4×4, n=1024 | 0 → 512 | ~13 min |
+| 3 | `step6.py` | `config_step6_bin1.conf` | 2×2, n=2048 | 512 → 768 | ~22 min |
+| 4 | `step6.py` | `config_step6_bin0.conf` | 1×1, n=4096 | 768 → 1024 | ~1 h 47 min |
+
+\* on the 20 nm sibling, which has the identical `n=4096`, `nobj=4608`,
+`ntheta=4000`, on 2 nodes / 8 ranks. Step 6 totals ~2 h 25 min; the walltime is
+set to 12 h to leave room for the untimed steps 1–5, which read 128 GB of EDF
+and write a few hundred GB back and are eagle-I/O bound rather than GPU bound.
+
+To run only part of it — steps 1–5 already done, or resuming after a
+preemption — comment out the leading `mpiexec` lines. Each line ends in
+`|| exit $?`, so a failed stage stops the job instead of letting the next level
+seed itself from a checkpoint that was never written.
 
 All three levels share one `path_out`, so each picks up the previous level's
 checkpoint (`start_iter`) and upsamples obj/prb/pos onto its own grid.
@@ -107,9 +121,10 @@ checkpoint (`start_iter`) and upsamples obj/prb/pos onto its own grid.
 handoffs always exist; if a level is cut short by walltime, lower the next
 level's `start_iter` to the last checkpoint that landed.
 
-**The walltime and queue in `polaris_run.sh` are the debug-queue settings
-inherited from the 20 nm folder (2 nodes, 19 min) and are too short for a real
-level.** Set them before submitting.
+12 h does not fit the debug queue, so the job goes to `-q preemptable` (1–10
+nodes, long walltime, evictable). Preemption is survivable: `checkpoint_step=32`
+means a resubmit loses at most 32 iterations. Confirm the current queue limits
+with `qstat -Qf` before changing this.
 
 ### Optional: measured probe
 
@@ -129,7 +144,7 @@ coded-aperture scan and `step0.py` dies on its missing `cay`/`caz` motor keys.
 | `config_steps15.conf` | steps 1–5: geometry, binning ladder, rotation centre |
 | `config_step6_bin{2,1,0}.conf` | the three BH levels; `rho[tp]=0` throughout |
 | `config_step0.conf` | optional NFP probe retrieval |
-| `polaris_run.sh` | PBS driver for step 6 (honours `$CONFIG`, `$SCRIPT`) |
+| `polaris_run.sh` | PBS driver — steps15 + all three step-6 levels in one job |
 | `estimate_center.py` | rotation axis from opposed 0/180° projections → `center_estimate.png` |
 | `scan_overview.py` | one-page acquisition summary → `scan_overview.png` |
 | `show_geometry.py` | print derived geometry without launching MPI |
@@ -154,4 +169,4 @@ python scan_overview.py config_steps15.conf --path ~/eagle/vnikitin/20250604
   but not checkpointed — copy them into the bin-1 and bin-0 configs by hand.
 * `paganin=60` is inherited from the 20 nm run (ad-hoc for stained tissue, and
   the value Peter's own script used).
-* Set a real walltime and queue in `polaris_run.sh`.
+* Trim the 12 h walltime once steps 1-5 have been timed once.

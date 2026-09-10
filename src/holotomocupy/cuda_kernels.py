@@ -62,9 +62,12 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     // theta = atan(3/4) at 2n = 320 shifts by a whole 256 cells and still
     // aliases.)
     //
-    // For ndet == n, fr is in [-1/2, 1/2) so |x0|, |y0| <= |fr| < 1/2 and the
-    // guard can never fire: R and RT are bit-for-bit what they were before nd
-    // existed.  Verified as a regression test.
+    // ndet == n is unchanged.  There fr is in [-1/2, 1/2], so |x0|, |y0| <= 1/2
+    // and the guard -- strict on the upper side, see below -- can never fire.
+    // Regression test at n = 128: R max|diff| = 0 exactly, RT max|diff| =
+    // 1.18e-08, which is the same figure the old kernel gets against ITSELF on
+    // the same input (the scatter's atomicAdd is order-nondeterministic), i.e.
+    // bit-for-bit to the extent RT is ever bit-for-bit.
     //
     // NOTE the % twon in the loops below stays.  That one is the interpolation
     // stencil straddling the array edge -- correct periodic evaluation of a
@@ -74,7 +77,12 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     const float x0 =  fr * __cosf(theta[ty]);
     const float y0 = -fr * __sinf(theta[ty]);
 
-    if (x0 < -0.5f || x0 >= 0.5f || y0 < -0.5f || y0 >= 0.5f)
+    // Strict > on the upper side: x0 == +1/2 and x0 == -1/2 are the SAME
+    // frequency for a periodic spectrum, so the lone boundary bin (fr = -1/2,
+    // which lands on +1/2 for theta > 90 deg) is legitimately wrapped, not
+    // aliased.  Rejecting it would change ndet == n, where fr = -1/2 is the
+    // tx = 0 bin of every projection.
+    if (x0 < -0.5f || x0 > 0.5f || y0 < -0.5f || y0 > 0.5f)
     {
         if (dir == 0) g[g_ind] = make_float2(0.0f, 0.0f);
         return;

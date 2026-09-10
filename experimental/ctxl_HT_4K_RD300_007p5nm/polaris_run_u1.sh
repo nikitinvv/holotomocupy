@@ -11,8 +11,11 @@
 # ctxl cortex tissue, 4-distance HT, +-300 px random displacement, 7.5 nm
 # voxels -- ESRF ID16A 2026-08-29..31, proposal ihls3888.
 # THE tomo_upsample=1 ARM of the ladder -- the historical geometry, object x/y
-# grid == projection plane, writing ..._rec6.  The default polaris_run.sh runs
-# the tomo_upsample=2 arm into ..._rec6_u2; the two are compared head to head.
+# grid == projection plane, writing ..._rec6_u1.  The default polaris_run.sh
+# runs the tomo_upsample=2 arm into ..._rec6_u2; the two are compared head to
+# head.  Neither writes the bare ..._rec6, which holds the completed ladder
+# from before tomo_upsample existed and is where the half-set configs still
+# read checkpoint_1504.h5 for their positions.
 #
 #     qsub polaris_run_u1.sh
 #

@@ -870,7 +870,7 @@ is identical.
 |---|---|---|
 | configs | `config_step6_bin{2,1,0}.conf` | `config_step6_u1_bin{2,1,0}.conf` |
 | PBS script | [`polaris_run.sh`](polaris_run.sh) | [`polaris_run_u1.sh`](polaris_run_u1.sh) |
-| `path_out` | `<pfile>_rec6_u2` | `<pfile>_rec6` |
+| `path_out` | `<pfile>_rec6_u2` | `<pfile>_rec6_u1` |
 | object x/y (bin 2/1/0) | 632 / 1264 / 2528 | 1264 / 2528 / 5056 |
 | projection width | 1264 / 2528 / 5056 | 1264 / 2528 / 5056 |
 | voxels | z `v`, x/y `2v` | isotropic |
@@ -879,7 +879,12 @@ is identical.
 
 They must not share a `path_out`: the checkpoints have incompatible object
 shapes (2528 vs 1264 x/y at bin 1) and the two ladders use the same cumulative
-iteration numbering, so one would seed itself from the other's file.
+iteration numbering, so one would seed itself from the other's file. For the
+same reason neither arm writes the *bare* `<pfile>_rec6` — that directory holds
+the completed ladder from before `tomo_upsample` existed, whose
+`checkpoint_1504.h5` the half-set configs still read positions from, and whose
+`checkpoint_1024.h5` the `u1` bin-1 level would otherwise have resumed from
+instead of from its own bin-2 result.
 
 Steps 1–5 are shared: neither `steps15.py` nor `config_steps15.conf` knows about
 `tomo_upsample`, both arms read the same `obj_init`, and `polaris_run_u1.sh`
@@ -1052,7 +1057,7 @@ The driver's other settings do corroborate the rest of the config:
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
 | [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
 | [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage; comment out what you do not want |
-| [`config_step6_u1_bin{2,1,0}.conf`](config_step6_u1_bin2.conf) | the same ladder at `tomo_upsample=1`, writing `_rec6` |
+| [`config_step6_u1_bin{2,1,0}.conf`](config_step6_u1_bin2.conf) | the same ladder at `tomo_upsample=1`, writing `_rec6_u1` |
 | [`polaris_run_u1.sh`](polaris_run_u1.sh) | PBS job for the `tomo_upsample=1` arm; `steps15` commented out |
 | [`config_step6_p{0,1}_bin{2,1,0}.conf`](config_step6_p0_bin2.conf) | the same ladder on even / odd projections, positions frozen — see Half-set runs |
 | [`polaris_run_halves.sh`](polaris_run_halves.sh) | PBS job for the two half-set ladders, six `mpiexec` lines |

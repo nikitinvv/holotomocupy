@@ -40,8 +40,11 @@ import time
 
 import numpy as np
 
+# Default --path: the tomo_upsample=2 arm, which is the only one that produces
+# an anisotropic volume.  The u1 arm (..._rec6_u1) is already isotropic and has
+# nothing for this script to do.
 BASE = ('/eagle/APS_IRI/vnikitin/20260829/ctxl/'
-        'ctxl_HT_4K_RD300_007p5nm_0001_rec6')
+        'ctxl_HT_4K_RD300_007p5nm_0001_rec6_u2')
 # copied through verbatim; obj_re/obj_im are the ones that get binned
 PASSTHROUGH = ('prb_abs', 'prb_phase', 'pos', 'tp')
 

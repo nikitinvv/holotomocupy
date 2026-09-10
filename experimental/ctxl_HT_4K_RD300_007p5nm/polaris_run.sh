@@ -16,7 +16,8 @@
 #
 # THIS IS THE tomo_upsample=2 ARM: the object x/y grid is half the projection
 # plane (632/1264/2528 against 1264/2528/5056), and it writes ..._rec6_u2.  The
-# historical tomo_upsample=1 arm is polaris_run_u1.sh -> ..._rec6.  The two are
+# historical tomo_upsample=1 arm is polaris_run_u1.sh -> ..._rec6_u1.  The two
+# are
 # run side by side and compared; they must not share an output directory,
 # because their checkpoints have incompatible object shapes and share the
 # iteration numbering.

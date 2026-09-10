@@ -9,8 +9,25 @@ from .utils import redot, logger
 class Tomo:
     """Functionality for Radon transforms and exp"""
 
-    def __init__(self, n, nz, theta, mask_r):
-        """Usfft parameters"""
+    def __init__(self, n, nz, theta, mask_r, nd=None):
+        """Usfft parameters.
+
+        `nd` is the number of detector samples per projection, i.e. the width of
+        the sinogram/projection plane.  It defaults to `n` (detector pixel ==
+        object pixel); the only other supported value is `2*n`, a detector twice
+        as finely sampled over the *same* field of view.  The Fourier step along
+        the detector stays 1/n either way, so R and RT remain an exact adjoint
+        pair and the sinogram *values* are unchanged -- only sampled more densely.
+
+        The detector bins with |f| >= 1/2 -- which only exist once nd > n, and
+        lie outside the padded FFT's Cartesian square -- pick up the periodic
+        continuation of the object spectrum, i.e. the object is modelled as a
+        delta comb on the n grid, exactly as in ~/APS_PXM/tomo_usfft.  See the
+        commented-out alternative in the gather kernel.
+        """
+        nd = n if nd is None else int(nd)
+        if nd not in (n, 2 * n):
+            raise ValueError(f"nd must be n={n} or 2n={2*n}, got {nd}")
         eps = 1e-3  # accuracy of usfft
         mu = -math.log(eps) / (2 * n * n)
         m  = math.ceil(2 * n / math.pi * math.sqrt(-mu * math.log(eps) + (mu * n) ** 2 / 4))
@@ -21,7 +38,7 @@ class Tomo:
         phi = cp.exp((mu * (n * n) * (dx * dx + dy * dy)).astype("float32")) * (1 - n % 4)
 
         # (+1,-1) sign arrays for fftshift-via-multiply
-        c1dfftshift = (1 - 2 * ((cp.arange(1, n + 1) % 2))).astype("int8")
+        c1dfftshift = (1 - 2 * ((cp.arange(1, nd + 1) % 2))).astype("int8")
         c2dtmp      = (1 - 2 * ((cp.arange(1, 2 * n + 1) % 2))).astype("int8")
         c2dfftshift = cp.outer(c2dtmp, c2dtmp)
 
@@ -33,6 +50,7 @@ class Tomo:
         self._fft_plans = {}
 
         self.n      = n
+        self.nd     = nd
         self.ntheta = len(theta)
         self.theta  = cp.array(theta.astype("float32"))
 
@@ -54,7 +72,7 @@ class Tomo:
         self._buf_fde = cp.empty([nz, 2 * n, 2 * n], dtype="complex64")
 
         self._nz       = nz
-        self._buf_sino = cp.zeros([self.ntheta, nz, n], dtype="complex64")
+        self._buf_sino = cp.zeros([self.ntheta, nz, nd], dtype="complex64")
         self._plan_2d  = cufft.get_fft_plan(self._buf_fde,  axes=(-2, -1), value_type='C2C')
         self._plan_1d  = cufft.get_fft_plan(self._buf_sino, axes=(-1,),    value_type='C2C')
 
@@ -76,17 +94,21 @@ class Tomo:
         # No memset needed: with dir==0 the gather kernel starts each thread from
         # g0 = 0 and *assigns* g[g_ind], covering every element of _buf_sino.
         gather_kernel(
-            (math.ceil(n / 32), math.ceil(self.ntheta / 32), self._nz),
+            (math.ceil(self.nd / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),
-            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.ntheta, self._nz, 0),
+            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.nd,
+             self.ntheta, self._nz, 0),
         )
         # STEP3: 1D IFFT on full buf_sino
         self._buf_sino *= c1dfftshift
         with self._plan_1d:
             cufft.ifft(self._buf_sino, overwrite_x=True)
         self._buf_sino *= c1dfftshift
-        # STEP4: normalization, crop
-        result = self._buf_sino[:, :nz] / 4
+        # STEP4: normalization, crop.  The 1-D inverse transform divides by nd,
+        # but the Fourier step is 1/n regardless of the detector sampling, so
+        # nd/n puts it back: the sinogram then holds the same values on a finer
+        # grid, and RT is its exact adjoint for any nd.
+        result = self._buf_sino[:, :nz] * (self.nd / (4 * n))
         if obj.dtype == 'float32':
             result = result.real
         return cp.ascontiguousarray(result)
@@ -106,9 +128,10 @@ class Tomo:
         # STEP2: NUFFT scatter from full buf_sino (extra slices are zero, contribute nothing)
         self._buf_fde.fill(0)
         gather_kernel(
-            (math.ceil(n / 32), math.ceil(self.ntheta / 32), self._nz),
+            (math.ceil(self.nd / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),
-            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.ntheta, self._nz, 1),
+            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.nd,
+             self.ntheta, self._nz, 1),
         )
         # STEP3: 2D IFFT on full buffer (always matches plan)
         self._buf_fde *= c2dfftshift
@@ -124,15 +147,15 @@ class Tomo:
     def _fbp_filter(self, filter_name):
         """1-D frequency response for `filter_name`, built once and cached.
 
-        Depends only on n, so rebuilding it per call (as this used to) is pure
+        Depends only on nd, so rebuilding it per call (as this used to) is pure
         waste on the fbp path.
         """
         h = self._filters.get(filter_name)
         if h is not None:
             return h
-        n  = self.n
-        f  = cp.fft.fftfreq(n).astype('float32')   # f in [-0.5, 0.5)
-        af = cp.abs(f)*4*n
+        nd = self.nd
+        f  = cp.fft.fftfreq(nd).astype('float32')  # f in [-0.5, 0.5)
+        af = cp.abs(f)*4*nd
 
         if filter_name == 'ramp':
             # Ram-Lak: |ω|
@@ -163,7 +186,7 @@ class Tomo:
 
         Parameters
         ----------
-        data : cupy ndarray, shape [ntheta, nz, n], float32 or complex64
+        data : cupy ndarray, shape [ntheta, nz, nd], float32 or complex64
         filter_name : str  — 'ramp', 'shepp', or 'parzen'
 
         Returns
@@ -199,7 +222,7 @@ class Tomo:
 
         Parameters
         ----------
-        data : array_like [ntheta, nz, n], float32 or complex64
+        data : array_like [ntheta, nz, nd], float32 or complex64
             Sinogram projections (numpy or cupy).
         filter_name : str
             'ramp'   — Ram-Lak ramp filter |ω|
@@ -210,7 +233,9 @@ class Tomo:
         -------
         Reconstruction array [nz, n, n], same dtype as `data`.
         """
-        norm_const = np.float32(np.sqrt(self.n / self.ntheta))
+        # n/nd: the forward transform inside RT sums nd detector samples where
+        # the object grid has n, so RT (and hence R^T R) scales with nd/n.
+        norm_const = np.float32(np.sqrt(self.n / self.ntheta) * self.n / self.nd)
         data = cp.asarray(data)
         res = self.RT(self._filter_sino(data, filter_name))
         res *= norm_const

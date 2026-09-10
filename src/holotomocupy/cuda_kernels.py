@@ -3,13 +3,13 @@ import cupy as cp
 gather_kernel = cp.RawKernel(
     r"""
 extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, float* mu,
-                                  int n, int ntheta, int nz, bool dir)
+                                  int n, int ndet, int ntheta, int nz, bool dir)
 {
     int tx = blockDim.x * blockIdx.x + threadIdx.x;
     int ty = blockDim.y * blockIdx.y + threadIdx.y;
     int tz = blockDim.z * blockIdx.z + threadIdx.z;
 
-    if (tx >= n || ty >= ntheta || tz >= nz) return;
+    if (tx >= ndet || ty >= ntheta || tz >= nz) return;
 
     const float PI     = 3.141592653589793238f;
     const int   twon   = 2 * n;
@@ -19,11 +19,33 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     const float coeff1 = -PI * PI / mu0;
     const float inv_twon = 1.0f / ftwon;
 
-    const float cx  = n * 0.5f;
-    const float x0 =  (tx - cx) / (float)n * __cosf(theta[ty]);
-    const float y0 = -(tx - cx) / (float)n * __sinf(theta[ty]);
+    const int g_ind = tx + tz * ndet + ty * ndet * nz;  // swapped axes
 
-    const int g_ind = tx + tz * n + ty * n * nz;  // swapped axes
+    // Detector frequency in cycles per *object* pixel.  The detector spans the
+    // same field of view as the object (ndet samples of size n/ndet), so the
+    // frequency step is 1/n whatever ndet is -- only the range changes, to
+    // |fr| <= ndet/(2n).  For ndet == n this is the usual (tx - n/2)/n.
+    const float cx = ndet * 0.5f;
+    const float fr = (tx - cx) / (float)n;
+
+    // Bins with |fr| >= 1/2 only exist once ndet > n, and they fall outside the
+    // padded FFT's Cartesian square: the index wraps below ((n + ell + 2n) % 2n),
+    // so the object is modelled as a delta comb on the n grid and those bins
+    // carry aliased replicas of the low frequencies.  For ndet == n, fr is in
+    // [-1/2, 1/2) and the question does not arise.
+    //
+    // The alternative -- model the object as band-limited to its own grid and
+    // zero those bins -- is the block below.  Left commented out, as it is in
+    // ~/APS_PXM/tomo_usfft, so this kernel matches that reference exactly.
+    /*if (fr < -0.5f || fr >= 0.5f)
+    {
+        if (dir == 0) g[g_ind] = make_float2(0.0f, 0.0f);
+        return;
+    }*/
+
+    const float x0 =  fr * __cosf(theta[ty]);
+    const float y0 = -fr * __sinf(theta[ty]);
+
     float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
 
     const int base_x  = (int)floorf(ftwon * x0) - m;

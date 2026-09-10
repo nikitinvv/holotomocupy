@@ -78,11 +78,26 @@ class Rec:
         self.dF = [self.dF0, self.dF1, self.dF2, self.dF3, self.dF4]
         self.d2F_dF = [self.d2F_dF0, self.d2F_dF1, self.d2F_dF2, self.d2F_dF3, self.d2F_dF4]
 
+        # Detector oversampling of the Radon transform.  `nobj` always means the
+        # OBJECT width; `ndobj` is the projection/psi width, i.e. what R writes
+        # onto and what the whole cascade below fwd_tomo sees.  At the default
+        # tomo_upsample = 1 they are equal and nothing changes.  At 2 the object
+        # sits on a 2x coarser x/y grid than the projection plane, whose FOV,
+        # sampling and centre convention are untouched -- so pos,
+        # rotation_center_shift, eff_demag, the probe and Propagation all keep
+        # their meaning.  Object z stays at nzobj: the run is anisotropic by
+        # design (z voxel v, x/y voxel 2v) and is binned in z afterwards.
+        self.tomo_upsample = int(getattr(args, 'tomo_upsample', 1))
+        if self.tomo_upsample not in (1, 2):
+            raise ValueError(
+                f"tomo_upsample must be 1 or 2, got {self.tomo_upsample}")
+        self.ndobj = self.nobj * self.tomo_upsample
+
         self.ndistchunk = self._resolve_ndistchunk()
         nbytes = self._chunking_pool_bytes()
 
         ### multinode processing
-        self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.nobj, 'complex64')
+        self.cl_mpi = MPIClass(args.comm, self.nzobj, self.ntheta, self.ndobj, 'complex64')
         self.local_nzobj = self.cl_mpi.local_nzobj
         self.local_ntheta = self.cl_mpi.local_ntheta
         self.rank      = self.cl_mpi.rank
@@ -108,6 +123,18 @@ class Rec:
                 f"(pool {pool_1/2**30:.2f}->{pool_nd/2**30:.2f} GiB, "
                 f"prb staging {prb_1/2**20:.0f}->{prb_nd/2**20:.0f} MiB); "
                 f"host RAM unchanged")
+            logger.warning(
+                f"tomo geometry: obj [{self.nzobj}, {self.nobj}, {self.nobj}] "
+                f"-> proj [{self.ntheta}, {self.nzobj}, {self.ndobj}]  "
+                f"(tomo_upsample={self.tomo_upsample}, "
+                f"voxel aspect z:x = 1:{self.tomo_upsample})")
+            if self.tomo_upsample > 1 and self.lam_laplacian > 0:
+                logger.warning(
+                    f"tomo_upsample={self.tomo_upsample} with lam_laplacian="
+                    f"{self.lam_laplacian:g}: LaplacianTerm's 3-D stencil assumes "
+                    f"isotropic voxels, but this run is z:x = 1:"
+                    f"{self.tomo_upsample}, so it penalises z gradients "
+                    f"{self.tomo_upsample**2}x too strongly relative to x/y.")
 
         # X-ray propagation and magnification parameters for classes
         wavelength = 1.24e-09 / self.energy
@@ -144,14 +171,15 @@ class Rec:
 
         # create classes (one GPU per MPI rank via CUDA_VISIBLE_DEVICES)
         self.cl_chunking = Chunking(nbytes, self.nchunk)
-        self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
+        self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask,
+                             nd=self.ndobj)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
         shift_type = getattr(args, 'shift_type', 'cubic')
         self.shift_type = shift_type
         if shift_type == 'fft':
-            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
+            self.cl_shift = ShiftFFT(self.n, self.ndobj, self.nz, self.nzobj, self.nchunk)
         elif shift_type == 'cubic':
-            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
+            self.cl_shift = Shift(self.n, self.ndobj, self.nz, self.nzobj, self.nchunk)
         else:
             raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
         if self.lam_laplacian > 0:
@@ -255,11 +283,11 @@ class Rec:
                                            (both only sized in when lam_laplacian > 0)
           fwd_tomo / adj_tomo:             1 sinogram chunk + 1 obj-shape.  The
                                            sinogram side is proj_tmp
-                                           [ntheta, local_nzobj, nobj] chunked on
-                                           axis 1, so one chunk carries EVERY
-                                           angle -- nchunk*ntheta*nobj, not
+                                           [ntheta, local_nzobj, ndobj] chunked
+                                           on axis 1, so one chunk carries EVERY
+                                           angle -- nchunk*ntheta*ndobj, not
                                            nchunk*nobj^2.  It grows linearly in
-                                           nobj while every other candidate grows
+                                           ndobj while every other candidate grows
                                            quadratically, so it dominates whenever
                                            ntheta > nobj: a coarse bin of a
                                            many-angle single-distance scan
@@ -275,10 +303,10 @@ class Rec:
         """
         obj_item   = np.dtype('complex64').itemsize
         obj_slab   = self.nobj  * self.nobj  * obj_item     # one z-slab of obj
-        proj_bytes = self.nchunk * self.nzobj * self.nobj  * obj_item
+        proj_bytes = self.nchunk * self.nzobj * self.ndobj * obj_item
         obj_bytes  = self.nchunk * obj_slab
         dist_bytes = ndistchunk * self._dist_bytes() + self.nchunk * 4  # + t [nchunk,1] f32
-        tomo_bytes = self.nchunk * self.ntheta * self.nobj * obj_item + obj_bytes
+        tomo_bytes = self.nchunk * self.ntheta * self.ndobj * obj_item + obj_bytes
         candidates = [3 * proj_bytes + dist_bytes,   # cascade
                       3 * obj_bytes,                 # lin_obj
                       tomo_bytes]                    # fwd_tomo / adj_tomo
@@ -325,7 +353,7 @@ class Rec:
             'obj':  obj_buf,
             'pos':  make_pinned([self.ndist, self.local_ntheta, 2],         dtype='float32'),
             'prb':  make_pinned(prb_shape,                                 dtype='complex64'),
-            'proj': make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='complex64'),
+            'proj': make_pinned([self.local_ntheta, self.nzobj, self.ndobj], dtype='complex64'),
             # Linear shrinkage model, shrink(t) = A*t + B with t = theta_idx/(ntheta-1):
             # tp[dist, 0, axis] = A, tp[dist, 1, axis] = B, axis 0 = y, 1 = x.
             # GLOBAL (identical on every rank, like prb) and tiny, so it lives on
@@ -344,7 +372,7 @@ class Rec:
         if not gen:
             for ge in self.grads, self.etas:
                 ge["pos"]  = make_pinned([self.ndist, self.local_ntheta, 2], dtype='float32')
-                ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.nobj], dtype='complex64')
+                ge["proj"] = make_pinned([self.local_ntheta, self.nzobj, self.ndobj], dtype='complex64')
             # vars/grads/etas['prb'] all pinned. gradients_cascade uses a small per-k GPU
             # staging buffer to accumulate y[0]*rho_sq across theta chunks for one dist,
             # then D2H's the slot to grads['prb'][k] after each k's @gpu_batch.
@@ -361,7 +389,7 @@ class Rec:
             for k, v in self.etas.items():
                 if k != "obj":      # obj is zeroed at allocation above
                     v[:] = 0
-        self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.nobj], dtype='complex64')
+        self.proj_tmp    = make_pinned([self.ntheta, self.local_nzobj, self.ndobj], dtype='complex64')
 
         # Shrinkage as read from /exchange/shrink (the fit target of
         # init_tp_from_shrink) and the demagnification it implies, per axis
@@ -687,14 +715,17 @@ class Rec:
 
         F3 samples the object plane at
 
-            x = eff_demag*(tx - (n-1)/2) - r_x + (nobj-1)/2
+            x = eff_demag*(tx - (n-1)/2) - r_x + (ndobj-1)/2
 
         and interpolates with a cubic B-spline, i.e. taps floor(x)-1 ..
-        floor(x)+2, so a pixel is fully supported only for 1 <= x < nobj-2 --
-        and likewise in y against nzobj. eff_demag = (1+shrink)/norm_mag is
-        > 1 for every plane but the reference one, so as soon as
-        nobj < n*max(eff_demag) the outer ring of the detector back-maps past
-        the edge of the object grid. What the model predicts there is decided
+        floor(x)+2, so a pixel is fully supported only for 1 <= x < ndobj-2 --
+        and likewise in y against nzobj. (The plane being sampled is the
+        PROJECTION plane, width ndobj, not the object grid -- tomo_upsample
+        coarsens the object behind R without moving this boundary.)
+        eff_demag = (1+shrink)/norm_mag is > 1 for every plane but the
+        reference one, so as soon as
+        ndobj < n*max(eff_demag) the outer ring of the detector back-maps past
+        the edge of the projection grid. What the model predicts there is decided
         by the shift kernel's boundary condition (a mirrored copy of the
         sample), not by the sample itself, so fitting those pixels only pushes
         the residual into the probe and the in-grid object. This zeroes their
@@ -709,7 +740,7 @@ class Rec:
         sample as -r_x shifts it -- which is the whole point. Collapsing them to
         one centred rectangle (the worst case over all angles and all ranks, as
         this used to do) costs nothing when the sample barely moves and
-        everything when it does: at 300 px of displacement against nobj = n it
+        everything when it does: at 300 px of displacement against ndobj = n it
         threw away half the detector at every angle to accommodate the two
         extreme ones.
 
@@ -730,6 +761,10 @@ class Rec:
         """
         margin = float(getattr(self, 'mask_oob_margin', 2.0))
         enabled = bool(getattr(self, 'mask_oob', True))
+        # ndobj is the PROJECTION width (nobj*tomo_upsample).  Same rationale as
+        # margin above: this method is called unbound from hand-built stubs
+        # (tests, notebooks) that only carry the object width.
+        ndobj = int(getattr(self, 'ndobj', self.nobj))
 
         if not enabled:
             self.mask_1d[:] = 1
@@ -757,7 +792,7 @@ class Rec:
 
         for k in range(self.ndist):
             my = _axis(ay, ed[k, :, 0], pos[k, :, 0], self.nzobj)   # [ntheta, nz]
-            mx = _axis(ax, ed[k, :, 1], pos[k, :, 1], self.nobj)    # [ntheta, n]
+            mx = _axis(ax, ed[k, :, 1], pos[k, :, 1], ndobj)   # [ntheta, n]
             self.mask_1d[k, :, :self.nz] = my
             self.mask_1d[k, :, self.nz:] = mx
             for m, o in ((my, 0), (mx, 2)):
@@ -796,8 +831,8 @@ class Rec:
             mean = stat[0] / np.maximum(stat[3], 1)
             ed_max = gl[:2 * self.ndist].reshape(self.ndist, 2)
             r_max  = gl[2 * self.ndist:].reshape(self.ndist, 2)
-            cx, cy = (self.nobj - 1) * 0.5, (self.nzobj - 1) * 0.5
-            hx = min(cx - 1.0, (self.nobj - 3) - cx)
+            cx, cy = (ndobj - 1) * 0.5, (self.nzobj - 1) * 0.5
+            hx = min(cx - 1.0, (ndobj - 3) - cx)
             hy = min(cy - 1.0, (self.nzobj - 3) - cy)
             for k in range(self.ndist):
                 # what one centred rectangle over the global worst case would keep
@@ -817,7 +852,7 @@ class Rec:
                 f"-- or with a run made before the mask went per-angle.")
             if mean.mean() < 0.999:
                 logger.warning(
-                    f"data mask: nobj={self.nobj} < n*max(eff_demag)="
+                    f"data mask: ndobj={ndobj} < n*max(eff_demag)="
                     f"{self.n * ed_max.max():.0f}, or the sample moves too far "
                     f"across it; the discarded pixels are real measurements that "
                     f"only a larger object grid can use.")
@@ -1575,7 +1610,7 @@ class Rec:
     @nvtx.annotate("F3", color="green")
     def F3(self, x):
         """In: (x31, x32, x33, x34)  Out: (x21,x22). Per-dist; uses self._dist_idx."""
-        x31, x32, x33, x34 = x  # x32: [chunk, nzobj, nobj] dist-agnostic, x33/x34: [chunk, 2]
+        x31, x32, x33, x34 = x  # x32: [chunk, nzobj, ndobj] dist-agnostic, x33/x34: [chunk, 2]
         c   = self.cl_shift.coeff_cached(x32)
         x22 = self.cl_shift.curlySc(c, x33, x34)
         return [x31, x22]

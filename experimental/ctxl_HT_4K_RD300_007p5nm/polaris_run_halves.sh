@@ -24,14 +24,20 @@
 #
 # PREREQUISITES
 #
-#   * steps15 has already run -- this script does NOT run it.  Both halves read
-#     the same <pfile>_rec/<pfile>.h5 and the same Paganin+FBP initial object.
+#   * steps15 has already run WITH tomo_upsample=2 -- this script does NOT run
+#     it.  Both halves are the tomo_upsample=2 arm (object x/y grid half the
+#     projection plane, nobj 632/1264/2528), start fresh at bin 2, and so read
+#     /exchange/obj_init_re{paganin}_2_u2, which only a steps15 pass with
+#     tomo_upsample=2 writes.  Compare them against the u2 full run in
+#     <pfile>_rec6_u2, not against the tomo_upsample=1 <pfile>_rec6.
 #   * the full ladder has already run, and
 #     <pfile>_rec6/checkpoints/checkpoint_1504.h5 exists.  That is where the
-#     frozen positions come from; every one of the six configs names it.
+#     frozen positions come from; every one of the six configs names it.  Those
+#     positions are detector-plane, so the u1 arm's checkpoint is a valid source
+#     for them even though these ladders reconstruct at tomo_upsample=2.
 #
 # Outputs go to <pfile>_rec6_p0 and <pfile>_rec6_p1, both separate from the
-# full run's <pfile>_rec6.
+# full runs' <pfile>_rec6 and <pfile>_rec6_u2.
 #
 # Cost: half the projections is a little under half the full ladder, which took
 # 0.71 + 0.66 + 2.78 h on 2 nodes.  Both halves together fit in ~5 h; walltime

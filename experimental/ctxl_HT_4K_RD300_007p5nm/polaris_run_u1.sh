@@ -5,29 +5,22 @@
 #PBS -l filesystems=home:eagle
 #PBS -l walltime=18:00:00
 #PBS -q preemptable
-#PBS -N ctxl0075
+#PBS -N ctxl0075u1
 #PBS -j oe
 # ===========================================================================
 # ctxl cortex tissue, 4-distance HT, +-300 px random displacement, 7.5 nm
 # voxels -- ESRF ID16A 2026-08-29..31, proposal ihls3888.
-# THE WHOLE PIPELINE IN ONE JOB:
+# THE tomo_upsample=1 ARM of the ladder -- the historical geometry, object x/y
+# grid == projection plane, writing ..._rec6.  The default polaris_run.sh runs
+# the tomo_upsample=2 arm into ..._rec6_u2; the two are compared head to head.
 #
-#     qsub polaris_run.sh
+#     qsub polaris_run_u1.sh
 #
-# THIS IS THE tomo_upsample=2 ARM: the object x/y grid is half the projection
-# plane (632/1264/2528 against 1264/2528/5056), and it writes ..._rec6_u2.  The
-# historical tomo_upsample=1 arm is polaris_run_u1.sh -> ..._rec6.  The two are
-# run side by side and compared; they must not share an output directory,
-# because their checkpoints have incompatible object shapes and share the
-# iteration numbering.
-#
-# The steps15 line below is what makes the u2 arm possible: config_steps15.conf
-# now carries tomo_upsample=2, so step 5's FBP init is written on the object
-# grid and tagged /exchange/obj_init_re{paganin}_{bin}_u2.  The u1 arm reads the
-# untagged datasets, which the earlier steps15 run already wrote, so
-# polaris_run_u1.sh does not re-run steps15.  If steps 1-4 are already done,
-# set start_step=5 in config_steps15.conf before submitting this -- only step 5
-# has to be repeated.
+# steps15 is NOT re-run here: this arm reads the untagged
+# /exchange/obj_init_re60_2, which the existing steps15 output already holds.
+# (The u2 arm needs the _u2-tagged datasets, which is why config_steps15.conf
+# carries tomo_upsample=2 and steps15 has to be re-run once, with start_step=5,
+# before the u2 bin-2 stage.)
 #
 # To run only part of it -- steps 1-5 already done, or resuming after a
 # preemption -- COMMENT OUT the mpiexec lines at the bottom that you do not
@@ -99,19 +92,19 @@ fi
 # --- the pipeline; comment out a line to skip that stage ---------------------
 
 # EDF->HDF5, preprocess, shifts, binned data, Paganin+FBP for bins 2,1,0
-echo "=== steps15 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+# echo "=== steps15 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
 
 # bin 2: 4x4  n=1024   (iteration range: start_iter/niter in the config)
 echo "=== bin2 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_u1_bin2.conf" || exit $?
 
 # bin 1: 2x2  n=2048   resumes from the checkpoint the bin-2 run left
 echo "=== bin1 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_u1_bin1.conf" || exit $?
 
 # bin 0: 1x1  n=4096   resumes from the checkpoint the bin-1 run left
 echo "=== bin0 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_u1_bin0.conf" || exit $?
 
 echo "=== ALL STAGES DONE $(date) ==="

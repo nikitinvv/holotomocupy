@@ -103,6 +103,11 @@ def parse_args(config_file):
     args.n           = cfg.int("n")
     args.nzobj       = cfg.int("nzobj")
     args.nobj        = cfg.int("nobj")
+    # Detector oversampling of the Radon transform: the projection plane is
+    # nobj*tomo_upsample wide while the object stays nobj wide, so the object
+    # can sit on a 2x coarser x/y grid than the data.  1 (default) is the
+    # historical behaviour, R: [nzobj, nobj, nobj] -> [ntheta, nzobj, nobj].
+    args.tomo_upsample = cfg.int("tomo_upsample", fallback=1)
     args.ndist       = cfg.int("ndist")
     args.paganin     = cfg.int("paganin")
     args.mask        = cfg.float("mask")
@@ -292,6 +297,9 @@ def parse_args_steps15(config_file):
     # them and keep working off the fallbacks above.
     args.tiles       = cfg.list ("tiles", str)
     args.nzobj       = cfg.int  ("nzobj",       fallback=0)
+    # See parse_args: step 5's FBP has to build its initial object on the same
+    # coarse grid step6 will reconstruct on.
+    args.tomo_upsample = cfg.int("tomo_upsample", fallback=1)
     args.bin         = cfg.int  ("bin",         fallback=0)
     args.ntheta_rec  = cfg.int  ("ntheta_rec",  fallback=0)
     args.nobj_tile   = cfg.int  ("nobj_tile",   fallback=0)

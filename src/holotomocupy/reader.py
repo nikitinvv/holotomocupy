@@ -150,7 +150,8 @@ class Reader:
                  st_obj, end_obj, nzobj, nobj,
                  st_theta, end_theta, ntheta,
                  ndist, nz, n,
-                 paganin, rotation_center_shift, start_theta, bin):
+                 paganin, rotation_center_shift, start_theta, bin,
+                 tomo_upsample=1):
         self.in_file   = in_file
         self.comm      = comm
         self.rank      = comm.Get_rank()
@@ -167,6 +168,13 @@ class Reader:
         self.paganin   = paganin
         self.rotation_center_shift = rotation_center_shift
         self.bin       = bin
+        # Step 5 writes its FBP init on the OBJECT grid, nobj_bin/tomo_upsample
+        # wide, and tags the dataset with the factor so the tomo_upsample=1 and
+        # =2 variants can live side by side in one _obj.h5.  Factor 1 keeps the
+        # historical untagged name, so every existing ladder reads what it always
+        # did.
+        self.tomo_upsample = int(tomo_upsample)
+        self.ups_tag = '' if self.tomo_upsample == 1 else f'_u{self.tomo_upsample}'
 
         # Read acquisition parameters once and store as attributes
         with h5py.File(in_file, 'r', driver="mpio", comm=self.comm) as fid:
@@ -190,8 +198,8 @@ class Reader:
             obj_file = self.in_file
         logger.info(f"read object from {obj_file}")
         with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
-            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
-            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
+            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}{self.ups_tag}']
+            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}{self.ups_tag}'
             obj_ds_im = fid[im_key] if im_key in fid else None
             nzobj0, nobj0 = obj_ds_re.shape[:2]
             stz  = nzobj0 // 2 - self.nzobj // 2
@@ -374,13 +382,30 @@ class Reader:
         # which can exceed tens of GB per rank for large objects.
         # Now we process one z-batch at a time: peak extra RAM ≈ 2 × batch × nobj0² × 8 B.
         with h5py.File(path, 'r', driver="mpio", comm=self.comm) as f:
-            st_src  = self.st_obj  // scale
-            end_src = self.end_obj // scale
-            n0      = self.end_obj - self.st_obj
-            nz_src  = max(1, end_src - st_src)
             ds_re   = f['obj_re']
             ds_im   = f['obj_im']
+            nzobj0  = ds_re.shape[0]
             nobj0   = ds_re.shape[1]
+            # `scale` above is the DETECTOR scale, inferred from the probe, and
+            # stays right for prb and pos.  The object's z and x/y scales are
+            # read from the object dataset instead, because with tomo_upsample
+            # they can differ from it and from each other: going bin 1 -> bin 0
+            # at tomo_upsample 2 the probe doubles and the object's z doubles,
+            # but its x/y grid is already at the target width and must not be
+            # repeated.  On every ladder without tomo_upsample all three are
+            # equal and this is exactly what the single `scale` did.
+            scale_z  = max(1, self.nzobj // nzobj0)
+            scale_xy = max(1, self.nobj  // nobj0)
+            st_src  = self.st_obj  // scale_z
+            end_src = self.end_obj // scale_z
+            n0      = self.end_obj - self.st_obj
+            nz_src  = max(1, end_src - st_src)
+            if self.rank == 0 and (scale_z != scale or scale_xy != scale):
+                logger.warning(
+                    f"checkpoint {os.path.basename(path)}: obj "
+                    f"[{nzobj0}, {nobj0}, {nobj0}] -> [{self.nzobj}, {self.nobj}, "
+                    f"{self.nobj}] (z x{scale_z}, x/y x{scale_xy}); "
+                    f"prb/pos x{scale}")
 
             if out_obj is None:
                 out_obj = np.empty((n0, self.nobj, self.nobj), dtype='complex64')
@@ -402,9 +427,9 @@ class Reader:
                     _im = ds_im[st_src + src_i0:st_src + src_i1].astype('float32')
                     blk.imag[:] = _im; del _im
 
-                if scale > 1:
+                if scale_xy > 1:
                     for axis in [2, 1]:
-                        blk = np.repeat(blk, scale, axis=axis)
+                        blk = np.repeat(blk, scale_xy, axis=axis)
 
                 idx_local = np.clip(
                     (np.arange(i0, i1) * nz_src / n0).astype(np.intp), 0, nz_src - 1

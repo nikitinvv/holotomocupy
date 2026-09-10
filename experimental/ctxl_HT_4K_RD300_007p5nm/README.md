@@ -587,6 +587,11 @@ the signal is a 3-lobed bearing runout — and the rigid part is absorbed by
 
 ## `nobj` = 5056
 
+(This section is about the **projection** grid, 5056 at bin 0 and 5056/2^bin
+below it. The object's x/y grid is half of that at every level — see
+`tomo_upsample` in **The three step-6 levels** below — but everything derived
+here, the margin included, is a projection-plane quantity and is unaffected.)
+
 The grid has to hold the sample plus the whole displacement sweep:
 4096 + 2 × 471 = 5038, rounded up to **5056 = 79 × 64**. It bins cleanly over
 all three levels (2528, 1264), and leaves (5056 − 4096)/2 = 480 px of margin per
@@ -750,11 +755,104 @@ The three step-6 levels share one `path_out`, so each seeds itself from the
 previous level's checkpoint via `start_iter` and `Reader.read_checkpoint`
 upsamples obj/prb/pos onto the finer grid. Iteration numbering is cumulative:
 
-| config | bin | n | nobj | start_iter | niter |
-|---|---|---|---|---|---|
-| `config_step6_bin2.conf` | 2 (4×4) | 1024 | 1264 | 0 | 1025 |
-| `config_step6_bin1.conf` | 1 (2×2) | 2048 | 2528 | 1024 | 1281 |
-| `config_step6_bin0.conf` | 0 (1×1) | 4096 | 5056 | 1280 | 1537 |
+| config | bin | n | obj x/y | proj | start_iter | niter |
+|---|---|---|---|---|---|---|
+| `config_step6_bin2.conf` | 2 (4×4) | 1024 | 632 | 1264 | 0 | 1025 |
+| `config_step6_bin1.conf` | 1 (2×2) | 2048 | 1264 | 2528 | 1024 | 1281 |
+| `config_step6_bin0.conf` | 0 (1×1) | 4096 | **2528** | 5056 | 1280 | 1537 |
+
+**Every level sets `tomo_upsample=2`,** with a parallel `tomo_upsample=1` ladder
+in `config_step6_u1_bin*.conf` for comparison (see **The two arms** below).
+`tomo_upsample=2` decouples the object grid from the
+projection grid: the object's x/y is half the projection width, so at bin 0 `R`
+maps `[5056, 2528, 2528] → [4000, 5056, 5056]`. The projection plane is
+bit-for-bit the grid it always was — same FOV, same sampling, same centre — so
+`pos`, `rotation_center_shift`, `eff_demag`, the probe, `Propagation` and the
+whole cascade below `fwd_tomo` are untouched, and the fit still sees the full
+detector at every level. What changes is that the object costs a quarter of the
+memory: bin 0's would otherwise be 5056³. The level-to-level handoff stays a
+plain ×2 in obj z, obj x/y, prb and pos, exactly as before.
+
+The volume is anisotropic during the run — z voxel `v`, x/y voxel `2v`. That is
+deliberate: z costs nothing extra in the Radon transform. `bin_z.py` averages
+the bin-0 result down to an isotropic 2528³ afterwards, outside the
+reconstruction:
+
+```bash
+mpiexec -n 8 python bin_z.py --iter 1536 --zbin 2   # -> checkpoint_1536_zbin2.h5
+python extract_tiff.py --iter 1536 ...              # point it at the binned file
+```
+
+`lam_laplacian` **must stay 0 at every level** now: its stencil assumes
+isotropic voxels and would penalise z gradients 4× too strongly against a
+z:x = 1:2 object. `Rec` warns if both are on. Bins 2 and 1 previously ran it at
+5e-5 and 1.25e-5; those levels now have no Laplacian term at all. Restoring it
+would need per-axis weights in `LaplacianTerm`, which is not implemented. The
+`tomo_upsample=1` arm has it at 0 too, even though its voxels are isotropic and
+the stencil would be valid there — the two arms are only comparable if they
+regularise the same way.
+
+The detector frequencies above the object grid's Nyquist -- which only exist
+once the projection plane is finer than the object -- **wrap**: the index is
+taken mod 2n, so the object is modelled as a delta comb on its own grid and
+those bins carry aliased replicas of the low frequencies.  That is what
+`~/APS_PXM/tomo_usfft` does, and this kernel matches it.  The alternative --
+model the object as band-limited to its own grid and zero those bins -- is
+carried as a commented-out block in `gather` in `cuda_kernels.py`, exactly as it
+is in the reference, so it can be restored by uncommenting.  The choice is not
+free: it changes `fbp`, where `||R fbp(d) - d||/||d||` is 5.911 under the
+delta-comb model against 0.341 under the band-limited one (the ramp filter runs
+out to `|f| = nd/(2n)` and `RT` scatters the aliased outer bins back onto real
+low frequencies).  BH never calls `fbp`; step 5's initial guess does.
+
+Two test scripts cover the option, both single-GPU and file-free:
+`tests/tomo/test_tomo_nd.py` for the operator (`nd = n` is bit-identical to the
+un-parameterised `R`, `R`/`RT` stay adjoint at `nd = 2n`, and `R`'s *values* are
+`nd`-independent — which is why `norm_const` needs no new factor and obj carries
+over from bin 1 unscaled), and `tests/tomo/test_upsample_e2e.py` for the
+plumbing: a synthetic 2-distance step-6 run reconstructed from the same data at
+`nobj=160, upsample=1` and at `nobj=80, upsample=2`, plus the bin1 → bin0
+checkpoint read (obj z ×2, obj x/y ×1, prb ×2, pos ×2).
+
+The half-set ladders carry the same `tomo_upsample=2` at all three levels, so
+the three volumes — full, p0, p1 — share one grid and are directly comparable.
+
+**Step 5 has to be re-run for this.** `Reader.read_obj` centre-crops
+`/exchange/obj_init_re60_2` onto the requested grid, it does not downsample, so
+an `obj_init` written at 1264³ would be cropped to its middle 632² and half the
+field of view would be lost. `config_steps15.conf` therefore carries
+`tomo_upsample=2` as well, and step 5 must be re-run (`start_step=5`) before a
+bin-2 run with `start_iter=0`. Bins 1 and 0 resume from checkpoints and never
+read `obj_init`.
+
+### The two arms — `tomo_upsample=2` and `tomo_upsample=1`
+
+Both are set up to run, at all three bin levels, so they can be compared head to
+head. They differ only in the object x/y grid; everything on the detector side
+is identical.
+
+| | `tomo_upsample=2` | `tomo_upsample=1` |
+|---|---|---|
+| configs | `config_step6_bin{2,1,0}.conf` | `config_step6_u1_bin{2,1,0}.conf` |
+| PBS script | [`polaris_run.sh`](polaris_run.sh) | [`polaris_run_u1.sh`](polaris_run_u1.sh) |
+| `path_out` | `<pfile>_rec6_u2` | `<pfile>_rec6` |
+| object x/y (bin 2/1/0) | 632 / 1264 / 2528 | 1264 / 2528 / 5056 |
+| projection width | 1264 / 2528 / 5056 | 1264 / 2528 / 5056 |
+| voxels | z `v`, x/y `2v` | isotropic |
+| bin-2 `obj_init` | `/exchange/obj_init_re60_2_u2` | `/exchange/obj_init_re60_2` |
+| `lam_laplacian` | 0 at every level | 0 at every level |
+
+They must not share a `path_out`: the checkpoints have incompatible object
+shapes (2528 vs 1264 x/y at bin 1) and the two ladders use the same cumulative
+iteration numbering, so one would seed itself from the other's file.
+
+`Reader` and `steps15.py` build the same `_u{n}` suffix — empty for factor 1, so
+the u1 arm reads the untagged datasets an earlier steps15 pass already wrote and
+`polaris_run_u1.sh` has its `steps15` line commented out. Only the u2 arm needs
+step 5 repeated, and only step 5 (`start_step=5`); `polaris_run.sh` runs it.
+
+Positions, probe and `pos` are detector-plane in both arms, so a checkpoint from
+either can be used as the `pos_checkpoint` source for the half-set ladders.
 
 (Both trees now carry these same numbers: 1024 iterations at bin 2, then 256
 each at bin 1 and bin 0. `polaris_run.sh` does not repeat them in its comments,
@@ -777,10 +875,17 @@ why the script asks for 18 h. Trim it once the first `.out` file exists.
 |---|---|
 | `<pfile>.h5` (4000 × 4096² × 2 B × 4 dist) | 537 GB |
 | bin-0 pdata (× 4 B × 4 dist) | 1074 GB |
-| `<pfile>_obj.h5` (5056³ × 4 B × 2) | 1034 GB |
+| `<pfile>_obj.h5` (bin 2 only, both arms) | 20 GB |
 
-≈2.7 TB, against 240 TB free on eagle as of 2026-08-31. Set
+≈2.5 TB, against 240 TB free on eagle as of 2026-08-31. Set
 `start_level_rec=1` to stop at the 2×2 level if that changes.
+
+`<pfile>_obj.h5` is small because `start_level_rec=2`: step 5 writes a
+Paganin+FBP init only for bin 2, and only bin 2 ever reads one (bins 1 and 0
+resume from checkpoints). That is 1264 × 632² × 4 B × 2 = 4 GB for the
+`tomo_upsample=2` arm plus 1264³ × 4 B × 2 = 16 GB for the `tomo_upsample=1`
+arm. Lowering `start_level_rec` to 0 would add 5056 × 2528² (258 GB) and
+2528 × 1264² (32 GB) per arm.
 
 ## Half-set runs — even and odd projections
 
@@ -912,6 +1017,8 @@ The driver's other settings do corroborate the rest of the config:
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
 | [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
 | [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage; comment out what you do not want |
+| [`config_step6_u1_bin{2,1,0}.conf`](config_step6_u1_bin2.conf) | the same ladder at `tomo_upsample=1`, writing `_rec6` |
+| [`polaris_run_u1.sh`](polaris_run_u1.sh) | PBS job for the `tomo_upsample=1` arm; `steps15` commented out |
 | [`config_step6_p{0,1}_bin{2,1,0}.conf`](config_step6_p0_bin2.conf) | the same ladder on even / odd projections, positions frozen — see Half-set runs |
 | [`polaris_run_halves.sh`](polaris_run_halves.sh) | PBS job for the two half-set ladders, six `mpiexec` lines |
 | [`show_geometry.py`](show_geometry.py) | prints the derived geometry and the per-level config blocks |

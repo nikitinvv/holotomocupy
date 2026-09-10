@@ -10,6 +10,7 @@ import cupy.fft
 
 from .propagation import Propagation
 from .shift import Shift
+from .shift_fft import ShiftFFT
 from .chunking import Chunking
 from .utils import (make_pinned, mshow, mshow_polar, mshow_pos, redot,
                     reprod, timer, write_tiff)
@@ -44,6 +45,8 @@ class RecNFP:
         # proj/obj arrays are complex64. A subclass wanting a real-valued
         # vars['proj'] can flip this to 'float32' around alloc_arrays().
         self.obj_dtype = 'complex64'
+
+        self.shift_type = getattr(args, 'shift_type', 'cubic')
 
         # cascade: F0 ◦ F1 ◦ F2 ◦ F3
         self.F      = [self.F0,      self.F1,      self.F2,      self.F3]
@@ -81,10 +84,25 @@ class RecNFP:
             'pos':  args.rho[2]**2,
         }
 
+        # args.estimate_rho asks for a coordinate search on rho[prb, pos]
+        # before the real loop (estimate_rho_coord).  Defaults keep every
+        # caller that predates the knob on the fixed-rho path.
+        if not hasattr(self, 'estimate_rho'):
+            self.estimate_rho = False
+        if not hasattr(self, 'rho_estimate_niter'):
+            self.rho_estimate_niter = 16
+        if not hasattr(self, 'rho_trial_error_step'):
+            self.rho_trial_error_step = -1
+
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
-        self.cl_shift    = Shift(self.n, self.nobj, self.nz, self.nzobj)
+        if self.shift_type == 'fft':
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj)
+        elif self.shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj)
+        else:
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {self.shift_type!r}")
 
         self.alloc_arrays()
 
@@ -121,6 +139,15 @@ class RecNFP:
         self.precalc(vars)
         self.error_debug(vars, -1)
 
+        if self.estimate_rho:
+            self.estimate_rho_coord(vars, grads, etas,
+                                    niter_trial=self.rho_estimate_niter)
+
+        self._iterate(vars, grads, etas, writer)
+        return vars
+
+    def _iterate(self, vars, grads, etas, writer=None):
+        """Main BH iteration loop. Assumes precalc() has already run."""
         self.time_start = time.time()
         for i in range(self.start_iter, self.niter):
             with nvtx.annotate(f"::BH:nfp:{i}"):
@@ -130,7 +157,154 @@ class RecNFP:
                 self.apply_step(vars, etas, alpha)
                 self.log_iter(vars, i, writer)
 
-        return vars
+    def estimate_rho_coord(self, vars, grads, etas, niter_trial=16, max_extend=8):
+        """Coordinate search on rho[prb, pos] over a geometric grid
+        {..., init/2, init, 2*init, ...} centred on the current self.rho_sq.
+
+        The 2-D counterpart of Rec.estimate_rho_coord.  rho here is
+        [proj, prb, pos] and `proj` is the reference scale, so it is left
+        alone exactly as `obj` is in the 3-D search; there is no `tp`.
+
+        For each searched variable in order (prb -> pos; a variable frozen at
+        rho = 0 is skipped, since the geometric grid can never leave zero):
+          - Run three short BH trials at rho = {init/2, init, 2*init}
+              (`init` = the current sqrt(rho_sq[v])).
+          - If the middle wins, keep it.
+          - Else extend up (x2, x4, ...) or down (/2, /4, ...) until improvement
+            stops, capped by max_extend rungs.
+          - Adopt the winning value; move on with the winner baked into `base`.
+
+        Each trial restores vars/grads/etas/table/start_iter to the snapshot
+        taken here, runs `_iterate` for niter_trial iterations silently, and
+        scores with self.min().  A trial that blows up (CUDA / RuntimeError, or
+        a non-finite error) scores inf so the search steps past divergent rho.
+
+        Every score comes out of self.min(), which allreduces, so all ranks see
+        the same numbers and walk the same branches -- the search needs no
+        collective of its own.
+
+        Trial errors are memoised on the full rho vector, so the centre probe
+        of the second coordinate -- the vector that just won the first -- is
+        free.
+
+        Updates self.rho_sq in place and restores the state so the outer BH
+        loop starts clean.  Costs one extra copy of vars (proj dominates) for
+        the snapshot, and 3..(3 + 2*max_extend) trials of niter_trial
+        iterations per coordinate, minus one for the second coordinate.
+        """
+        snap_vars       = {k: v.copy() for k, v in vars.items()}
+        snap_table      = self.table.copy()
+        snap_start_iter = self.start_iter
+        snap_niter      = self.niter
+        snap_error_step = self.error_step
+        snap_ckpt_step  = self.checkpoint_step
+
+        # Silence trial logging / disable checkpoint writes for the duration.
+        self.niter           = niter_trial
+        self.start_iter      = 0
+        # Trials are silent by default; rho_trial_error_step=N logs the error
+        # every N iterations inside each trial, which is the only way to see
+        # whether a bad score is a slow descent or a first-step blow-up.
+        self.error_step      = int(self.rho_trial_error_step)
+        self.checkpoint_step = -1
+
+        def _reset_trial():
+            for k, v in vars.items():
+                v[:] = snap_vars[k]
+            for buf in grads.values(): buf[:] = 0
+            for buf in etas.values():  buf[:] = 0
+            self.table      = pd.DataFrame(columns=["iter", "err", "time"])
+            self.start_iter = 0
+
+        def _run_trial(rho_vec):
+            _reset_trial()
+            self.rho_sq = {'proj': rho_vec[0]**2, 'prb': rho_vec[1]**2,
+                           'pos':  rho_vec[2]**2}
+            try:
+                self._iterate(vars, grads, etas, writer=None)
+                err = float(self.min(vars['prb'], vars['proj'], vars['pos']))
+                if not np.isfinite(err):
+                    err = float('inf')
+            except Exception as e:
+                if self.rank == 0:
+                    logger.warning(f'rho trial {rho_vec} crashed '
+                                   f'({type(e).__name__}: {e}) -> err=inf')
+                err = float('inf')
+            return err
+
+        # Errors keyed by the full rho vector, shared across coordinates: the
+        # winner of prb is exactly the centre probe of pos, so without this the
+        # switch re-runs a trial it already has.
+        trial_cache = {}
+
+        def _coord(base, idx, name, init):
+            seen = {}
+            def probe(val):
+                rv  = list(base); rv[idx] = val
+                key = tuple(rv)
+                if key in trial_cache:
+                    e = trial_cache[key]
+                    seen.setdefault(val, e)
+                    if self.rank == 0:
+                        logger.warning(f'  {name}={val:g}  err={e:.4e} (cached)')
+                    return e
+                e = _run_trial(rv)
+                trial_cache[key] = e
+                seen[val] = e
+                if self.rank == 0:
+                    logger.warning(f'  {name}={val:g}  err={e:.4e}')
+                return e
+            e_c  = probe(init)
+            e_up = probe(init * 2)
+            e_dn = probe(init / 2)
+            if e_c <= e_up and e_c <= e_dn:
+                best = init
+            elif e_up < e_dn:
+                cur_v, cur_e = init * 2, e_up
+                for _ in range(max_extend):
+                    nxt = cur_v * 2
+                    e_nxt = probe(nxt)
+                    if e_nxt >= cur_e: break
+                    cur_v, cur_e = nxt, e_nxt
+                best = cur_v
+            else:
+                cur_v, cur_e = init / 2, e_dn
+                for _ in range(max_extend):
+                    nxt = cur_v / 2
+                    e_nxt = probe(nxt)
+                    if e_nxt >= cur_e: break
+                    cur_v, cur_e = nxt, e_nxt
+                best = cur_v
+            if self.rank == 0:
+                logger.warning(f'  -> best {name}={best:g}')
+            return best, sorted(seen.items())
+
+        base = [float(np.sqrt(self.rho_sq[k])) for k in ('proj', 'prb', 'pos')]
+        if self.rank == 0:
+            logger.warning(f'estimate_rho_coord: start from {base}, '
+                           f'niter_trial={niter_trial}')
+
+        # proj stays at whatever it was; prb and (when free) pos get searched.
+        history = {}
+        for idx, name in ((1, 'prb'), (2, 'pos')):
+            if base[idx] > 0:
+                base[idx], history[name] = _coord(base, idx, name, base[idx])
+            else:
+                history[name] = []      # frozen: nothing to scale
+
+        # Restore state so the outer BH loop starts clean.
+        _reset_trial()
+        self.table           = snap_table
+        self.start_iter      = snap_start_iter
+        self.niter           = snap_niter
+        self.error_step      = snap_error_step
+        self.checkpoint_step = snap_ckpt_step
+
+        self.rho_sq = {'proj': base[0]**2, 'prb': base[1]**2, 'pos': base[2]**2}
+        self.rho    = list(base)
+        if self.rank == 0:
+            logger.warning(f'estimate_rho_coord: final rho = {base}')
+        return history
 
     def precalc(self, vars):
         """One-time setup at the start of BH: snapshot initial positions."""

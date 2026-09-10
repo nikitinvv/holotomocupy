@@ -11,6 +11,7 @@ from mpi4py import MPI
 from .tomo import Tomo
 from .propagation import Propagation
 from .shift import Shift
+from .shift_fft import ShiftFFT
 from .chunking import Chunking
 from .extra_terms import LaplacianTerm, PrbfitTerm
 from .utils import make_pinned, mshow_approx, redot, reprod, timer
@@ -145,7 +146,14 @@ class Rec:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_tomo  = Tomo(self.nobj, self.nchunk, self.theta, self.mask)
         self.cl_prop  = Propagation(self.n, self.nz, self.nchunk, self.ndist, wavelength, voxelsize, distance)
-        self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
+        shift_type = getattr(args, 'shift_type', 'cubic')
+        self.shift_type = shift_type
+        if shift_type == 'fft':
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
+        elif shift_type == 'cubic':
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
+        else:
+            raise ValueError(f"shift_type must be 'cubic' or 'fft', got {shift_type!r}")
         if self.lam_laplacian > 0:
             self.cl_lap_term = LaplacianTerm(self.lam_laplacian, self.obj_size,
                                              self.local_nzobj, self.nobj,
@@ -1201,7 +1209,7 @@ class Rec:
         grads['prb'][:] = self.allreduce(grads['prb'])
         # tp is global: every rank computed the contribution of its own angles.
         grads['tp'][:] = cp.asarray(self.allreduce(cp.asnumpy(grads['tp'])))
-        
+
     @timer
     def gradients_cascade(self, vars, grads):
         """Cascade gradient for the main term (Carlsson, 2025).
@@ -1745,7 +1753,12 @@ class Rec:
 
     def vis_debug(self, vars, i, writer=None):
         """Per-iter checkpoint write (pos-error plot bundled in)."""
-        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1) or i <= self.start_iter:
+        if writer is None or not (i % self.checkpoint_step == 0 and self.checkpoint_step != -1):
+            return
+        # On a resumed run, i == start_iter would overwrite the checkpoint we
+        # just read from; on a fresh run (start_iter == 0) iter 0 is a genuine
+        # new state and is saved as checkpoint_0000.
+        if i < self.start_iter or (i == self.start_iter and self.start_iter > 0):
             return
         writer.write_checkpoint(
             vars, i, self.norm_const, pos_init=self.pos_init,

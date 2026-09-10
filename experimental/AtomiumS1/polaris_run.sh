@@ -3,25 +3,31 @@
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
-#PBS -l walltime=12:00:00
+#PBS -l walltime=18:00:00
 #PBS -q preemptable
-#PBS -N y350a006
+#PBS -N AtomS145
 #PBS -j oe
 # ===========================================================================
-# Y350a large random displacement, 6 nm voxels -- ESRF ID16A 2025-06-04.
+# Atomium S1, SINGLE-distance FT, +-300 px random displacement, 4.5 nm voxels
+# -- ESRF ID16A, proposal blc17322, beamtime 20260825, scan _0001.
 # THE WHOLE PIPELINE IN ONE JOB:
 #
 #     qsub polaris_run.sh
 #
 # To run only part of it -- steps 1-5 already done, or resuming after a
 # preemption -- COMMENT OUT the mpiexec lines at the bottom that you do not
-# want, and UNCOMMENT the opt-in ones you do.  Each line ends in `|| exit $?`
-# so a failed stage stops the job instead of letting the next level seed
-# itself from a checkpoint that was never written.
+# want.  Each line ends in `|| exit $?` so a failed stage stops the job
+# instead of letting the next level seed itself from a checkpoint that was
+# never written.
 #
-# Check the eagle quota first: start_level_rec=0 writes a 783 GB object volume
-# and 268 GB of bin-0 projections.  What each stage does, how to resume, the
-# walltimes below and the optional probe: see README.md, "Running it".
+# The three optional diagnostic stages at the very bottom (centre sweep,
+# x-shift fit) stay commented; they are one-off measurements, not part of a
+# reconstruction.  For those the debug queues are enough -- add
+# `-q debug -l select=2 -l walltime=01:00:00` on the qsub line.
+#
+# What each stage does, how to resume one that ran out of walltime, the
+# measured walltimes and disk sizes, and what is and is not corrected: see
+# README.md, "Running it on Polaris".
 # ===========================================================================
 
 # --- user configuration ---
@@ -60,6 +66,12 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 source "${HTC_ENV}"
 echo "python: $(which python)"
 
+# What step 3 is about to read -- shift files, row counts, bin factors, the
+# resulting cshifts_final.  Pure numpy on rank 0's inputs, a few seconds, no
+# GPU; it only prints.  Run it first so a missing or wrongly-scaled shift file
+# shows up here rather than 20 minutes into steps15.
+python "${rec_dir}/check_data_read.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+
 # Drop nodes whose GPUs cannot take a CUDA context.  PBS has no Slurm-style
 # --exclude -- `-l select=` can pin a host but cannot negate one -- so a node
 # that comes up with cudaErrorDevicesUnavailable can only be filtered from
@@ -77,30 +89,32 @@ fi
 
 # --- the pipeline; comment out a line to skip that stage ---------------------
 
-# NFP probe retrieval -- OPT-IN, not part of the default flow.  Uncomment
-# prb_file in config_step6_bin2.conf afterwards.  Do NOT point this at the
-# _NFPwCA_1_ directory; see README.md.
-# echo "=== nfp START $(date) ==="
-# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf" || exit $?
-
-# EDF->HDF5, preprocess, shifts, binned data, Paganin+FBP           not timed
+# shifts, binned data, Paganin+FBP.  config_steps15.conf has start_step=3, so
+# the EDF->HDF5 conversion and the preprocessing are NOT redone -- set
+# start_step=1 if the _rec/<pfile>.h5 has to be rebuilt from the EDFs.
 echo "=== steps15 START $(date) ==="
 mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
 
-# Rotation-centre sweep -- OPT-IN one-off between steps15 and bin2.
-# echo "=== sweep START $(date) ==="
-# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step5_center_sweep.py" "${SCRIPT_DIR}/config_steps15.conf" --start -48 --stop -28 --step 1 || exit $?
-
-# bin 2: 4x4  n=1024  iters    0 -> 512                             ~13 min
+# bin 2: 4x4  n=1024  iters    0 ->1024
 echo "=== bin2 START $(date) ==="
 mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
 
-# bin 1: 2x2  n=2048  iters  512 -> 768                             ~22 min
+# bin 1: 2x2  n=2048  iters 1024 ->1280
 echo "=== bin1 START $(date) ==="
 mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
 
-# bin 0: 1x1  n=4096  iters  768 ->1024                             ~1 h 47 min
+# bin 0: 1x1  n=4096  iters 1280 ->1800
 echo "=== bin0 START $(date) ==="
 mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?
 
 echo "=== ALL STAGES DONE $(date) ==="
+
+# --- optional one-off diagnostics; not part of a reconstruction --------------
+# Run these with -q debug -l select=2 -l walltime=01:00:00 and everything
+# above commented out.
+
+# rotation-centre sweep, needs GPUs (stitch + Paganin per candidate)  24 s
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step5_center_sweep.py" "${SCRIPT_DIR}/config_steps15.conf" --start 3 --stop 23 --step 1
+
+# x and z drift through the volume; its own config, see README.md
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/estimate_xshift_ls.py" "${SCRIPT_DIR}/config_xshift.conf"

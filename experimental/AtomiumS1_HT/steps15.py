@@ -1,21 +1,32 @@
 #!/usr/bin/env python
 """
-Steps 1–3 — Convert EDF→HDF5, preprocess, and combine shifts (MPI + GPU parallel).
+Steps 1-5 — raw frames → HDF5, preprocess, shifts, binned data, Paganin+FBP.
 
-Step 1: read raw EDF projections → parallel HDF5
+Step 1: read the raw projections → parallel HDF5
 Step 2: outlier removal + intensity normalisation (GPU)
 Step 3: combine encoder / RHAPP / motion / 3-D-correction shifts → cshifts_final
+Step 4: binned, stitched projections for every level in range(nlevels)
+Step 5: multi-distance Paganin + FBP initial volume
 
 Launch with:
-    mpirun -n <N> python steps_15.py steps15_Y350a.conf
+    mpirun -n <N> python steps15.py config_steps15.conf
+
+THIS COPY READS FRAMES THROUGH THE LAYOUT, not through fabio.  This scan IS an
+EDF scan, so `lay.read_proj / read_refs / read_darks` end up calling fabio one
+level down and nothing changes -- but going through the layout is what lets the
+same file run on the nxvds scans next door, and it is what makes the `edfinfo`
+flavour work here.  See esrf_layout.py: this folder's frames arrived before the
+NXtomo did, so geometry is taken from the `.info` sidecar instead, and the
+folder is usable from the moment the EDF frames are there.  Rotation angles
+come from `read_angles()` below, which reads the EDF `somega` header field on
+this scan and `sample/rotation_angle` on an nxvds one; the two were checked
+against each other on the 4-distance ctxl_HT scan and agree frame for frame.
 """
 
 import sys
 import re
 import logging
 import h5py
-import fabio
-logging.getLogger('fabio').setLevel(logging.ERROR)
 import glob
 import json
 import os
@@ -34,10 +45,10 @@ from holotomocupy.reader import load_octave_text_mat, load_shrink_from_mats
 from holotomocupy import esrf_meta
 from holotomocupy.utils import *
 
-# Filenames and geometry live in esrf_layout.py next to this script: the 2026
-# "ewoks" scans this folder processes name their flat fields, darks and shift
-# files differently from the 2025 "bliss" scans the rest of experimental/ was
-# written for, and keep their geometry in an NXtomo rather than a bliss HDF5.
+# Filenames, FRAMES and geometry live in esrf_layout.py next to this script.
+# The 2026 scans this folder processes keep their geometry in an NXtomo rather
+# than a bliss HDF5, and this one keeps its pixels there too (virtual dataset
+# -> RAW_DATA/<pfile>/scanNNNN/balor_*.h5); see that module's docstring.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from esrf_layout import Layout
 
@@ -85,6 +96,9 @@ _EDF_HEADER_MAX = 1 << 16
 def find_angle(fname):
     """Rotation angle (deg) of one projection, from its EDF header.
 
+    Only reached on an EDF scan; the nxvds flavour has no per-frame headers and
+    `read_angles` below takes the angles straight out of the NXtomo instead.
+
     Looked up by MOTOR NAME rather than by column index.  The 2025 headers
     carry `motor_mne = dummy somega sx sy sz focus ...` so somega happened to
     be field 3 of the motor_pos line; the 2026 headers carry `motor_mne =
@@ -111,6 +125,21 @@ def find_angle(fname):
             f'{"terminated at " + str(end) + " B" if end >= 0 else "unterminated"}, '
             f'read {len(buf)} B)')
     return float(pos[mne.index('somega')])
+
+
+def read_angles(lay, ids):
+    """Rotation angles (deg) of the projections `ids`, whatever the flavour.
+
+    NXtomo `sample/rotation_angle` and the EDF `somega` header field were
+    checked against each other on the 4-distance scan next door and agree
+    frame for frame, so this is a drop-in replacement for the header read and
+    not a second convention.
+    """
+    if lay.flavour == 'nxvds':
+        return np.asarray(lay.angles(0), dtype='float32')[np.asarray(ids)]
+    fnames = [lay.proj(0, int(i)) for i in ids]
+    with ThreadPoolExecutor() as pool:
+        return np.array(list(pool.map(find_angle, fnames)), dtype='float32')
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +173,8 @@ shrink_nd          = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [nthet
 shrink             = shrink_nd[0]
 eff_magnifications = norm_magnifications[:, None] / (1 + shrink)   # [ndist, 2] (y, x)
 
-# n from actual EDF file size (images are n×n), overrideable via --n
-n0, n1 = fabio.open(lay.refs(0, 0)[0]).data.shape
+# n from the actual detector frame size (images are n×n), overrideable via --n
+n0, n1 = lay.frame_shape(0)
 n = args.n if args.n is not None else n0
 sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
 stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
@@ -171,8 +200,18 @@ nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnificatio
 # cshifts_final, so it has to be typed into rotation_center_shift here AND into
 # all three config_step6_bin*.conf together, and a switch that changed only one
 # of them would silently desynchronise step 5 from step 6.  So this reports and
-# warns, nothing more.  Note the grid is pi/2-padded here (3216, not 4096), so
-# the width must be read out of <pfile>_rec_.info, never assumed.
+# warns, nothing more.  Since 2026-09-08 this scan HAS a <pfile>_/naburec, and
+# it is the source used: rotation_axis_position = 1008.76 -> -29.48 raw px,
+# which is what rotation_center_shift is set to.
+#
+# The PyHST <pfile>_rec_.par is logged only as a cross-check and MUST NOT be
+# used here: it says 1046.598214 -> +44.20, 73.7 raw px away, because it was
+# written before the alignment pass that produced naburec.  esrf_meta.nabu_axis
+# is preferred over pyhst_axis for that reason, and the .par is only fallen back
+# on when there is no naburec at all.  Note his grid may be pi/2-padded (the ctxl_HT scan's
+# is 3216, not 4096), so the width is read from <pfile>_rec_.info, never
+# assumed; here it is 2048 against our 4096, i.e. the 2x2 binning his driver
+# asks for, and esrf_meta multiplies by that bin factor before reporting.
 _nabu = esrf_meta.nabu_axis(path, pfile, voxelsize)
 _pyhst = esrf_meta.pyhst_axis(path, pfile, voxelsize)
 if _nabu is not None and _nabu.get('rcs') is not None:
@@ -190,13 +229,41 @@ if _nabu is not None and _nabu.get('rcs') is not None:
                        f'{abs(_nabu["rcs"] - rotation_center_shift):.4f} raw px; retype it '
                        f'here and in all three config_step6_bin*.conf if nabu is right')
 elif rank == 0:
-    logger.info('rotation axis: no usable naburec/*.conf, using the configured '
-                f'rotation_center_shift = {rotation_center_shift:+.4f}')
+    if _pyhst is not None and _pyhst.get('rcs') is not None:
+        logger.info(f'rotation axis: no naburec/*.conf; PyHST '
+                    f'{os.path.basename(_pyhst["source"])} axis_pos '
+                    f'{_pyhst["axis_pos"]:.6f} on {_pyhst["dim1"]} px, bin '
+                    f'{_pyhst["bin"]:g} -> {_pyhst["rcs"]:+.4f} raw px')
+        if abs(_pyhst['rcs'] - rotation_center_shift) > 0.5:
+            logger.warning(f'rotation_center_shift {rotation_center_shift:+.4f} disagrees '
+                           f'with PyHST {_pyhst["rcs"]:+.4f} by '
+                           f'{abs(_pyhst["rcs"] - rotation_center_shift):.4f} raw px; '
+                           'retype it here and in all three config_step6_bin*.conf '
+                           'if PyHST is right')
+    else:
+        logger.info('rotation axis: no usable naburec/*.conf and no PyHST .par, using '
+                    f'the configured rotation_center_shift = {rotation_center_shift:+.4f}')
+
 
 if rank == 0:
     logger.info(f'path                    = {path}')
     logger.info(f'pfile                   = {pfile}')
     logger.info(f'layout flavour          = {lay.flavour}')
+    # A partial or aborted NXtomo drop demotes the flavour to `edfinfo`; say so
+    # loudly, because the pixels then come from the EDF frames and the geometry
+    # from the .info sidecar rather than from the NXtomo.
+    for _k, _was, _now in getattr(lay, 'nx_relinked', []):
+        logger.info(f'plane {_k + 1} re-linked        : {os.path.basename(_now)} '
+                    f'(the master .nx points here, not at '
+                    f'{os.path.basename(_was)})')
+    for _f in getattr(lay, 'nx_missing', []):
+        logger.warning(f'NXtomo missing          : {os.path.basename(_f)}')
+    for _f, _n in getattr(lay, 'nx_short', []):
+        logger.warning(f'NXtomo too short        : {os.path.basename(_f)} has '
+                       f'{_n} projections, TOMO_N is {lay.ntheta}')
+    if getattr(lay, 'nx_missing', []) or getattr(lay, 'nx_short', []):
+        logger.warning('-> reading pixels from the EDF frames instead '
+                       '(flavour edfinfo); angles come from the somega header')
     logger.info(f'ntheta                  = {ntheta}')
     logger.info(f'energy                  = {energy} keV')
     logger.info(f'detector_pixelsize      = {detector_pixelsize} m')
@@ -234,9 +301,7 @@ else:
     logger.info('Step 1: converting EDF files to HDF5...')
 
     # Angles: each rank reads its own subset in parallel, then rank 0 gathers
-    local_fnames = [lay.proj(0, int(id)) for id in local_ids]
-    with ThreadPoolExecutor() as pool:
-        local_theta = np.array(list(pool.map(find_angle, local_fnames)), dtype='float32')
+    local_theta = read_angles(lay, local_ids)
 
     all_theta_parts = comm.gather(local_theta, root=0)
     if rank == 0:
@@ -265,16 +330,27 @@ else:
 
         for k in range(ndist):
             if rank == 0:
+                white0 = lay.read_refs(k, 0, nref)
+                white1 = lay.read_refs(k, ntheta, nref)
+                if len(white1) == 0:
+                    # An aborted scan stops before the end-of-scan flats.  Step
+                    # 2 averages the two batches, so duplicating the start batch
+                    # keeps that arithmetic well defined; it costs the drift the
+                    # end flats would have carried, which is one more reason not
+                    # to reconstruct an aborted scan.
+                    logger.warning('step1: no end-of-scan flats at distance '
+                                   f'{k+1}; reusing the start batch')
+                    white1 = white0
+                dark = lay.read_darks(k, ndark)
                 for id in range(nref):
-                    white0_ds[k][id] = fabio.open(lay.ref(k, id, 0)).data[sty:endy, stx:endx]
-                    white1_ds[k][id] = fabio.open(lay.ref(k, id, ntheta)).data[sty:endy, stx:endx]
-                for id, dfile in enumerate(lay.darks(k, ndark)):
-                    dark_ds[k][id]   = fabio.open(dfile).data[sty:endy, stx:endx]
+                    white0_ds[k][id] = white0[id][sty:endy, stx:endx]
+                    white1_ds[k][id] = white1[id][sty:endy, stx:endx]
+                for id in range(len(dark)):
+                    dark_ds[k][id]   = dark[id][sty:endy, stx:endx]
 
             norms = np.empty(len(local_ids), dtype='float64')
             for ii, id in enumerate(local_ids):
-                fname = lay.proj(k, int(id))
-                frame = fabio.open(fname).data[sty:endy, stx:endx]
+                frame = lay.read_proj(k, int(id))[sty:endy, stx:endx]
                 data_ds[k][id] = frame
                 norms[ii] = np.linalg.norm(frame)
                 if ii%100==0:
@@ -451,7 +527,7 @@ def driver_bin_factor(path, pfile):
     if not os.path.exists(mfile):
         return 1, f'no driver at {mfile}, assuming 1'
     with open(mfile, 'r', errors='replace') as f:
-        hits = re.findall(r'^[^%#\n]*?\bbin_factor\s*=\s*([0-9]+)\s*;',
+        hits = re.findall(r'^[^%#\n]*?\bbin_factor\s*=\s*([0-9]+)\s*(?:;|(?:[%#].*)?$)',
                           f.read(), re.M)
     if not hits:
         return 1, f'no bin_factor in {mfile} (holotomo_slave.m defaults to 1)'
@@ -480,6 +556,19 @@ if rank == 0:
             # the commanded random displacement in detector pixels, ntheta rows
             # (plus the retakes, which are dropped here).
             _sfile = lay.shift_source(k)
+            if not os.path.exists(_sfile):
+                # This is the FIRST term of shifts_final and there is nothing
+                # else in the tree it can be derived from -- rhapp is the
+                # inter-plane residual on top of it, and correct_motion is the
+                # drift on top of that.  Running without it would silently
+                # reconstruct with a zero displacement sweep, so stop.
+                logger.error(f'Step 3: commanded random displacement not found: {_sfile}')
+                logger.error('Step 3: this file is written by ESRF alongside the NXtomo. '
+                             'If <pfile>/projections/ does not exist yet, nxtomomill has '
+                             'not run on this scan -- wait for it; there is no local '
+                             'substitute.  Steps 1-2 can be run in the meantime with '
+                             'start_step=1 and this stage will pick up where they left off.')
+                raise SystemExit(2)
             logger.info(f'Step 3: reading shifts      from {_sfile}')
             shifts[:, k] = np.loadtxt(_sfile, dtype='float32')[:ntheta]
 
@@ -519,7 +608,6 @@ if rank == 0:
                                f'so this offsets every distance')
         else:
             logger.info('Step 3: no reference_motion.mat, reference plane unchecked')
-
         # --- RHAPP inter-plane shifts (from Peter's MATLAB pipeline) ---
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
         if not os.path.exists(_rhapp_path):
@@ -612,7 +700,6 @@ if rank == 0:
                         if _d > 0.05:
                             logger.warning(f'Step 3: motion {_lbl} disagrees with '
                                            f'reference_motion.mat by {_d:.4f} object px')
-
         # --- 3-D tomographic correction shifts ---
         # find_drop_file looks one level deeper when the outer path is empty:
         # a drop landing in <pfile>_/<pfile>_/ would otherwise be read as zeros.
@@ -655,7 +742,7 @@ if rank == 0:
                         f'x ptp {np.ptp(raw_3d[:, 1]):.3f}  mean {raw_3d[:, 1].mean():+.4f}')
             correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
         else:
-            logger.info(f'Step 3: correct3D file not found, using zeros')
+            logger.info('Step 3: correct3D file not found, using zeros')
             correct3d_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
 
         # --- Sum all sources and save ---

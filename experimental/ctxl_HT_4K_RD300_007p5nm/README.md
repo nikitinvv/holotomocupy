@@ -26,8 +26,8 @@ been reconstructed; every number below was either measured from the raw data on
 | voxel size | **7.500 nm** | 20 nm | 6.000 nm |
 | random displacement | ±300 px | none | ±300 px |
 | `nobj` | **5056** | 4608 | 4736 |
-| `rotation_center_shift` | **−19.22 px** (weak, refine it) | −10.386 px | −37.50 px |
-| `paganin` | **20** | 60 | 40 |
+| `rotation_center_shift` | **−15.77 px** (from ESRF's nabu) | −10.386 px | −37.50 px |
+| `paganin` | **60** | 60 | 40 |
 | `correct_motion.txt` | **yes, from ESRF** | yes | estimated locally |
 | shrinkage correction | none — *measured* as absent | `rho[tp]` non-zero | none — measured as absent |
 
@@ -78,7 +78,7 @@ Step 3 combines four sources. Three of the four are present:
 | source | file | present? |
 |---|---|---|
 | random displacement | `<pfile>/projections/<pfile>_000k.txt` | **yes**, 4003 rows per plane |
-| inter-plane (RHAPP) | `<pfile>_/rhapp.mat` | **yes**, 2 × 4 × 4003 |
+| inter-plane (RHAPP) | `<pfile>_/rhapp.mat` | **yes**, 2 × 4 × 4003 — *in 2×2-binned px, see below* |
 | slow drift | `<pfile>_2_/correct_motion.txt` | **yes**, from ESRF |
 | 3-D tomographic | `<pfile>_/correct_correct3D.txt` | no → step 3 uses zeros |
 
@@ -87,6 +87,48 @@ every frame — consecutive frames jump the whole range, which is the point of
 the scheme. In the object frame that is ±300 px at plane 1 and ±471 px at
 plane 4 (300/0.63662), i.e. ±3.53 µm of sample motion. `nobj` is sized for it;
 see below.
+
+**RHAPP is in binned pixels, and step 3 now scales for it.** Peter's driver
+`ht_<pfile>.m` sets `bin_factor=2`, so his pipeline measured the inter-plane
+registration on a 2×2-binned detector grid and `rhapp.mat` is in *those*
+pixels. Every other shift source here is in raw detector pixels. Step 3
+therefore multiplies rhapp by `rhapp_bin` (config, pinned to 2; `0` reads
+`bin_factor` out of the driver automatically) before summing the four sources.
+
+This scan is the first place it matters. `holotomo_slave.m` defaults
+`bin_factor` to 1, every other driver in the tree leaves it unset, and the
+2025 scans' rhapp offsets are small enough to hide the error anyway
+(`AtomiumL1_HT` `[0, 9.6, 3.7, 6.3]` px, `YY037A` `[0, −3.3, −5.8, −18.6]` px).
+This scan's are `[0, 41.9, 81.4, 183.6]` px unscaled — so a factor of two is
+92 px of misregistration at plane 4, and the 6-distance `20260516/ctxl` scan
+reaches 316 px.
+
+It was measured two independent ways before the code was changed:
+
+* **From the data, with no shift file involved.** Resample the four planes of
+  one projection onto a common object grid and cross-correlate *adjacent*
+  pairs — adjacent because planes 1 and 4 are 1.57× apart in magnification and
+  their Fresnel fringes no longer match well enough to correlate. Input is
+  `/exchange/pdata{k}_1`, which is flat-corrected and amplitude-matched but
+  **unshifted**. Over 24 angles, the residual left after removing the known
+  random displacement is **1.79 / 1.83 / 1.98 ×** the rhapp increment for pairs
+  1–2 / 2–3 / 3–4 (robust median; MAD 0.22 on the two well-conditioned pairs),
+  and the correlation peak sits at the ×2 prediction rather than the ×1
+  prediction in **69 of 72** angle-pairs. The three pairs have very different
+  magnification ratios (0.959 / 0.859 / 0.773) and very different rhapp
+  increments (22 / 18 / 50 px), so a resampling-centre artefact — which would
+  scale with `1 − ratio` — cannot produce this.
+* **From the reconstruction.** Step 6 at bin 2 with `rho[pos]` free walked the
+  plane-2 positions from the input spacing out to **2.07×** it over 288
+  iterations and then plateaued (2.019 → 2.063 → 2.071 over the last three
+  checkpoints), with planes 3 and 4 following in proportion to how far each had
+  to travel. With rhapp scaled the input offsets become
+  `[0, 86.7, 163.2, 365.4]` px, and 86.7 is exactly where plane 2 stopped.
+
+The second one is also the cost of *not* fixing it: plane 4 was moving 9.4 px
+per 32 iterations and needed another ~130, i.e. ~900 more iterations than the
+512 bin 2 has, so it would have handed bin 1 a geometry that was still ~120 px
+wrong.
 
 **The drift, and one disagreement worth knowing about.** Unlike
 `../Y350a_largedisp_006nm`, ESRF supplied `correct_motion.txt` for this scan, so
@@ -151,6 +193,25 @@ In the figure the measured block displacements (blue) are ~0.5–1 px and point
 in random directions, while the fitted affine part (red) is negligible: there is
 no coherent radial expansion, only correlation noise.
 
+**Re-checked 2026-09-01 on three more configurations**, because a null that
+rests on one plane and one block size is worth very little. Same two retake
+pairs, changing only what the fit is run on:
+
+| configuration | A_y, ω=0 pair | A_x, ω=0 pair | A_y, ω=90 pair | A_x, ω=90 pair |
+|---|---|---|---|---|
+| plane 1, grid 5 *(above)* | +107 ± 210 | +3 ± 141 | +54 ± 294 | −30 ± 389 |
+| plane 2, grid 5 | −77 ± 154 | −8 ± 174 | −84 ± 319 | +51 ± 400 |
+| plane 1, grid 3 | +258 ± 224 | −131 ± 328 | −105 ± 454 | +90 ± 627 |
+| plane 4, grid 5 | +20 ± 157 | −205 ± 175 | +94 ± 272 | +456 ± 271 |
+
+All sixteen scale terms are within 2σ of zero and the signs are incoherent —
+plane 4's x term reads +456 ppm on one pair and −205 ppm on the other, which the
+script flags as *inconsistent with a linear shrink* precisely because that sign
+flip is what noise does and a shrinkage cannot. Planes 1, 2 and 4 differ by
+1.57× in magnification and see the sample through different propagation
+distances, so a real dimensional change would have to appear in all three at the
+same ppm; it appears in none.
+
 **How much sensitivity is behind that null.** `--inject 500` rescales the retake
 by a known 500 ppm before measuring. The fit responds at 7–11σ, moving from
 +27/+107 ppm to **+815/+812 ppm** — so a shrinkage of this size could not have
@@ -203,6 +264,327 @@ soften the reconstruction. Run steps 1–5 first, then
 `config_steps15.conf` **and** all three `config_step6_bin*.conf` before starting
 bin 2.
 
+## What the refinement did to the positions
+
+`python show_pos_errors.py config_step6_bin0.conf -o pos_errors_total.png`
+(add `--root /eagle/APS_IRI=$HOME/eagle` to run it off an sshfs mount).
+
+![total position correction](pos_errors_total.png)
+
+**Read the step-6 log with care: it does not print a total.** `rec_mpi.precalc`
+does `self.pos_init = vars['pos'].copy()` (rec_mpi.py:836) at the entry of
+*every* level, so the logged "pos abs error" restarts from zero at each ladder
+boundary and is in that level's own pixels. It measures motion *within* a level.
+`show_pos_errors.py` instead differences every checkpoint against the one fixed
+reference the whole ladder started from — the step-3 shift sum in
+`/exchange/cshifts_final` — undoing `Reader.read_pos`'s per-level mapping
+
+    pos[...,0] = cs[...,0]/2**b
+    pos[...,1] = cs[...,1]/2**b + rcs/2**b + 0.5*(1/2**b - 1)
+
+so all three levels land on one bin-0 curve. Getting that mapping wrong shows up
+at once as a ~20 px constant in x. (The level of each checkpoint is read from the
+object grid it holds, 5056/2528/1264, not from `start_iter` in the configs —
+those were retuned mid-run to 1024/1280 and no longer describe what ran.)
+
+At iteration 1376, against the step-3 input:
+
+| | Δy mean ± sd | Δx mean ± sd | max abs |
+|---|---|---|---|
+| plane 1 | −0.61 ± 1.07 | −1.33 ± 2.45 | 8.2 |
+| plane 2 | −1.39 ± 1.14 | −2.89 ± 2.59 | 9.2 |
+| plane 3 | −0.87 ± 1.20 | −3.24 ± 2.48 | 9.8 |
+| plane 4 | +0.75 ± 1.30 | −4.27 ± 2.62 | 12.0 |
+
+bin-0 **object** px; total RMS 4.29 px = **32 nm**. The unit matters and is easy
+to get wrong: `pos` is a shift on the object grid, not on each plane's detector
+grid — `cuda_kernels.s_kernel` computes `x = mag*(tx-(n-1)/2) - r + (npsi-1)/2`,
+so `r` is in `npsi` units. All four planes therefore share **one** scale, 7.5 nm,
+not the per-plane detector voxels [7.500, 7.822, 9.109, 11.781] nm that step 3
+divided the commanded detector displacement by to get here in the first place.
+
+**Almost all of it is common mode, and that is the good news.** Split the
+correction into the part the four planes share and the part that differs:
+
+    common mode   y −0.53 ± 1.01   x −2.93 ± 2.48   (x ptp 14.3 px)
+    inter-plane   y rms 0.99       x rms 1.18
+
+The common mode moves the whole detector image and says nothing about `rhapp` —
+it is sample/stage motion that step 3's drift file did not carry. Only the
+inter-plane part, ~1.1 px rms, is inter-plane geometry, and that is the number
+the ×2 `rhapp_bin` fix bought: the shift files are now right to about a pixel
+between planes, out of offsets that reach 182 px. Quoting the 4.29 px total as
+if it were a shift-file error would be the same mistake that let the ×2 hide.
+
+Two things in the common mode are worth acting on.
+
+1. **A −2.93 px mean in x is degenerate with the rotation centre.** A constant
+   horizontal shift of every projection *is* a change of axis position, so the
+   refinement is telling us `rotation_center_shift` should be near **−22.15**,
+   not −19.22. That is 1.7σ outside the ±1.70 px the one opposed pair could
+   measure — consistent with it, but pulling in a definite direction. Fold it in
+   with `step5_center_sweep.py` rather than by hand; see the section above.
+
+2. **A smooth ±6 px excursion in x over the scan**, ~7× larger than the 2.1 px
+   ptp in ESRF's `correct_motion.txt`. What that is has its own section below.
+
+**Convergence.** Each level jumps in its first 32 iterations and then settles:
+bin 2 walks 0 → 0.73 level px and is still creeping at 1024; bin 1 adds
+0.46 level px over its 256 iterations and is *still rising* when it hands over;
+bin 0 adds 0.11 px in 96 iterations and is flat. Only bin 0 had converged in
+position when the job hit the 3 h wall at 1376 of 1700 — the argument for
+trimming bin 2 and bin 1 and giving bin 0 the time, as in **Running it on
+Polaris**.
+
+## Is the sample moving, or the stage?
+
+`python diagnose_positions.py config_step6_bin0.conf -o pos_diagnosis.png`
+
+![what the corrections are](pos_diagnosis.png)
+
+The section above says how big the corrections are. This says what they *are*.
+
+**The lever is that this is four separate scans.** `entry_0000/start_time` in
+`projections/<pfile>_000k.nx` gives **04:54, 05:53, 06:53, 07:57** on 2026-08-31
+— four acquisitions an hour apart, spanning three hours, and each carries its
+**own** random displacement sequence (the four `.txt` files differ; the sequence
+is white, lag-1 autocorrelation ≈ 0). So the four planes are four independent
+measurements of the same rotation, and each candidate cause lands somewhere
+different:
+
+| cause | locked to | signature |
+|---|---|---|
+| rotation-stage error motion | angle | one curve **all four scans share** |
+| sample / thermal drift | the clock | per-scan **deviation** from that curve |
+| displacement-stage error | the commanded shift | frame-to-frame, tracks that plane's own `.txt` |
+| local deformation | nothing rigid | cannot appear in `pos` at all |
+
+Smooth each plane's Δ over 151 frames and overlay the four (top row of the
+figure): **pairwise correlation 0.92–0.99 in y and 0.95–0.99 in x**, with ptp in
+x of 10.6 / 10.6 / 10.7 / 12.0 px. The big term repeats in scans taken an hour
+apart, in the same place in the rotation each time. It is **angle-locked, not
+time-locked**. The budget, in bin-0 object px (sd, total 2.49 px = 19 nm):
+
+    shared and smooth   2.18 px = 16 nm   angle-locked -> the rotation stage
+                                          y ptp 5.89 px = 44 nm
+                                          x ptp 10.96 px = 82 nm
+    per-scan and smooth 0.97 px =  7 nm   clock-locked -> real drift
+    displacement coupling 0.60 px = 5 nm  see below
+    leftover            0.39 px =  3 nm
+
+So, to the four hypotheses:
+
+* **Sample moving — yes, but it is the small term.** The genuinely per-scan part
+  is 0.97 px sd, 7 nm, y 0.81 / x 1.10. That is consistent with what
+  `estimate_motion.py` got from the post-scan retakes independently (y 1.57 px
+  ptp measured, x 0.08 ± 0.05 px): y has real time drift, x essentially none.
+* **Acquisition problem — yes, and it is hugely significant statistically
+  though sub-pixel.** Regress the fast (unsmoothed) part on the commanded
+  displacement, jointly over all four planes: the y error has a **+0.138 %**
+  same-axis gain error and a **−0.234 % cross-axis** term (169σ), the x error
+  **+0.111 %** and **−0.135 %** (91σ). At the ±300 px sweep that is +0.42 /
+  −0.70 px in y and +0.33 / −0.41 px in x. The same-axis term is a **calibration
+  error of the displacement stage** (~0.1 %); the cross term is **axis
+  non-orthogonality / cross-talk** (~0.2 %) — commanding x moves y as well. Both
+  are worth reporting to the beamline; neither hurts this reconstruction, since
+  step 6 recovers them.
+* **Local deformations — no evidence.** A deformation is not a rigid shift, so
+  it cannot show up in `pos` in the first place, and nothing that depends on the
+  specimen could reproduce itself to 0.99 correlation across four scans three
+  hours apart. The independent shrinkage test (`estimate_shrink.py`, **Shrinkage**
+  above) is also a null.
+* **Rotary-stage tilt — closest, but the mechanism is error motion, not tilt.**
+  A static tilt of the axis produces a height-dependent shear, which `pos`
+  (one shift per projection) cannot express at all; what `pos` *can* express is
+  the axis position wandering as a function of angle, i.e. **radial and axial
+  error motion (runout)** of the rotation stage. That is exactly the shape of
+  the shared curve: its power sits at **1–2 cycles per 180°** (x: 39 % at 1,
+  32 % at 2; y: 46 % at 2, 17 % at 3), i.e. once and twice per stage revolution
+  — the classic once-per-rev eccentricity plus a two-per-rev bearing term.
+
+**The one control that matters.** Step 3 tiles the reference plane's
+`correct_motion.txt` onto all four planes identically, so an error *there* would
+also look common-mode. It cannot be the explanation: `motion_base` has ptp
+y 1.686 / x 2.200 px against the observed 5.89 / 10.96 (3.5× and 5.0× too
+small), and correlates with the recovered curve at only +0.19 (y) and −0.26 (x)
+— wrong size and wrong shape (bottom row of the figure). This is the same
+conclusion the retake analysis reached from the other direction.
+
+**Caveat.** Over a 180° scan a once-per-revolution component is only half a
+cycle and is nearly degenerate with a linear trend, so the split between
+"1 cyc/180° runout" and "monotonic drift shared by all four scans" is not
+separable from this data alone. What *is* separable, and is the load-bearing
+result, is shared-across-scans versus per-scan — and 82 % of the variance is
+shared.
+
+## `correct_correct3D.txt` — what ESRF's third shift file is
+
+Step 3 sums four shift sources, and this is the fourth:
+
+```python
+raw_3d = np.loadtxt(f'{pfile}_/correct_correct3D.txt')[:ntheta, ::-1]   # (h,v) -> (v,h)
+shifts_final = random_shifts + rhapp_shifts + motion_shifts + tile(raw_3d * correct3d_bin)
+```
+
+It is tiled onto all four planes, in reference-plane detector pixels, after
+scaling by `correct3d_bin`. On scans where Peter fitted it on the unbinned grid
+that factor is 1; here his grid is 2×2 binned and it is 2 — see below. ESRF hands the same file to
+nabu as `translation_movements_file`, whose own documentation fixes the column
+order — *"each line describes the horizontal and vertical translations of the
+sample… The order is 'horizontal, vertical'"* — which is why step 3 reverses it.
+The companion `correct_correct3D_v.txt` is the same file with the horizontal
+column zeroed.
+
+**Peter's script is not in any copy of the toolbox we have** (it lives at ESRF,
+under `/data/id16a/inhouse1/sware/pub/tomo-esrf`), but his output files identify
+the model exactly. `estimate_correct3d.py --verify <file>` fits families of
+increasing order and reports the first that reaches the file's own write
+precision:
+
+| file | rows | horizontal | vertical |
+|---|---|---|---|
+| `20250604/Y350a_HT_nobin_020nm_` | 4001 | 4 rotation harmonics, 2.7e-10 | cubic, 1.6e-09 |
+| `20250604/Y350a_FT_large_rand_disp_nobin_020nm_` | 4001 | 4 rotation harmonics, 2.8e-10 | cubic, 9.6e-10 |
+| `20251115/Y350a_HT_20nm_8dist_` | 4501 | 4 rotation harmonics, 2.6e-09 | cubic, 2.5e-09 |
+
+Same model on all three, and each family fails on the other column (the
+horizontal is not a polynomial at any order ≤ 10; the vertical needs ≥ 8
+harmonics). So:
+
+* **horizontal** = `a₀ + Σ_{h=1..4} aₕ cos hω + bₕ sin hω` — axis runout, which
+  by construction repeats every revolution;
+* **vertical** = a cubic in the projection index — sample creep, which by
+  construction does not.
+
+The split is the physics, and it is the part worth carrying over: horizontally
+the stage comes back to where it was, vertically the sample does not.
+
+The angle grid matters and is worth stating: the files have **ntheta+1** rows
+spanning 0…180° *inclusive*, i.e. ωᵢ = iπ/ntheta with the last row repeating the
+first projection. On that grid the horizontal column is 4 harmonics to 1e-10; on
+a 0…180-exclusive grid of the same length it needs 6 and still only reaches
+1e-8. Get it wrong and you approximate the model instead of reading it off.
+
+### The correction is also inside `correct_motion.txt` — and that is consistent
+
+**Peter has since supplied the file** (2026-09-07), and step 3 uses it; what
+follows is the analysis from before it arrived, kept because it is what shows
+the two files agree rather than double-count.
+
+When this scan was first set up there was no `correct_correct3D.txt` in
+`ctxl_HT_4K_RD300_007p5nm_0001_/`, and nabu's `translation_movements_file` was
+empty in `naburec/nabu_final.conf` — his production config at the time. The
+correction had not been skipped; it was folded into the motion file. Take
+`<pfile>_2_/correct_motion.txt`, subtract the plane-2 random displacement (which
+is what step 3 does), and fit the remainder — `estimate_correct3d.py
+config_steps15.conf --motion` prints this:
+
+| column | ptp | rotation harmonics, order 2 / 4 / 6 | polynomial, order 2 / 4 / 6 |
+|---|---|---|---|
+| horizontal | 2.109 px | 4.2e-02 / **8.3e-04** / 2.0e-05 | 3.9e-01 / 2.5e-02 / 5.5e-04 |
+| vertical | 1.618 px | 6.1e-03 / 1.4e-04 / 3.4e-06 | **2.9e-07** / 2.9e-07 / 2.9e-07 |
+
+The vertical is a **quadratic**, exact to the file's six decimals and flat
+thereafter — a polynomial, as Peter writes it, one order lower than his cubic.
+The horizontal is not literally a 4-harmonic fit (the residual keeps falling
+with order), but it is unambiguously the harmonic family: at every order the
+harmonics beat the polynomial by 10–30×, and 4 of them already account for
+100.00 % of the variance. This settles the open question in
+[Shifts](#shifts) — the horizontal column of `correct_motion.txt` disagrees with
+the retakes (2.109 px written against 0.080 ± 0.053 px measured) because **it is
+not sample drift, it is the axis correction**, carried in the motion file rather
+than beside it. The vertical column, which does agree with the retakes to 3 %,
+is the drift.
+
+### What is left, and a file for it
+
+Peter's estimate is not complete: after installing it, step 6 still had to walk
+the positions by a common mode of **rms 18.6 nm horizontal / 7.6 nm vertical**
+(ptp 107 / 67 nm). `estimate_correct3d.py` fits that residual and writes it in
+his format, so a re-run can start from the aligned geometry instead of
+travelling there:
+
+```bash
+python estimate_correct3d.py config_step6_bin0.conf \
+    --root '/eagle/APS_IRI='$HOME'/eagle' --cache /tmp/poserr2.npz --write .
+```
+
+| column | model | variance explained | residual |
+|---|---|---|---|
+| horizontal | const + 4 rotation harmonics | 94.6 % | 0.576 px = 4.3 nm |
+| vertical | const + 4 rotation harmonics | 82.0 % | 0.428 px = 3.2 nm |
+
+The vertical is fitted with **harmonics, not Peter's cubic** (22.2 % — the
+script picks per column and says which it took). That is the expected answer
+rather than a contradiction: the sample drift is already gone into
+`correct_motion.txt`, so what remains in both columns is angle-locked, and the
+power sits at 3 cyc/rev horizontally (28.8 → 48.3 → **90.8** % at orders 1/2/3)
+and 2 cyc/rev vertically (14.3 → **69.8** %). Same 3-lobed bearing runout the
+[tilt tests](#not-an-axis-tilt) found.
+
+Two things to keep straight before using it:
+
+* **The constant is dropped on purpose.** A constant horizontal shift *is* the
+  rotation centre and a constant vertical shift is only where the volume sits;
+  the axis in the configs is ESRF's own (`-15.77`, from `naburec/`), fitted
+  with `correct_correct3D.txt` in place, so leaving the DC out keeps the two
+  consistent. `--keep-dc` overrides.
+* **It goes in `<pfile>_/` on eagle, not here.** The copy in this folder is the
+  estimate; step 3 reads the raw-tree path. Installing it changes `shifts_final`
+  and therefore invalidates every downstream product from step 3 on.
+
+![correct3D](correct3d.png)
+
+## The boundary artifact, and what it is not
+
+An axial slice of the finished volume has a comb of fine tails hanging off the
+sample surface into the vacuum — 0.7–1.1 µm long, all leaning the same way,
+strongest around azimuth 60–90° where they are 2× the value on the opposite
+side. The interior and the far background are clean.
+
+**It is not this pipeline.** ESRF's own reconstruction of the same scan,
+`volfloat/ctxl_HT_4K_RD300_007p5nm_0001_rec_.vol` (PyHST FBP, 15 nm voxel,
+3216³), has the *same* comb: same length in micrometres, same lean, same
+azimuthal envelope peaking at 68°, and the fine azimuthal profiles of the two
+correlate at 0.38 despite different voxels and independently estimated centres.
+Two unrelated algorithms — multi-distance Paganin + FBP, and our iterative
+multi-distance solver with free position refinement — put the same structure in
+the same place.
+
+![ESRF standard vs this pipeline](esrf_vs_ours.png)
+![the same artifact, unrolled](edge_artifact_both.png)
+
+What the two share is the raw frames and the shift files, so the artifact is in
+one of those. Position refinement is free in our run and did not remove it,
+which means no rigid per-projection shift can.
+
+### Not an axis tilt
+
+`tilt_check.png`, three measurements:
+
+| test | tilt would give | measured |
+|---|---|---|
+| artifact vs height, z = 7.5…30 µm | ∝ \|z−z₀\|, vanishing at the pivot | 0.091 → 0.082, monotone, no null |
+| vertical blur vs radius | blur 2δr, so V_z/V_xy falls with r | flat to 1.1 % out to r = 1050 px |
+| 1 cycle/rev in the common mode | all of it | 6 % (y) / 25 % (x); the jump is at 3 cyc/rev |
+
+The middle one is the direct test and it is sharp. A roll tilt δ makes each
+axial slice a mixture of heights z ± δr. Calibrating against an artificial box
+blur (2 voxels costs 49 % of V_z/V_xy) the 1.1 % measured over 1050 px is under
+0.3 voxel, i.e.
+
+    δ < 1.4e-4 rad = 0.008° = 0.5 arcmin.
+
+Fed back through the taper of this pillar (dR/dz = 0.049, R = 1370 px) that
+buys an edge displacement of δ·R·dR/dz = **0.01 px**. The tails are 100–150 px.
+
+The once-per-revolution test covers the other tilt: an out-of-plane tilt is a
+rigid 1 cyc/rev wobble, and 1 cyc/rev is a minority of the common mode here —
+the signal is a 3-lobed bearing runout — and the rigid part is absorbed by
+`pos` in any case.
+
+![is it tilt](tilt_check.png)
+
 ## `nobj` = 5056
 
 The grid has to hold the sample plus the whole displacement sweep:
@@ -235,18 +617,133 @@ with different `nobj`.
 ## Running it on Polaris
 
 ```bash
+ssh polaris
+cd /eagle/APS_IRI/vnikitin/holotomocupy_gpu_reduced/experimental/ctxl_HT_4K_RD300_007p5nm
+source /eagle/APS_IRI/vvnikitin/sw/env.sh
+python ../check_data_read.py config_steps15.conf      # a few seconds, no GPU
 qsub polaris_run.sh                                   # steps15 + bin2 + bin1 + bin0
-qsub -v STAGES=steps15 polaris_run.sh                 # just steps 1-5
-qsub -v CONFIG=config_step6_bin1.conf polaris_run.sh  # just one step-6 level
+qstat -u $USER                                        # watch it
+tail -f slurm-*.out                                   # or the job log
 ```
 
-Recommended first pass, because of the rotation centre:
+`check_data_read.py` is the pre-flight: it resolves the exact paths step 3 will
+read, prints every shift file's shape and unit, checks the bin factors against
+the pixel sizes `rhapp.mat` and `<pfile>_rec_.info` record, checks `ref_dist`
+against `reference_motion.mat`'s `reference_plane`, checks the drift it computes
+against that file's `ref_v`/`ref_h`, checks `rotation_center_shift` against
+`naburec/`, and prints the resulting `cshifts_final`. It exits non-zero on any
+`BAD`. This scan currently reports **19 ok, 6 notes, 0 warnings, 0 bad**. `polaris_run.sh`
+runs it too, before the healthcheck, and aborts the job if it fails — so a
+missing or mis-scaled shift file shows up in the first ten seconds rather than
+20 minutes into `steps15`.
+
+### State as of 2026-09-07
+
+`config_steps15.conf` has **`start_step=3`**. `<pfile>_rec/<pfile>.h5` (3.0 TB)
+was written on 2026-08-31 and nothing that changed since touches steps 1–2, so
+the job redoes shifts → binned data → Paganin+FBP only. Set it back to 1 to
+rebuild from the EDFs.
+
+What changed, and why those are exactly steps 3–5:
+
+* **`correct_correct3D.txt`** — Peter's new fit. His first drop landed one
+  level too deep, in `<pfile>_/<pfile>_/`, where step 3 would have read it as
+  zeros; the directory has since been recopied and outer and nested are now
+  **byte-identical** for every file step 3 reads. Enters at **step 3**.
+* **`correct3d_bin=2`** — the file is in 2×2 binned detector px.
+  `<pfile>_rec_.info` says `PixelSize = 0.015 µm` against this scan's 7.5 nm
+  voxel, and `ht_<pfile>.m` sets `bin_factor = 2`. The pre-flight prints both.
+* **`rotation_center_shift=-15.77`** — from ESRF's own nabu parameters rather
+  than measured here (table below). Enters at **step 5**.
+
+### Read from ESRF's metadata, not retyped
+
+Four numbers that used to be hand-copied into the config now come out of what
+ESRF itself recorded beside the scan, through
+[`src/holotomocupy/esrf_meta.py`](../../src/holotomocupy/esrf_meta.py). Both
+`steps15.py` and `check_data_read.py` call it, so the same statements appear in
+the pre-flight and in the run log:
+
+| what | where it is recorded | value here |
+|---|---|---|
+| rhapp bin factor | `rhapp.mat`'s own `pixelsize` | 15.0000 nm / 7.5 nm = **2** |
+| correct3D bin factor | `<pfile>_rec_.info` `PixelSize` | 15.0000 nm / 7.5 nm = **2** |
+| reference plane | `reference_motion.mat` `reference_plane` | 2 (1-based) = `ref_dist=1` |
+| rotation axis | `<pfile>_/naburec/*.conf` | **−15.7725** raw px |
+
+The config still pins `rhapp_bin=2` and `correct3d_bin=2` rather than using the
+`0` sentinel, so a run does not depend on those files being readable; step 3
+warns if a pinned value and the recorded pixel size disagree. `find_drop_file`
+looks one level deeper whenever the outer path is empty, so a repeat of the
+nested drop is reported instead of silently zeroing a correction.
+
+**`reference_motion.mat` is a check, not an input.** Its `ref_v` / `ref_h` are
+the reference plane's own drift, which is exactly what step 3 reconstructs as
+`correct_motion.txt / norm_mag[ref_dist] − random_shifts[ref_dist]`. They agree
+to **4·10⁻⁵ object px** in both columns (ESRF stores them negated). That is a
+direct validation of the magnification, the column order and the
+random-displacement subtraction all at once. Its `pixelsize` is 15 nm, but that
+does **not** make `correct_motion.txt` binned — the file carries the full 600 px
+random-displacement amplitude, so it is in raw detector px and
+`correct_motion_bin` stays 1.
+
+The axis is **logged, never applied**. There is no knob to make nabu win, on
+purpose: the axis is degenerate with the x column of `cshifts_final`, so it has
+to be typed into `rotation_center_shift` in `config_steps15.conf` **and** into
+all three `config_step6_bin*.conf` together — a switch that changed only step 5
+would silently desynchronise it from step 6. What the run does instead is print
+nabu's value and every candidate conf, and warn past 0.5 raw px. Here the two
+agree to 0.003 px, so nothing fires.
+
+### The axis, from Peter's nabu configs
+
+`<pfile>_/naburec/` holds the configs he actually reconstructed with.
+They state the axis outright, on the 3216-wide grid `<pfile>_rec_.nx` — the
+2048-wide binned detector padded to `floor(4096/2·π/4)·2 = 3216` and centred in
+it. nabu measures from `(N−1)/2 = 1607.5`; PyHST is 1-based, from
+`(N+1)/2 = 1608.5`. Both times 2 for the binning:
+
+| file | shift file it uses | `rotation_axis_position` | raw px |
+|---|---|---|---|
+| `nabu_final_cm.conf` (production) | `../correct_correct3D.txt` | 1599.613741 | **−15.7725** |
+| `nabu_final_cm_odd/_even.conf` | `../correct_correct3D.txt` | 1599.613741 | −15.7725 |
+| `nabu_final.conf`, `nabu_final_odd/_even.conf` | `correct.txt` | 1599.613741 | −15.7725 |
+| `nabu.conf`, `nabu_correct3D.conf` | — / `../correct_correct3D.txt` | 1599.543995 | −15.9120 |
+| `nabu_correct3D_v.conf` | `../correct_correct3D_v.txt` | 1608.000000 | +1.0000 |
+| `<pfile>_rec_.par` (PyHST, 2026-08-31) | — | 1599.065161 | −18.8697 |
+
+Seven of the nine configs agree on 1599.613741, including every `nabu_final*`,
+with and without the horizontal correction — so the axis does not depend on
+which shift file he fed it. `esrf_meta.nabu_axis` prefers `nabu_final_cm.conf`
+because that is the one whose shift file is the `correct_correct3D.txt` we also
+apply, and reports the others so a disagreement is visible rather than
+silently resolved. `nabu_correct3D_v.conf` is the vertical-only variant and is
+not our geometry.
+
+The value here before was **−19.22**, measured locally — 0.35 px from the older
+PyHST number. That agreement is what validates the padded-centre arithmetic;
+the remaining 3.5 px is Peter's own refinement between 08-31 and 09-07, not a
+convention error. The Aug 31 drop said 1600.565065 / PyHST 1602.0; that
+directory has been replaced.
+
+[`polaris_run.sh`](polaris_run.sh) is four literal `mpiexec` lines in sequence.
+To run only part of it — steps 1–5 already done, or resuming after a
+preemption — **comment out the lines you do not want**. Each ends in
+`|| exit $?`, so a failed stage stops the job instead of letting the next level
+seed itself from a checkpoint that was never written.
+
+Splitting the job in two is no longer necessary for the rotation centre — it
+comes from nabu now, not from a sweep. It is still the way to re-measure it if
+Peter's shift files change again, since `rotation_center_shift` and the x column
+of `cshifts_final` land in the same slot and only their sum is defined:
 
 ```bash
-qsub -v STAGES=steps15 polaris_run.sh
+# comment out the three step-6 mpiexec lines, leaving steps15
+qsub polaris_run.sh
 python step5_center_sweep.py config_steps15.conf      # on a login node
-# edit rotation_center_shift in all four configs
-qsub -v STAGES=bin2,bin1,bin0 polaris_run.sh
+# edit rotation_center_shift in ALL FOUR configs
+# comment out the steps15 line, uncomment the three step-6 lines
+qsub polaris_run.sh
 ```
 
 The three step-6 levels share one `path_out`, so each seeds itself from the
@@ -255,9 +752,13 @@ upsamples obj/prb/pos onto the finer grid. Iteration numbering is cumulative:
 
 | config | bin | n | nobj | start_iter | niter |
 |---|---|---|---|---|---|
-| `config_step6_bin2.conf` | 2 (4×4) | 1024 | 1264 | 0 | 513 |
-| `config_step6_bin1.conf` | 1 (2×2) | 2048 | 2528 | 512 | 769 |
-| `config_step6_bin0.conf` | 0 (1×1) | 4096 | 5056 | 768 | 1025 |
+| `config_step6_bin2.conf` | 2 (4×4) | 1024 | 1264 | 0 | 1025 |
+| `config_step6_bin1.conf` | 1 (2×2) | 2048 | 2528 | 1024 | 1281 |
+| `config_step6_bin0.conf` | 0 (1×1) | 4096 | 5056 | 1280 | 1537 |
+
+(Both trees now carry these same numbers: 1024 iterations at bin 2, then 256
+each at bin 1 and bin 0. `polaris_run.sh` does not repeat them in its comments,
+so the config is the single place they live.)
 
 `checkpoint_step=32` divides every `start_iter` and every `niter−1`, so the
 handoff checkpoints are guaranteed to exist. Preemption is survivable: a
@@ -280,6 +781,81 @@ why the script asks for 18 h. Trim it once the first `.out` file exists.
 
 ≈2.7 TB, against 240 TB free on eagle as of 2026-08-31. Set
 `start_level_rec=1` to stop at the 2×2 level if that changes.
+
+## Half-set runs — even and odd projections
+
+Two extra ladders reconstruct half the projections each, with the positions
+frozen at what the full 4000-projection run found:
+
+| | p0 | p1 |
+|---|---|---|
+| projections | even global indices 0, 2, …, 3998 | odd 1, 3, …, 3999 |
+| `ntheta` / `start_theta` | 2000 / 0 | 2000 / 1 |
+| `path_out` | `<pfile>_rec6_p0` | `<pfile>_rec6_p1` |
+| configs | `config_step6_p0_bin{2,1,0}.conf` | `config_step6_p1_bin{2,1,0}.conf` |
+
+Same three levels, same `start_iter`/`niter` (0→1025, 1024→1281, 1280→1537),
+same `rho[obj]`, `rho[prb]`, `lam_laplacian`, `nobj`, `mask*` and
+`rotation_center_shift` as the full ladder. Only three things differ.
+
+```bash
+qsub polaris_run_halves.sh     # p0 ladder then p1 ladder, six mpiexec lines
+```
+
+**The split is `ntheta` + `start_theta`, and nothing else.** `Reader.__init__`
+builds `ids = arange(start_theta, ntheta0, ntheta0/ntheta)` with
+`ntheta0 = len(/exchange/theta) = 4000`, so `ntheta=2000` makes the step exactly
+2 and `ids` are the half's *global* angle indices. Every read is indexed by
+them — `pdata{k}_{bin}`, `pref_{bin}`, `shrink`, `cshifts_final`, `theta`, and
+the position checkpoint below — so the two halves are disjoint and together are
+the whole scan.
+
+**The positions are fixed, not refined.**
+
+```
+pos_checkpoint=<pfile>_rec6/checkpoints/checkpoint_1504.h5
+rho=1.0,0.05,0,0            # third element 0
+```
+
+`step6.py` calls `Reader.read_pos_checkpoint` after the usual initialisation; it
+reads rows `ids[st:end]` of that checkpoint's `/pos` — so each projection keeps
+*its own* refined position — and rescales 4096 → this level's `n` with
+`pos*scale + 0.5*(scale-1)`, the same transform `read_checkpoint` uses between
+levels. `rho[pos] = 0` then makes `gradpos = y[2]*rho_sq['pos']` identically
+zero, the CG direction for `pos` stays zero, and nothing moves for the whole
+ladder. `rotation_center_shift` is inert in this configuration — `read_pos`
+adds it, then `read_pos_checkpoint` overwrites the result, and the checkpoint
+positions already contain it — but it is kept in sync so a rerun without
+`pos_checkpoint` still does the right thing.
+
+`checkpoint_1504.h5` is the last checkpoint the full bin-0 run wrote; it stopped
+at 1504 of the planned 1536, the queue being `preemptable`. If the full run is
+extended later, repoint `pos_checkpoint` — the positions move well under a pixel
+in 32 iterations, but both halves must use the *same* checkpoint.
+
+**`estimate_rho=False`, including at bin 2** where the full config has it on.
+The coordinate search would tune `rho[prb]` separately in each half and the two
+would no longer be running the same solver. If the full bin-2 run logged
+`estimate_rho_coord: final rho = [...]`, copy its obj and prb entries into all
+six `rho=` lines by hand.
+
+**What is *not* independent between the halves.** The data is, and the object
+and probe refined from it are. Shared are (i) the positions, by construction,
+and (ii) the bin-2 starting object `/exchange/obj_init_re60_2`, which step 5
+built by Paganin+FBP over **all** 4000 projections and which both halves start
+from. So an FSC between p0 and p1 is not the FSC of two independent
+reconstructions: the common initial guess correlates them at low frequency, and
+freezing the positions removes the position refinement's own contribution to the
+discrepancy. It measures how much one half of the data alone constrains the
+volume when the geometry is already known. Making the starting object
+independent too means rerunning step 5 per half (`start_step=5`, `ntheta=2000`,
+a distinct `paganin` tag so the two do not collide in the same file, +1 TB each
+in `<pfile>_obj.h5`); that has not been done.
+
+**Cost.** A little under half the full ladder, which took 0.71 + 0.66 + 2.78 h
+on 2 nodes (`conv_bin{2,1,0}.csv`). Both halves fit in ~5 h; the job asks for
+12 h of preemption headroom. Disk: 2 × the checkpoint set, i.e. 2 × 1.03 TB per
+retained bin-0 checkpoint.
 
 ## Probe
 
@@ -317,11 +893,14 @@ Until then no `config_step0.conf` is provided. The commented `prb_file` line in
 inherit the probe from the previous level's checkpoint, so it only ever goes in
 the bin-2 config.
 
-## `paganin` = 20
+## `paganin` = 60
 
-`delta/beta = 20`, from Peter's octave driver for this scan
-(`<pfile>_/ht_<pfile>.m`, `delta_beta=20`) — the 2025 Y350a scans used 40–60,
-but those were at 33 keV. The other settings there corroborate the config:
+`delta/beta = 60`, set 2026-09-07. Peter's octave driver for this scan says
+`delta_beta=20` (`<pfile>_/ht_<pfile>.m`); 60 is a deliberate override — the
+same value the 20 nm Y350a scan uses — chosen for the step-5 initial volume, and
+it must be identical in `config_steps15.conf` and all three
+`config_step6_bin*.conf` because step 6 rebuilds the Paganin reference with it.
+The driver's other settings do corroborate the rest of the config:
 `nvue=4000`, `refon=4000`, `numbers=[1 2 3 4]`, `random_disp=1`,
 `reference_plane=2` (hence `ref_dist=1`, 0-based), `correct_shrink=0`.
 
@@ -332,13 +911,22 @@ but those were at 33 keV. The other settings there corroborate the config:
 | [`esrf_layout.py`](esrf_layout.py) | **the only place that knows bliss from ewoks**; filenames + geometry |
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
 | [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
-| [`polaris_run.sh`](polaris_run.sh) | PBS job, `STAGES=` selects the stages |
+| [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage; comment out what you do not want |
+| [`config_step6_p{0,1}_bin{2,1,0}.conf`](config_step6_p0_bin2.conf) | the same ladder on even / odd projections, positions frozen — see Half-set runs |
+| [`polaris_run_halves.sh`](polaris_run_halves.sh) | PBS job for the two half-set ladders, six `mpiexec` lines |
 | [`show_geometry.py`](show_geometry.py) | prints the derived geometry and the per-level config blocks |
 | [`scan_overview.py`](scan_overview.py) | the overview figure above |
 | [`estimate_center.py`](estimate_center.py) | rotation centre from opposed projections |
 | [`estimate_motion.py`](estimate_motion.py) | drift from the post-scan retakes |
 | [`estimate_shrink.py`](estimate_shrink.py) | shrinkage from the post-scan retakes |
+| [`estimate_correct3d.py`](estimate_correct3d.py) | ESRF's third shift file: identifies Peter's model, fits one for this scan |
+| [`correct3d.png`](correct3d.png) | the residual common mode and the correct3D model of it |
 | [`step5_center_sweep.py`](step5_center_sweep.py) | centre refinement from the FBP volume |
+| [`show_iter.py`](show_iter.py) | one step-6 checkpoint: slices, probe, positions, convergence |
+| [`show_pos_errors.py`](show_pos_errors.py) | total position correction across the whole ladder |
+| [`diagnose_positions.py`](diagnose_positions.py) | splits that correction into stage runout, drift and displacement-stage error |
+| [`tilt_check.png`](tilt_check.png) | three tests that rule an axis tilt out as the cause of the boundary artifact |
+| [`esrf_vs_ours.png`](esrf_vs_ours.png) | ESRF's PyHST volume against this one, same sample, same physical scale |
 | [`steps15.py`](steps15.py) | steps 1–5 driver |
 | [`step6.py`](step6.py) | BH reconstruction driver |
 | [`step0.py`](step0.py) | NFP probe retrieval — **bliss-only, unusable here**, see Probe |

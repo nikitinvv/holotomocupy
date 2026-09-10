@@ -1,21 +1,30 @@
 #!/usr/bin/env python
 """
-Steps 1–3 — Convert EDF→HDF5, preprocess, and combine shifts (MPI + GPU parallel).
+Steps 1-5 — raw frames → HDF5, preprocess, shifts, binned data, Paganin+FBP.
 
-Step 1: read raw EDF projections → parallel HDF5
+Step 1: read the raw projections → parallel HDF5
 Step 2: outlier removal + intensity normalisation (GPU)
 Step 3: combine encoder / RHAPP / motion / 3-D-correction shifts → cshifts_final
+Step 4: binned, stitched projections for every level in range(nlevels)
+Step 5: multi-distance Paganin + FBP initial volume
 
 Launch with:
-    mpirun -n <N> python steps_15.py steps15_Y350a.conf
+    mpirun -n <N> python steps15.py config_steps15.conf
+
+THIS COPY READS FRAMES THROUGH THE LAYOUT, not through fabio.  The scan this
+folder processes was never converted to EDF -- its pixels sit in the raw balor
+HDF5 files and are reached through the NXtomo virtual dataset -- so every
+`fabio.open(..).data` of the ctxl_HT_* copy is `lay.read_proj / read_refs /
+read_darks` here, and the rotation angles come from `lay.angles()` instead of
+from an EDF header.  esrf_layout.Layout still handles the two EDF flavours the
+same way, so this file also runs unchanged on an EDF scan; that is the only
+difference from ../ctxl_HT_4K_RD300_007p5nm/steps15.py worth diffing for.
 """
 
 import sys
 import re
 import logging
 import h5py
-import fabio
-logging.getLogger('fabio').setLevel(logging.ERROR)
 import glob
 import json
 import os
@@ -31,13 +40,12 @@ from holotomocupy.mpi_functions import MPIClass
 from holotomocupy.logger_config import logger, set_log_level
 from holotomocupy.config import parse_args_steps15
 from holotomocupy.reader import load_octave_text_mat, load_shrink_from_mats
-from holotomocupy import esrf_meta
 from holotomocupy.utils import *
 
-# Filenames and geometry live in esrf_layout.py next to this script: the 2026
-# "ewoks" scans this folder processes name their flat fields, darks and shift
-# files differently from the 2025 "bliss" scans the rest of experimental/ was
-# written for, and keep their geometry in an NXtomo rather than a bliss HDF5.
+# Filenames, FRAMES and geometry live in esrf_layout.py next to this script.
+# The 2026 scans this folder processes keep their geometry in an NXtomo rather
+# than a bliss HDF5, and this one keeps its pixels there too (virtual dataset
+# -> RAW_DATA/<pfile>/scanNNNN/balor_*.h5); see that module's docstring.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from esrf_layout import Layout
 
@@ -47,9 +55,14 @@ rotation_center_shift = args.rotation_center_shift
 nlevels               = args.nlevels
 start_level_rec       = args.start_level_rec
 paganin               = args.paganin
+
+# Stride at which step 5 writes the Paganin-filtered projections to
+# <pfile>_proj.h5:/exchange/proj_bin{bin}.  1 = every angle.
+PROJ_SAVE_STEP        = 1
 nchunk                = args.nchunk
 ref_dist              = args.ref_dist
 rhapp_bin_cfg         = args.rhapp_bin
+cm_bin_cfg            = args.correct_motion_bin
 c3d_bin               = args.correct3d_bin
 set_log_level(args.log_level)
 
@@ -85,6 +98,9 @@ _EDF_HEADER_MAX = 1 << 16
 def find_angle(fname):
     """Rotation angle (deg) of one projection, from its EDF header.
 
+    Only reached on an EDF scan; the nxvds flavour has no per-frame headers and
+    `read_angles` below takes the angles straight out of the NXtomo instead.
+
     Looked up by MOTOR NAME rather than by column index.  The 2025 headers
     carry `motor_mne = dummy somega sx sy sz focus ...` so somega happened to
     be field 3 of the motor_pos line; the 2026 headers carry `motor_mne =
@@ -111,6 +127,21 @@ def find_angle(fname):
             f'{"terminated at " + str(end) + " B" if end >= 0 else "unterminated"}, '
             f'read {len(buf)} B)')
     return float(pos[mne.index('somega')])
+
+
+def read_angles(lay, ids):
+    """Rotation angles (deg) of the projections `ids`, whatever the flavour.
+
+    NXtomo `sample/rotation_angle` and the EDF `somega` header field were
+    checked against each other on the 4-distance scan next door and agree
+    frame for frame, so this is a drop-in replacement for the header read and
+    not a second convention.
+    """
+    if lay.flavour == 'nxvds':
+        return np.asarray(lay.angles(0), dtype='float32')[np.asarray(ids)]
+    fnames = [lay.proj(0, int(i)) for i in ids]
+    with ThreadPoolExecutor() as pool:
+        return np.array(list(pool.map(find_angle, fnames)), dtype='float32')
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +175,8 @@ shrink_nd          = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [nthet
 shrink             = shrink_nd[0]
 eff_magnifications = norm_magnifications[:, None] / (1 + shrink)   # [ndist, 2] (y, x)
 
-# n from actual EDF file size (images are n×n), overrideable via --n
-n0, n1 = fabio.open(lay.refs(0, 0)[0]).data.shape
+# n from the actual detector frame size (images are n×n), overrideable via --n
+n0, n1 = lay.frame_shape(0)
 n = args.n if args.n is not None else n0
 sty, endy = n0 // 2 - n // 2, n0 // 2 + n // 2
 stx, endx = n1 // 2 - n // 2, n1 // 2 + n // 2
@@ -159,39 +190,6 @@ ndark = lay.ndark
 
 # Stitched object size (same at all steps that use it: 4, 5), overrideable via --nobj
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
-
-# --- Rotation axis, as ESRF reconstructed it ------------------------------
-# <pfile>_/naburec/*.conf records rotation_axis_position on the <pfile>_rec_
-# grid, which is the axis Peter's own reconstruction focused on -- a stated
-# value, not an estimate, and the arbiter that settled AtomiumS1 after four
-# focus metrics spread over 12 px.  Reading it back also means it cannot go
-# stale when he re-drops the directory.
-#
-# It is never applied automatically: the axis is degenerate with the x column of
-# cshifts_final, so it has to be typed into rotation_center_shift here AND into
-# all three config_step6_bin*.conf together, and a switch that changed only one
-# of them would silently desynchronise step 5 from step 6.  So this reports and
-# warns, nothing more.  Note the grid is pi/2-padded here (3216, not 4096), so
-# the width must be read out of <pfile>_rec_.info, never assumed.
-_nabu = esrf_meta.nabu_axis(path, pfile, voxelsize)
-_pyhst = esrf_meta.pyhst_axis(path, pfile, voxelsize)
-if _nabu is not None and _nabu.get('rcs') is not None:
-    if rank == 0:
-        logger.info(f'rotation axis: nabu {os.path.basename(_nabu["source"])} -> '
-                    f'{_nabu["rcs"]:+.4f} raw px  {_nabu["note"]}')
-        for _c in _nabu['candidates']:
-            logger.info(f'    candidate {_c["file"]:28s} axis_pos {_c["axis_pos"]:.6f}'
-                        + (f'  shifts {_c["shifts"]}' if _c['shifts'] else ''))
-        if _pyhst is not None and _pyhst.get('rcs') is not None:
-            logger.info(f'    PyHST cross-check (1-based centre) -> {_pyhst["rcs"]:+.4f} raw px')
-    if abs(_nabu['rcs'] - rotation_center_shift) > 0.5 and rank == 0:
-        logger.warning(f'rotation_center_shift {rotation_center_shift:+.4f} disagrees with '
-                       f'nabu {_nabu["rcs"]:+.4f} by '
-                       f'{abs(_nabu["rcs"] - rotation_center_shift):.4f} raw px; retype it '
-                       f'here and in all three config_step6_bin*.conf if nabu is right')
-elif rank == 0:
-    logger.info('rotation axis: no usable naburec/*.conf, using the configured '
-                f'rotation_center_shift = {rotation_center_shift:+.4f}')
 
 if rank == 0:
     logger.info(f'path                    = {path}')
@@ -234,9 +232,7 @@ else:
     logger.info('Step 1: converting EDF files to HDF5...')
 
     # Angles: each rank reads its own subset in parallel, then rank 0 gathers
-    local_fnames = [lay.proj(0, int(id)) for id in local_ids]
-    with ThreadPoolExecutor() as pool:
-        local_theta = np.array(list(pool.map(find_angle, local_fnames)), dtype='float32')
+    local_theta = read_angles(lay, local_ids)
 
     all_theta_parts = comm.gather(local_theta, root=0)
     if rank == 0:
@@ -265,16 +261,27 @@ else:
 
         for k in range(ndist):
             if rank == 0:
+                white0 = lay.read_refs(k, 0, nref)
+                white1 = lay.read_refs(k, ntheta, nref)
+                if len(white1) == 0:
+                    # An aborted scan stops before the end-of-scan flats.  Step
+                    # 2 averages the two batches, so duplicating the start batch
+                    # keeps that arithmetic well defined; it costs the drift the
+                    # end flats would have carried, which is one more reason not
+                    # to reconstruct an aborted scan.
+                    logger.warning('step1: no end-of-scan flats at distance '
+                                   f'{k+1}; reusing the start batch')
+                    white1 = white0
+                dark = lay.read_darks(k, ndark)
                 for id in range(nref):
-                    white0_ds[k][id] = fabio.open(lay.ref(k, id, 0)).data[sty:endy, stx:endx]
-                    white1_ds[k][id] = fabio.open(lay.ref(k, id, ntheta)).data[sty:endy, stx:endx]
-                for id, dfile in enumerate(lay.darks(k, ndark)):
-                    dark_ds[k][id]   = fabio.open(dfile).data[sty:endy, stx:endx]
+                    white0_ds[k][id] = white0[id][sty:endy, stx:endx]
+                    white1_ds[k][id] = white1[id][sty:endy, stx:endx]
+                for id in range(len(dark)):
+                    dark_ds[k][id]   = dark[id][sty:endy, stx:endx]
 
             norms = np.empty(len(local_ids), dtype='float64')
             for ii, id in enumerate(local_ids):
-                fname = lay.proj(k, int(id))
-                frame = fabio.open(fname).data[sty:endy, stx:endx]
+                frame = lay.read_proj(k, int(id))[sty:endy, stx:endx]
                 data_ds[k][id] = frame
                 norms[ii] = np.linalg.norm(frame)
                 if ii%100==0:
@@ -451,7 +458,11 @@ def driver_bin_factor(path, pfile):
     if not os.path.exists(mfile):
         return 1, f'no driver at {mfile}, assuming 1'
     with open(mfile, 'r', errors='replace') as f:
-        hits = re.findall(r'^[^%#\n]*?\bbin_factor\s*=\s*([0-9]+)\s*;',
+        # The semicolon is OPTIONAL in Octave -- AtomiumS1's driver writes a
+        # bare `bin_factor = 2` on line 89 and the older `;`-only pattern
+        # silently returned 1 for it.  Require instead that the number ends the
+        # statement: a semicolon, end of line, or a trailing comment.
+        hits = re.findall(r'^[^%#\n]*?\bbin_factor\s*=\s*([0-9]+)\s*(?:;|(?:[%#].*)?$)',
                           f.read(), re.M)
     if not hits:
         return 1, f'no bin_factor in {mfile} (holotomo_slave.m defaults to 1)'
@@ -491,34 +502,6 @@ if rank == 0:
         #all further corrections are found using these initial coordinates
         random_shifts[..., 0] = shifts[..., 1] / norm_magnifications
         random_shifts[..., 1] = shifts[..., 0] / norm_magnifications
-
-        # --- What ESRF recorded about this scan, read back rather than retyped ---
-        # rhapp.mat and reference_motion.mat both stamp the `pixelsize` of the
-        # grid Peter's pipeline ran on, and <pfile>_rec_.info stamps the one
-        # nabu reconstructed on.  Dividing either by our voxelsize gives the
-        # bin factor his numbers need, with no guessing from the driver -- see
-        # holotomocupy/esrf_meta.py.
-        _vox = voxelsize
-        _meta_rhapp_ps = esrf_meta.mat_pixelsize(f'{path}/{pfile}_/rhapp.mat')
-        _meta_recinfo  = esrf_meta.rec_info(path, pfile)
-        _meta_refm     = esrf_meta.reference_motion(path, pfile)
-
-        # The reference plane is not ours to choose: rhapp is differenced
-        # against it and correct_motion.txt is written for it, so ref_dist has
-        # to be the plane ESRF used or every plane picks up a constant offset.
-        if _meta_refm is not None and _meta_refm['ref_dist'] is not None:
-            _rp = _meta_refm['ref_dist']
-            if _rp == ref_dist:
-                logger.info(f'Step 3: reference plane {_rp} (ESRF reference_plane='
-                            f'{_meta_refm["reference_plane_1based"]}) matches ref_dist')
-            else:
-                logger.warning(f'Step 3: ESRF reference_plane='
-                               f'{_meta_refm["reference_plane_1based"]} means ref_dist '
-                               f'{_rp}, but the config says {ref_dist} -- rhapp and '
-                               f'correct_motion.txt are both referenced to ESRF\'s plane, '
-                               f'so this offsets every distance')
-        else:
-            logger.info('Step 3: no reference_motion.mat, reference plane unchecked')
 
         # --- RHAPP inter-plane shifts (from Peter's MATLAB pipeline) ---
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
@@ -560,18 +543,7 @@ if rank == 0:
             if rhapp_bin_cfg > 0:
                 rhapp_bin, _why = rhapp_bin_cfg, 'rhapp_bin in the config'
             else:
-                # rhapp.mat says outright what grid it is on; the driver's
-                # bin_factor is only the fallback, because it is often unset.
-                rhapp_bin, _why = esrf_meta.bin_from_pixelsize(_meta_rhapp_ps, _vox)
-                if rhapp_bin is None:
-                    rhapp_bin, _why = driver_bin_factor(path.rstrip('/'), pfile)
-                else:
-                    _why = f'rhapp.mat pixelsize: {_why}'
-            if _meta_rhapp_ps:
-                _b_mat, _n_mat = esrf_meta.bin_from_pixelsize(_meta_rhapp_ps, _vox)
-                if _b_mat is not None and _b_mat != rhapp_bin:
-                    logger.warning(f'Step 3: rhapp_bin={rhapp_bin} but rhapp.mat itself '
-                                   f'implies {_b_mat} ({_n_mat})')
+                rhapp_bin, _why = driver_bin_factor(path.rstrip('/'), pfile)
             logger.info(f'Step 3: rhapp bin factor = {rhapp_bin}  ({_why})')
             rhapp_shifts = (-rhapp_reordered * rhapp_bin).astype('float32')
             _rh_mean = rhapp_shifts.mean(axis=0)
@@ -591,71 +563,52 @@ if rank == 0:
             # shifts above: both are the initial coordinates the later
             # corrections are measured against.
             motion_base   = raw_motion / norm_magnifications[ref_dist] - random_shifts[:, ref_dist]
+
+            # correct_motion.txt is (random displacement + drift) and the two
+            # halves need not share a unit.  ESRF passes the random
+            # displacement through in raw detector px, but measures the drift
+            # on the bin_factor grid Peter's pipeline ran on -- for AtomiumS1
+            # reference_motion.mat records pixelsize 8.99995e-9 m against a
+            # 4.5 nm voxel, i.e. his drift is in 2x2 binned px while the
+            # displacement he copies through is not.  The subtraction above has
+            # already isolated the drift, so scaling it here converts it to raw
+            # px and leaves the random displacement untouched.
+            if cm_bin_cfg > 0:
+                cm_bin, _why = cm_bin_cfg, 'correct_motion_bin in the config'
+            else:
+                cm_bin, _why = driver_bin_factor(path.rstrip('/'), pfile)
+            logger.info(f'Step 3: correct_motion bin factor = {cm_bin}  ({_why})')
+            motion_base *= cm_bin
+            logger.info(f'Step 3: motion drift, raw detector px:  '
+                        f'y ptp {np.ptp(motion_base[:, 0]):.3f}  mean {motion_base[:, 0].mean():+.4f}   '
+                        f'x ptp {np.ptp(motion_base[:, 1]):.3f}  mean {motion_base[:, 1].mean():+.4f}')
+
             motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
-            # reference_motion.mat holds ESRF's own ref_v / ref_h: the drift of
-            # the reference plane in object px, i.e. exactly what motion_base
-            # just reconstructed by subtracting the random displacement.  It is
-            # a check, not an input -- if these disagree, the subtraction or the
-            # magnification is wrong and every later shift inherits it.
-            if _meta_refm is not None and _meta_refm.get('ref_v') is not None:
-                _rv = np.asarray(_meta_refm['ref_v']).ravel()[:ntheta]
-                _rh = np.asarray(_meta_refm['ref_h']).ravel()[:ntheta]
-                if _rv.size == ntheta:
-                    for _lbl, _ours, _theirs in (('vertical', motion_base[:, 0], _rv),
-                                                 ('horizontal', motion_base[:, 1], _rh)):
-                        _d = min(np.abs(_ours - _theirs).max(),
-                                 np.abs(_ours + _theirs).max())
-                        _f = 'WARN' if _d > 0.05 else 'ok'
-                        logger.info(f'Step 3: motion {_lbl:10s} vs ESRF reference_motion.mat: '
-                                    f'max|diff| {_d:.6f} object px  [{_f}]')
-                        if _d > 0.05:
-                            logger.warning(f'Step 3: motion {_lbl} disagrees with '
-                                           f'reference_motion.mat by {_d:.4f} object px')
-
         # --- 3-D tomographic correction shifts ---
-        # find_drop_file looks one level deeper when the outer path is empty:
-        # a drop landing in <pfile>_/<pfile>_/ would otherwise be read as zeros.
-        _c3d_path, _c3d_note = esrf_meta.find_drop_file(path, pfile, 'correct_correct3D.txt')
-        if _c3d_note:
-            logger.warning(f'Step 3: {_c3d_note}')
-        if _c3d_path is not None:
+        _c3d_path = f'{path}/{pfile}_/correct_correct3D.txt'
+        if os.path.exists(_c3d_path):
             logger.info(f'Step 3: reading correct3D   from {_c3d_path}')
             _raw_c3d = np.loadtxt(_c3d_path)
-            # Peter's files have ntheta+1 rows: his angle grid runs 0..180
-            # INCLUSIVE (ANGLE_BETWEEN_PROJECTIONS in the PyHST .par times
-            # TOMO_N is exactly 180 deg), so the last row is the 180 deg repeat
-            # and dropping it is right.  Anything else belongs in the log.
+            # Peter's 2026-09-07 file has ntheta+1 rows: his angle grid runs
+            # 0..180 INCLUSIVE at 0.015 deg (ANGLE_BETWEEN_PROJECTIONS in the
+            # PyHST .par), so the last row is the 180 deg repeat and dropping it
+            # is right.  Anything else is a mismatch worth seeing in the log.
             if _raw_c3d.shape[0] != ntheta:
                 logger.warning(f'Step 3: correct3D has {_raw_c3d.shape[0]} rows for '
                                f'{ntheta} angles; using the first {ntheta}')
             raw_3d = _raw_c3d[:ntheta, ::-1].astype('float32')
-            # Same unit trap as rhapp: ESRF fits correct3D with nabu on the
-            # <pfile>_rec_.nx projections, whose PixelSize in <pfile>_rec_.info
-            # is bin_factor times this scan's own voxel, so the file is in
-            # binned px and scales.  1 (default) leaves older scans alone.
-            if c3d_bin > 0:
-                _c3d_bin, _c3d_why = c3d_bin, 'correct3d_bin in the config'
-            else:
-                _c3d_bin, _c3d_why = esrf_meta.bin_from_pixelsize(
-                    _meta_recinfo['pixelsize_m'] if _meta_recinfo else None, _vox)
-                if _c3d_bin is None:
-                    _c3d_bin, _c3d_why = 1, 'no <pfile>_rec_.info, assuming 1'
-                else:
-                    _c3d_why = f'<pfile>_rec_.info: {_c3d_why}'
-            if _meta_recinfo:
-                _b_info, _n_info = esrf_meta.bin_from_pixelsize(_meta_recinfo['pixelsize_m'], _vox)
-                if _b_info is not None and _b_info != _c3d_bin:
-                    logger.warning(f'Step 3: correct3d_bin={_c3d_bin} but '
-                                   f'<pfile>_rec_.info implies {_b_info} ({_n_info})')
-            raw_3d *= _c3d_bin
-            logger.info(f'Step 3: correct3D bin factor = {_c3d_bin}  ({_c3d_why})')
+            # Same unit trap as correct_motion above.  This file is fitted by
+            # nabu on <pfile>_rec_.nx, which for AtomiumS1 is 2048 wide against
+            # the scan's 4096 -- 2x2 binned -- so the whole file scales.
+            raw_3d *= c3d_bin
+            logger.info(f'Step 3: correct3D bin factor = {c3d_bin}')
             logger.info(f'Step 3: correct3D, raw detector px:  '
                         f'y ptp {np.ptp(raw_3d[:, 0]):.3f}  mean {raw_3d[:, 0].mean():+.4f}   '
                         f'x ptp {np.ptp(raw_3d[:, 1]):.3f}  mean {raw_3d[:, 1].mean():+.4f}')
             correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
         else:
-            logger.info(f'Step 3: correct3D file not found, using zeros')
+            logger.info(f'Step 3: correct3D file not found, using zeros: {_c3d_path}')
             correct3d_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
 
         # --- Sum all sources and save ---
@@ -1029,10 +982,12 @@ else:
         local_recPag -= global_bg
         logger.info(f'step5 bin={bin}: rank {rank:4d}  paganin norm = {np.linalg.norm(local_recPag):.6e}')
 
-        # --- Save Paganin projections (every 10th frame) to separate file ---
+        # --- Save Paganin projections to a separate file --------------------
+        # PROJ_SAVE_STEP = 1 keeps every angle (67 GB at bin 2, 269 GB at
+        # bin 1, 1.1 TB at bin 0); raise it to thin the stack out.
         _proj_key  = f'/exchange/proj_bin{bin}'
         fpath_proj = fpath.replace('.h5', '_proj.h5')
-        n_proj_10  = len(range(0, ntheta, 10))
+        n_proj_save = len(range(0, ntheta, PROJ_SAVE_STEP))
         if rank == 0:
             if not os.path.exists(fpath_proj):
                 with h5py.File(fpath_proj, 'w') as _f:
@@ -1044,10 +999,10 @@ else:
         comm.Barrier()
         with h5py.File(fpath_proj, 'a', driver='mpio', comm=comm) as fid:
             proj_ds = fid.create_dataset(_proj_key,
-                                         shape=(n_proj_10, nobj_bin, nobj_bin), dtype='float32')
+                                         shape=(n_proj_save, nobj_bin, nobj_bin), dtype='float32')
             for i, j in enumerate(local_ids):
-                if j % 10 == 0:
-                    proj_ds[j // 10] = local_recPag[i]
+                if j % PROJ_SAVE_STEP == 0:
+                    proj_ds[j // PROJ_SAVE_STEP] = local_recPag[i]
         logger.debug(f'step5 bin={bin}: saved {_proj_key} → {fpath_proj}')
 
         # --- Redistribute: theta-distributed → z-distributed via MPIClass.redist ---

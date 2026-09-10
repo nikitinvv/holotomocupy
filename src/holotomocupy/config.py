@@ -1,6 +1,6 @@
 """Config-file parsing for the pipeline scripts.
 
-Every step reads one flat key = value file. The five parsers below differ only
+Every step reads one flat key = value file. The parsers below differ only
 in *which* keys they read; the mechanics (implicit [DEFAULT] section, relative
 path resolution, missing-field reporting) live in _Cfg.
 """
@@ -157,6 +157,12 @@ def parse_args(config_file):
 
     args.rotation_center_shift = cfg.float("rotation_center_shift")
     args.bin           = cfg.int("bin")
+    # Shift interpolation inside Rec: 'cubic' (B-spline, 4x4 taps, mirrored
+    # edges) or 'fft' (Fourier shift theorem, exact for a band-limited object
+    # but PERIODIC -- see ShiftFFT).  'fft' removes the stencil error that
+    # biases the position gradient, and is what a scan reconstructed as
+    # near-field ptychography (rho[pos] > 0) wants.
+    args.shift_type    = cfg.str("shift_type", fallback="cubic")
     args.log_level     = cfg.str("log_level", fallback="WARNING")
     args.energy        = cfg.float("energy", fallback=None)
     args.method        = cfg.int("method",        fallback=0)
@@ -225,6 +231,9 @@ def parse_args_step0_nx(config_file):
     args.error_step      = cfg.int("error_step",      fallback=32)
     args.rho             = cfg.list("rho", float)
     args.log_level       = cfg.str("log_level", fallback="INFO")
+    # Shift interpolation inside RecNFP: 'cubic' (B-spline, mirrored edges) or
+    # 'fft' (Fourier shift theorem, exact but periodic).  See ShiftFFT.
+    args.shift_type      = cfg.str("shift_type", fallback="cubic")
 
     return args
 
@@ -245,6 +254,33 @@ def parse_args_steps15(config_file):
     args.paganin   = cfg.float("paganin",   fallback=120.0)
     args.nchunk    = cfg.int  ("nchunk",    fallback=16)
     args.ref_dist  = cfg.int  ("ref_dist",  fallback=0)
+    # Binning of the detector grid rhapp.mat was measured on -- Peter's
+    # bin_factor.  0 (default) reads it out of the driver ht_<pfile>.m and
+    # falls back to 1, which is what holotomo_slave.m itself defaults to.
+    args.rhapp_bin = cfg.int  ("rhapp_bin", fallback=0)
+    # Binning of the detector grid correct_motion.txt's DRIFT was measured on.
+    # The file is (random displacement + drift) and the two halves can be in
+    # different units: ESRF passes the random displacement through in raw
+    # detector px, but measures the drift on the bin_factor grid its pipeline
+    # ran on.  Step 3 isolates the drift by subtracting the random
+    # displacement, so this scales only that term.  1 (default) = the file is
+    # already raw, i.e. every scan that predates this knob keeps its behaviour;
+    # 0 = read bin_factor out of the driver ht_<pfile>.m, like rhapp_bin.
+    args.correct_motion_bin = cfg.int("correct_motion_bin", fallback=1)
+
+    # Binning of the grid correct_correct3D.txt was fitted on.  Unlike
+    # correct_motion.txt this file has no raw-px half to protect -- ESRF fits it
+    # with nabu on the <pfile>_rec_.nx projections, so the whole file is in
+    # whatever px those are.  For AtomiumS1 they are 2048 wide against the
+    # scan's own 4096, i.e. 2x2 binned, so the file scales by 2.  1 (default)
+    # leaves every scan that predates this knob exactly as it was.
+    args.correct3d_bin = cfg.int("correct3d_bin", fallback=1)
+
+    # Take rotation_center_shift from ESRF's own nabu configs instead of the
+    # number typed below.  <pfile>_/naburec/*.conf records
+    # rotation_axis_position on the <pfile>_rec_ grid, which is exactly the
+    # axis Peter reconstructed with, so reading it back beats re-deriving it --
+    # and it cannot go stale when he re-drops the directory.  The conversion
     _n             = cfg.int  ("n",    fallback=0)
     _nobj          = cfg.int  ("nobj", fallback=0)
     args.n         = _n    if _n    > 0 else None

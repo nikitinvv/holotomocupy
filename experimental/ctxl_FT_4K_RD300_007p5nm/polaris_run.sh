@@ -3,12 +3,13 @@
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
-#PBS -l walltime=12:00:00
+#PBS -l walltime=18:00:00
 #PBS -q preemptable
-#PBS -N y350a006
+#PBS -N ctxlFT75
 #PBS -j oe
 # ===========================================================================
-# Y350a large random displacement, 6 nm voxels -- ESRF ID16A 2025-06-04.
+# ctxl cortex tissue, SINGLE-distance FT, +-300 px random displacement, 7.5 nm
+# voxels -- ESRF ID16A 2026-08-29..31, proposal ihls3888, attempt _0003.
 # THE WHOLE PIPELINE IN ONE JOB:
 #
 #     qsub polaris_run.sh
@@ -19,9 +20,14 @@
 # so a failed stage stops the job instead of letting the next level seed
 # itself from a checkpoint that was never written.
 #
-# Check the eagle quota first: start_level_rec=0 writes a 783 GB object volume
-# and 268 GB of bin-0 projections.  What each stage does, how to resume, the
-# walltimes below and the optional probe: see README.md, "Running it".
+# NOT AN EDF SCAN, unlike ../ctxl_HT_4K_RD300_007p5nm: step 1 reads the raw
+# balor detector HDF5 under RAW_DATA/, located through the NXtomo virtual
+# dataset, so BOTH <path>/<pfile>/projections/*.nx AND RAW_DATA/.../balor_*.h5
+# must be on eagle.  `filesystems=home:eagle` covers both.
+#
+# Before the first full run: install correct_motion.txt, optionally retrieve
+# the probe, sweep the centre, look at the step-5 volume.  Those, plus what
+# each stage does, walltime and disk, are in README.md.
 # ===========================================================================
 
 # --- user configuration ---
@@ -60,6 +66,12 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 source "${HTC_ENV}"
 echo "python: $(which python)"
 
+# What step 3 is about to read -- shift files, row counts, bin factors, the
+# resulting cshifts_final.  Pure numpy on rank 0's inputs, a few seconds, no
+# GPU; it only prints.  Run it first so a missing or wrongly-scaled shift file
+# shows up here rather than 20 minutes into steps15.
+python "${rec_dir}/check_data_read.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+
 # Drop nodes whose GPUs cannot take a CUDA context.  PBS has no Slurm-style
 # --exclude -- `-l select=` can pin a host but cannot negate one -- so a node
 # that comes up with cudaErrorDevicesUnavailable can only be filtered from
@@ -78,29 +90,24 @@ fi
 # --- the pipeline; comment out a line to skip that stage ---------------------
 
 # NFP probe retrieval -- OPT-IN, not part of the default flow.  Uncomment
-# prb_file in config_step6_bin2.conf afterwards.  Do NOT point this at the
-# _NFPwCA_1_ directory; see README.md.
+# prb_file in config_step6_bin2.conf afterwards.
 # echo "=== nfp START $(date) ==="
 # mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf" || exit $?
 
-# EDF->HDF5, preprocess, shifts, binned data, Paganin+FBP           not timed
+# raw balor HDF5 -> HDF5, preprocess, shifts, binned data, Paganin+FBP bins 2,1,0
 echo "=== steps15 START $(date) ==="
 mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
 
-# Rotation-centre sweep -- OPT-IN one-off between steps15 and bin2.
-# echo "=== sweep START $(date) ==="
-# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step5_center_sweep.py" "${SCRIPT_DIR}/config_steps15.conf" --start -48 --stop -28 --step 1 || exit $?
-
-# bin 2: 4x4  n=1024  iters    0 -> 512                             ~13 min
+# bin 2: 4x4  n=1024  nobj=1200  iters    0 -> 1024
 echo "=== bin2 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
 
-# bin 1: 2x2  n=2048  iters  512 -> 768                             ~22 min
+# bin 1: 2x2  n=2048  nobj=2400  iters 1024 -> 1280
 echo "=== bin1 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
 
-# bin 0: 1x1  n=4096  iters  768 ->1024                             ~1 h 47 min
+# bin 0: 1x1  n=4096  nobj=4800  iters 1280 -> 1536
 echo "=== bin0 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?
 
 echo "=== ALL STAGES DONE $(date) ==="

@@ -28,27 +28,57 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     const float cx = ndet * 0.5f;
     const float fr = (tx - cx) / (float)n;
 
-    // Bins with |fr| >= 1/2 only exist once ndet > n, and they fall outside the
-    // padded FFT's Cartesian square.  The object lives on the n grid, so it is
-    // band-limited to |fr| < 1/2 and those bins are zero: the sinogram is the
-    // band-limited interpolation of the coarse one onto the ndet grid.
+    // Samples whose Cartesian coordinate falls OUTSIDE the padded FFT square are
+    // skipped, not wrapped.  Such samples only exist once ndet > n.
     //
-    // Letting the index wrap instead ((n + ell + 2n) % 2n, below) models the
-    // object as a delta comb, and for ndet == 2n makes the gathered spectrum
-    // n-periodic -- whose length-ndet inverse transform is a comb with every
-    // odd detector sample exactly zero.  Half the psi plane then carries no
-    // object at all, the data cannot be matched there, and the solver stalls.
+    // Why the test is on (x0, y0) and not on |fr|.  The object lives on an n x n
+    // grid, so the spectrum it can represent is a SQUARE, |kx| < 1/2 and
+    // |ky| < 1/2 -- not a disc.  A radial line at angle theta leaves that square
+    // at |fr| = 1/(2*max(|cos|,|sin|)): 1/2 along the axes, but sqrt(2)/2 = 0.707
+    // at 45 deg.  Guarding on |fr| >= 1/2 would therefore discard the corners of
+    // the square at every oblique angle -- real, recoverable content.  Guarding
+    // on the Cartesian coordinates discards exactly the samples that have no
+    // array cell to read, and keeps the corners.
     //
-    // For ndet == n, fr is in [-1/2, 1/2) and this never triggers, so R and RT
-    // are bit-for-bit what they were before nd existed.
-    /*if (fr < -0.5f || fr >= 0.5f)
+    // What this replaces.  The index used to wrap ((n + ell + 2n) % 2n), which
+    // models the object as a delta comb on the n grid, so out-of-square bins
+    // carried aliased replicas of the low frequencies.  That is what
+    // ~/APS_PXM/tomo_usfft does, where it is invisible because that package
+    // generates its data with this same R (an inverse crime).
+    //
+    // The wrap was not a mild error.  At theta = 0 and 90 -- and only there --
+    // it is exact rather than aliasing: the shift between bins tx and tx+n is
+    // 2n*cos(theta) cells, which is 0 (mod 2n) only for cos/sin in {0,+-1}, so
+    // those two rows read back the identical spectrum, are n-periodic, and come
+    // out of the length-ndet inverse transform as combs with every odd detector
+    // sample exactly zero.  Measured at ndet == 2n: |odd|/|even| is 0.00e+00 at
+    // theta = 0 and 90 against 0.999 median over all other angles, and half of
+    // those two rows' energy sits above the object's Nyquist.  Two projections
+    // per scan are destroyed, and they are the two aligned with x and y -- which
+    // is why the ctxl tomo_upsample=2 reconstructions carried high-frequency
+    // vertical and horizontal line artifacts (300x the background power on the
+    // two Fourier axes, against 1.0x for the tomo_upsample=1 arm) while every
+    // other angle looked fine.  (An integer shift is not enough to do this:
+    // theta = atan(3/4) at 2n = 320 shifts by a whole 256 cells and still
+    // aliases.)
+    //
+    // For ndet == n, fr is in [-1/2, 1/2) so |x0|, |y0| <= |fr| < 1/2 and the
+    // guard can never fire: R and RT are bit-for-bit what they were before nd
+    // existed.  Verified as a regression test.
+    //
+    // NOTE the % twon in the loops below stays.  That one is the interpolation
+    // stencil straddling the array edge -- correct periodic evaluation of a
+    // spectrum that really is periodic, exercised at ndet == n too.  Only the
+    // sample CENTRE leaving the square is aliasing; the stencil skirt is not.
+
+    const float x0 =  fr * __cosf(theta[ty]);
+    const float y0 = -fr * __sinf(theta[ty]);
+
+    if (x0 < -0.5f || x0 >= 0.5f || y0 < -0.5f || y0 >= 0.5f)
     {
         if (dir == 0) g[g_ind] = make_float2(0.0f, 0.0f);
         return;
     }
-
-    const float x0 =  fr * __cosf(theta[ty]);
-    const float y0 = -fr * __sinf(theta[ty]);
 
     float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
 

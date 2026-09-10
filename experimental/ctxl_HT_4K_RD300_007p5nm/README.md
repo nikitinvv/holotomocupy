@@ -653,22 +653,19 @@ anyway. The pass is only asked for them on the iterations that get logged.
 ssh polaris
 cd /eagle/APS_IRI/vnikitin/holotomocupy_gpu_reduced/experimental/ctxl_HT_4K_RD300_007p5nm
 source /eagle/APS_IRI/vvnikitin/sw/env.sh
-python ../check_data_read.py config_steps15.conf      # a few seconds, no GPU
 qsub polaris_run.sh                                   # steps15 + bin2 + bin1 + bin0
 qstat -u $USER                                        # watch it
 tail -f slurm-*.out                                   # or the job log
 ```
 
-`check_data_read.py` is the pre-flight: it resolves the exact paths step 3 will
-read, prints every shift file's shape and unit, checks the bin factors against
-the pixel sizes `rhapp.mat` and `<pfile>_rec_.info` record, checks `ref_dist`
-against `reference_motion.mat`'s `reference_plane`, checks the drift it computes
-against that file's `ref_v`/`ref_h`, checks `rotation_center_shift` against
-`naburec/`, and prints the resulting `cshifts_final`. It exits non-zero on any
-`BAD`. This scan currently reports **19 ok, 6 notes, 0 warnings, 0 bad**. `polaris_run.sh`
-runs it too, before the healthcheck, and aborts the job if it fails — so a
-missing or mis-scaled shift file shows up in the first ten seconds rather than
-20 minutes into `steps15`.
+There used to be a `check_data_read.py` pre-flight here — it resolved the paths
+step 3 would read, checked the shift files' shapes and units, the bin factors,
+`ref_dist`, the drift, and `rotation_center_shift`, and both `polaris_run*.sh`
+ran it before the healthcheck. It is gone: the script was never committed and
+the `python ../check_data_read.py` line only aborted the job. The checks it made
+that still matter are made by `steps15.py` itself, through
+[`esrf_meta.py`](../../src/holotomocupy/esrf_meta.py) (next section), and they
+appear in the run log.
 
 ### State as of 2026-09-07
 
@@ -693,9 +690,8 @@ What changed, and why those are exactly steps 3–5:
 
 Four numbers that used to be hand-copied into the config now come out of what
 ESRF itself recorded beside the scan, through
-[`src/holotomocupy/esrf_meta.py`](../../src/holotomocupy/esrf_meta.py). Both
-`steps15.py` and `check_data_read.py` call it, so the same statements appear in
-the pre-flight and in the run log:
+[`src/holotomocupy/esrf_meta.py`](../../src/holotomocupy/esrf_meta.py). `steps15.py`
+calls it, so these statements appear in the run log:
 
 | what | where it is recorded | value here |
 |---|---|---|

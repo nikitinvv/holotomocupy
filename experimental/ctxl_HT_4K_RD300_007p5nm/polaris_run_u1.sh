@@ -70,12 +70,6 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 source "${HTC_ENV}"
 echo "python: $(which python)"
 
-# What step 3 is about to read -- shift files, row counts, bin factors, the
-# resulting cshifts_final.  Pure numpy on rank 0's inputs, a few seconds, no
-# GPU; it only prints.  Run it first so a missing or wrongly-scaled shift file
-# shows up here rather than 20 minutes into steps15.
-python "${rec_dir}/check_data_read.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
-
 # Drop nodes whose GPUs cannot take a CUDA context.  PBS has no Slurm-style
 # --exclude -- `-l select=` can pin a host but cannot negate one -- so a node
 # that comes up with cudaErrorDevicesUnavailable can only be filtered from

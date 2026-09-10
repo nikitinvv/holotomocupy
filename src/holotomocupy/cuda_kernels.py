@@ -29,19 +29,23 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     const float fr = (tx - cx) / (float)n;
 
     // Bins with |fr| >= 1/2 only exist once ndet > n, and they fall outside the
-    // padded FFT's Cartesian square: the index wraps below ((n + ell + 2n) % 2n),
-    // so the object is modelled as a delta comb on the n grid and those bins
-    // carry aliased replicas of the low frequencies.  For ndet == n, fr is in
-    // [-1/2, 1/2) and the question does not arise.
+    // padded FFT's Cartesian square.  The object lives on the n grid, so it is
+    // band-limited to |fr| < 1/2 and those bins are zero: the sinogram is the
+    // band-limited interpolation of the coarse one onto the ndet grid.
     //
-    // The alternative -- model the object as band-limited to its own grid and
-    // zero those bins -- is the block below.  Left commented out, as it is in
-    // ~/APS_PXM/tomo_usfft, so this kernel matches that reference exactly.
+    // Letting the index wrap instead ((n + ell + 2n) % 2n, below) models the
+    // object as a delta comb, and for ndet == 2n makes the gathered spectrum
+    // n-periodic -- whose length-ndet inverse transform is a comb with every
+    // odd detector sample exactly zero.  Half the psi plane then carries no
+    // object at all, the data cannot be matched there, and the solver stalls.
+    //
+    // For ndet == n, fr is in [-1/2, 1/2) and this never triggers, so R and RT
+    // are bit-for-bit what they were before nd existed.
     /*if (fr < -0.5f || fr >= 0.5f)
     {
         if (dir == 0) g[g_ind] = make_float2(0.0f, 0.0f);
         return;
-    }*/
+    }
 
     const float x0 =  fr * __cosf(theta[ty]);
     const float y0 = -fr * __sinf(theta[ty]);

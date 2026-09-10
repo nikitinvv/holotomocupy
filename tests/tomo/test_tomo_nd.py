@@ -122,20 +122,31 @@ def main():
     rel = float(cp.linalg.norm(fd - fc) / cp.linalg.norm(fc))
     check("shared spectrum of nd=2n matches nd=n", rel < 1e-3, f"rel={rel:.2e}")
 
-    # ---- 4. the |f| >= 1/2 bins carry the aliased replicas ------------------
+    # ---- 4. the |f| >= 1/2 bins are empty (band-limited model) --------------
     # Those bins only exist at nd > n and lie outside the padded FFT's Cartesian
-    # square, so the gather index wraps and they pick up the periodic
-    # continuation of the object spectrum -- the delta-comb model, matching
-    # ~/APS_PXM/tomo_usfft.  The band-limited alternative, which zeroes them, is
-    # the commented-out block in the gather kernel; if it is ever restored, this
-    # check is what flips.
-    print("4. bins with |f| >= 1/2 are populated (delta-comb model)")
+    # square.  The object lives on the n grid, so it is band-limited to
+    # |f| < 1/2 and the gather kernel zeroes them: the sinogram is the
+    # band-limited interpolation of the coarse one onto the nd grid.
+    #
+    # Letting the index wrap instead -- the delta-comb model -- makes the
+    # gathered spectrum n-periodic, and its length-2n inverse transform is a
+    # comb with every odd detector sample exactly zero.  Half the psi plane then
+    # carries no object, and the BH solver stalls with the object frozen.  That
+    # is what this check exists to catch.
+    print("4. bins with |f| >= 1/2 are empty (band-limited model)")
     u = rand_obj(nz, nc, 5)
     cl = Tomo(nc, nz, theta, -1, nd=n)
-    f = cp.fft.fftshift(cp.fft.fft(cl.R(u), axis=-1), axes=-1)
+    d = cl.R(u)
+    f = cp.fft.fftshift(cp.fft.fft(d, axis=-1), axes=-1)
     outer = cp.concatenate([f[..., :nc // 2], f[..., nc // 2 + nc:]], axis=-1)
     frac = float(cp.linalg.norm(outer) / cp.linalg.norm(f))
-    check("outer-bin energy fraction is non-zero", frac > 1e-3, f"frac={frac:.3e}")
+    check("outer-bin energy fraction is zero", frac < 1e-5, f"frac={frac:.3e}")
+    # The direct real-space symptom of a wrapping kernel: a comb.
+    s = d.real
+    odd = float(cp.abs(s[..., 1::2]).max())
+    even = float(cp.abs(s[..., 0::2]).max())
+    check("no comb: odd detector samples are populated", odd > 0.5 * even,
+          f"|odd|max={odd:.4f} |even|max={even:.4f}")
 
     # ---- 5. fbp is consistent at both samplings ----------------------------
     print("5. fbp round trip")
@@ -148,11 +159,9 @@ def main():
             cp.linalg.norm(cl.R(cl.fbp(d, 'ramp')) - d) / cp.linalg.norm(d))
     check(f"nd={nc} (nd == n) unchanged", abs(rels[nc] - 0.341) < 0.05,
           f"||R fbp(d) - d||/||d|| = {rels[nc]:.4f}")
-    # Informational, and the price of the delta-comb model: the ramp filter runs
-    # out to |f| = nd/(2n), so it amplifies the aliased outer bins and RT
-    # scatters them back on top of the real low frequencies.  The BH solver
-    # never calls fbp; step 5's initial guess does.  Restoring the commented-out
-    # zeroing block in the gather kernel brings this back to the nd == n value.
+    # Informational: with the outer bins zeroed there is nothing for the ramp
+    # filter to amplify out at |f| = nd/(2n), so nd = 2n lands on the nd == n
+    # value.  The BH solver never calls fbp; step 5's initial guess does.
     print(f"     (informational) nd=2n: ||R fbp(d) - d||/||d|| = {rels[n]:.3f}, "
           f"against {rels[nc]:.3f} at nd=n")
 

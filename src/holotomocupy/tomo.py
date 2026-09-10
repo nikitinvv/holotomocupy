@@ -20,10 +20,13 @@ class Tomo:
         pair and the sinogram *values* are unchanged -- only sampled more densely.
 
         The detector bins with |f| >= 1/2 -- which only exist once nd > n, and
-        lie outside the padded FFT's Cartesian square -- pick up the periodic
-        continuation of the object spectrum, i.e. the object is modelled as a
-        delta comb on the n grid, exactly as in ~/APS_PXM/tomo_usfft.  See the
-        commented-out alternative in the gather kernel.
+        lie outside the padded FFT's Cartesian square -- are zero: the object
+        lives on the n grid, so it is band-limited to |f| < 1/2 and the
+        sinogram is the band-limited interpolation of the coarse one onto the
+        nd grid.  (Letting the gather index wrap instead, as ~/APS_PXM/tomo_usfft
+        does, models the object as a delta comb; at nd = 2n that makes the
+        gathered spectrum n-periodic and the sinogram a comb with every odd
+        detector sample exactly zero.  See the gather kernel.)
         """
         nd = n if nd is None else int(nd)
         if nd not in (n, 2 * n):

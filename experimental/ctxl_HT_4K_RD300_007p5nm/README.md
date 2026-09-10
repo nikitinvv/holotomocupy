@@ -817,23 +817,53 @@ the stencil would be valid there — the two arms are only comparable if they
 regularise the same way.
 
 The detector frequencies above the object grid's Nyquist -- which only exist
-once the projection plane is finer than the object -- **wrap**: the index is
-taken mod 2n, so the object is modelled as a delta comb on its own grid and
-those bins carry aliased replicas of the low frequencies.  That is what
-`~/APS_PXM/tomo_usfft` does, and this kernel matches it.  The alternative --
-model the object as band-limited to its own grid and zero those bins -- is
-carried as a commented-out block in `gather` in `cuda_kernels.py`, exactly as it
-is in the reference, so it can be restored by uncommenting.  The choice is not
-free: it changes `fbp`, where `||R fbp(d) - d||/||d||` is 5.911 under the
-delta-comb model against 0.341 under the band-limited one (the ramp filter runs
-out to `|f| = nd/(2n)` and `RT` scatters the aliased outer bins back onto real
-low frequencies).  BH never calls `fbp`; step 5's initial guess does.
+once the projection plane is finer than the object -- are **zeroed**: the object
+lives on the coarse grid, so it is band-limited to `|f| < 1/2`, and the sinogram
+is the band-limited interpolation of the coarse one onto the fine detector grid.
+
+`~/APS_PXM/tomo_usfft` instead lets the index wrap mod 2n, modelling the object
+as a delta comb, and this kernel originally matched it.  **That is fatal at
+`nd = 2n` and was the cause of the first `tomo_upsample=2` run stalling.**
+Wrapping makes the gathered spectrum n-periodic, and the length-`nd` inverse
+transform of an n-periodic spectrum is a comb: every *odd* detector sample comes
+out exactly zero, and the even ones are `sqrt(2)` too large.  Measured at
+`n = 64, nd = 128` on a Gaussian phantom:
+
+| | sinogram samples 58..64 |
+|---|---|
+| `nd = n` (upsample 1) | 1.3721 1.3926 1.4093 1.4219 1.4304 1.4347 1.4347 |
+| wrap, `nd = 2n` | 1.9549 **0.** 2.0020 **0.** 2.0260 **0.** 2.0260 |
+| zero, `nd = 2n` | 0.9775 0.9906 1.0010 1.0085 1.0130 1.0145 1.0130 |
+
+Half the psi plane therefore had `psi = exp(i*0) = 1` -- no object at all.  The
+data can never be matched there, so `bottom` in the BH line search collapsed to
+~1e-18, `alpha` came out with the wrong sign, and the object froze (`dobj_rel`
+0.0228 -> 8.5e-6 while `err` *rose* from 0.0060 at iter 32 to 0.0094 at 96).
+The initial `err` looked deceptively healthy -- 0.054316 against the `u1` arm's
+0.053759 -- because a comb preserves the *local mean* exactly (0.36414 * sqrt(2)
+= 0.51497, the `u1` mean), and Fresnel propagation plus the demagnifying shift
+low-pass the psi plane before it reaches the detector.  All the error sat at
+Nyquist/2, where no object update could reach it.
+
+With the bins zeroed, `proj = R(obj)/norm_const` is invariant under the object-
+grid change -- 0.998502 / 0.999519 / 0.999907 at N = 128 / 256 / 512, converging
+as the 2x2 average's own discretisation error shrinks -- which is why
+`norm_const` needs no new factor and obj carries over from bin 1 unscaled.  It
+also fixes `fbp`: `||R fbp(d) - d||/||d||` is 0.341 at `nd = 2n`, equal to the
+`nd = n` value, against 5.911 under the delta-comb model (the ramp filter ran out
+to `|f| = nd/(2n)` and `RT` scattered the aliased outer bins back onto real low
+frequencies).  BH never calls `fbp`; step 5's initial guess does.
+
+At `nd = n` the guard can never trigger -- `fr` is in `[-1/2, 1/2)` -- so the
+`tomo_upsample=1` arm and every pre-`tomo_upsample` run are bit-for-bit
+unchanged.
 
 Two test scripts cover the option, both single-GPU and file-free:
 `tests/tomo/test_tomo_nd.py` for the operator (`nd = n` is bit-identical to the
-un-parameterised `R`, `R`/`RT` stay adjoint at `nd = 2n`, and `R`'s *values* are
-`nd`-independent — which is why `norm_const` needs no new factor and obj carries
-over from bin 1 unscaled), and `tests/tomo/test_upsample_e2e.py` for the
+un-parameterised `R`, `R`/`RT` stay adjoint at `nd = 2n`, `R`'s *values* are
+`nd`-independent, and the `|f| >= 1/2` bins are empty with no comb in the
+sinogram — the last check is the one that catches a regression to the wrapping
+kernel), and `tests/tomo/test_upsample_e2e.py` for the
 plumbing: a synthetic 2-distance step-6 run reconstructed from the same data at
 `nobj=160, upsample=1` and at `nobj=80, upsample=2`, plus the bin1 → bin0
 checkpoint read (obj z ×2, obj x/y ×1, prb ×2, pos ×2).

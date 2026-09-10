@@ -239,6 +239,35 @@ check("prb doubled in y and x",
 check("pos scaled by 2",
       np.array_equal(pos2, p_pos.transpose(1, 0, 2) * 2))
 
+# ---- 5. read_obj bins step 5's projection-grid init onto the object grid ----
+# Step 5 is untouched by tomo_upsample: it writes obj_init at the PROJECTION
+# width, and read_obj averages it down 2x2 in x/y (never in z).  Averaging, not
+# summing, is what keeps the obj values grid-independent.
+print("5. read_obj bins the projection-grid obj_init onto the object grid")
+objf = stub.replace('.h5', '_obj.h5')
+r5 = np.random.default_rng(12)
+init_re = r5.random((nzobj, NDOBJ, NDOBJ), dtype='float32')
+init_im = r5.random((nzobj, NDOBJ, NDOBJ), dtype='float32')
+with h5py.File(objf, 'w') as f:
+    f.create_dataset('/exchange/obj_init_re0_0', data=init_re)
+    f.create_dataset('/exchange/obj_init_im0_0', data=init_im)
+
+exp = (init_re + 1j * init_im).reshape(
+    nzobj, NDOBJ // 2, 2, NDOBJ // 2, 2).mean(axis=(2, 4)).astype('complex64')
+rd5 = Reader(stub, comm, 0, nzobj, nzobj, NDOBJ // 2, 0, ntheta, ntheta,
+             ndist, nz, n, 0, 0.0, 0, 0, tomo_upsample=2)
+got = rd5.read_obj()
+check("upsample=2: shape is the object grid", got.shape == (nzobj, NDOBJ // 2, NDOBJ // 2),
+      f"{got.shape}")
+check("upsample=2: x/y averaged 2x2, z untouched",
+      float(np.abs(got - exp).max()) < 1e-6, f"max|diff|={np.abs(got - exp).max():g}")
+
+rd6 = Reader(stub, comm, 0, nzobj, nzobj, NDOBJ, 0, ntheta, ntheta,
+             ndist, nz, n, 0, 0.0, 0, 0)
+got1 = rd6.read_obj()
+check("upsample=1: read unchanged (regression)",
+      float(np.abs(got1 - (init_re + 1j * init_im)).max()) == 0.0)
+
 print()
 if FAILED:
     print(f"{len(FAILED)} check(s) FAILED: " + ", ".join(FAILED))

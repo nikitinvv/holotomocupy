@@ -21,13 +21,11 @@
 # because their checkpoints have incompatible object shapes and share the
 # iteration numbering.
 #
-# The steps15 line below is what makes the u2 arm possible: config_steps15.conf
-# now carries tomo_upsample=2, so step 5's FBP init is written on the object
-# grid and tagged /exchange/obj_init_re{paganin}_{bin}_u2.  The u1 arm reads the
-# untagged datasets, which the earlier steps15 run already wrote, so
-# polaris_run_u1.sh does not re-run steps15.  If steps 1-4 are already done,
-# set start_step=5 in config_steps15.conf before submitting this -- only step 5
-# has to be repeated.
+# Steps 1-5 are shared by the two arms and are NOT affected by tomo_upsample:
+# step 5 writes its Paganin+FBP init on the projection grid as it always has,
+# and Reader.read_obj averages it 2x2 in x/y when a step-6 config asks for
+# tomo_upsample=2.  So steps15 does not have to be re-run for either arm, and
+# polaris_run_u1.sh has its steps15 line commented out.
 #
 # To run only part of it -- steps 1-5 already done, or resuming after a
 # preemption -- COMMENT OUT the mpiexec lines at the bottom that you do not

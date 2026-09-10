@@ -619,6 +619,34 @@ that `F0` keeps its `1/(ntheta*ndist*nz*n)` normalization, so `err` in
 `conv.csv` scales with the kept fraction and is **not** comparable across runs
 with different `nobj`.
 
+## What `conv.csv` holds
+
+One row per `error_step` iteration (plus an `iter=-1` row for the initial
+state), written by `Rec.error_debug` to `{path_out}/conv.csv` and, so the levels
+of a ladder do not overwrite each other, to `{path_out}/conv_bin{bin}.csv`:
+
+| column | meaning |
+|---|---|
+| `iter` | cumulative iteration number; `-1` is the state before the first step |
+| `err` | the functional `F0`, subject to the caveat above |
+| `time` | seconds since the previous logged iteration (so `error_step` iterations' worth) |
+| `dobj2` | ‖obj<sup>n+1</sup> − obj<sup>n</sup>‖², summed over the whole volume, in object units |
+| `dobj_rel` | ‖obj<sup>n+1</sup> − obj<sup>n</sup>‖ / ‖obj<sup>n+1</sup>‖ |
+
+`dobj2` and `dobj_rel` are the step the object actually took, which is what says
+whether a run has stopped moving — `err` can flatten while the object still
+drifts, and at a level change `err` jumps for reasons that have nothing to do
+with convergence. They are `NaN` on the `iter=-1` row, no step having been taken
+yet.
+
+They cost nothing to compute. The BH step is exactly `alpha * etas['obj']`, so
+no copy of the previous object is needed, and the two reductions ride inside the
+object's own update pass (`Rec._apply_step_obj`), which streams both arrays
+anyway. The pass is only asked for them on the iterations that get logged.
+`dobj2` is scaled back up by `norm_const²` — inside BH the object carries a
+`1/norm_const` — so it is in the same units as the volume that is written out;
+`dobj_rel` is scale-free either way and is the one to compare across levels.
+
 ## Running it on Polaris
 
 ```bash
@@ -817,13 +845,20 @@ checkpoint read (obj z ×2, obj x/y ×1, prb ×2, pos ×2).
 The half-set ladders carry the same `tomo_upsample=2` at all three levels, so
 the three volumes — full, p0, p1 — share one grid and are directly comparable.
 
-**Step 5 has to be re-run for this.** `Reader.read_obj` centre-crops
-`/exchange/obj_init_re60_2` onto the requested grid, it does not downsample, so
-an `obj_init` written at 1264³ would be cropped to its middle 632² and half the
-field of view would be lost. `config_steps15.conf` therefore carries
-`tomo_upsample=2` as well, and step 5 must be re-run (`start_step=5`) before a
-bin-2 run with `start_iter=0`. Bins 1 and 0 resume from checkpoints and never
-read `obj_init`.
+**Step 5 is untouched by this**, and does not have to be re-run. It writes its
+Paganin+FBP init on the PROJECTION grid — `/exchange/obj_init_re60_2` at
+1264³ — exactly as it always has, and `Reader.read_obj` averages it 2×2 in x/y
+onto the object grid when the step-6 config asks for `tomo_upsample=2`. Binning
+is an average, not a sum, because the forward model gives
+`proj = C · mean_j(obj_j)` along the ray independently of the object grid; that
+is the same value convention that lets obj carry between bin levels unrescaled
+and that `bin_z.py` uses. Measured on a synthetic phantom, the two arms get
+equivalent starting points: initial-guess best-fit scale 0.605 (u1) vs 0.647
+(u2) against the truth, and `||R(init/norm) − psi||/||psi||` 0.378 vs 0.351.
+z is not binned — the object keeps the full projection z.
+
+Only bin 2 reads `obj_init` at all (`start_iter=0`); bins 1 and 0 resume from
+checkpoints.
 
 ### The two arms — `tomo_upsample=2` and `tomo_upsample=1`
 
@@ -839,17 +874,16 @@ is identical.
 | object x/y (bin 2/1/0) | 632 / 1264 / 2528 | 1264 / 2528 / 5056 |
 | projection width | 1264 / 2528 / 5056 | 1264 / 2528 / 5056 |
 | voxels | z `v`, x/y `2v` | isotropic |
-| bin-2 `obj_init` | `/exchange/obj_init_re60_2_u2` | `/exchange/obj_init_re60_2` |
+| bin-2 `obj_init` | `/exchange/obj_init_re60_2`, averaged 2×2 in x/y | `/exchange/obj_init_re60_2`, as written |
 | `lam_laplacian` | 0 at every level | 0 at every level |
 
 They must not share a `path_out`: the checkpoints have incompatible object
 shapes (2528 vs 1264 x/y at bin 1) and the two ladders use the same cumulative
 iteration numbering, so one would seed itself from the other's file.
 
-`Reader` and `steps15.py` build the same `_u{n}` suffix — empty for factor 1, so
-the u1 arm reads the untagged datasets an earlier steps15 pass already wrote and
-`polaris_run_u1.sh` has its `steps15` line commented out. Only the u2 arm needs
-step 5 repeated, and only step 5 (`start_step=5`); `polaris_run.sh` runs it.
+Steps 1–5 are shared: neither `steps15.py` nor `config_steps15.conf` knows about
+`tomo_upsample`, both arms read the same `obj_init`, and `polaris_run_u1.sh`
+therefore has its `steps15` line commented out.
 
 Positions, probe and `pos` are detector-plane in both arms, so a checkpoint from
 either can be used as the `pos_checkpoint` source for the half-set ladders.
@@ -938,11 +972,12 @@ at 1504 of the planned 1536, the queue being `preemptable`. If the full run is
 extended later, repoint `pos_checkpoint` — the positions move well under a pixel
 in 32 iterations, but both halves must use the *same* checkpoint.
 
-**`estimate_rho=False`, including at bin 2** where the full config has it on.
-The coordinate search would tune `rho[prb]` separately in each half and the two
-would no longer be running the same solver. If the full bin-2 run logged
-`estimate_rho_coord: final rho = [...]`, copy its obj and prb entries into all
-six `rho=` lines by hand.
+**`estimate_rho=False`** — as it now is at every level of the full ladder too,
+so this is no longer a difference between the halves and the whole. The
+coordinate search would tune `rho[prb]` separately in each half and the two
+would no longer be running the same solver. If some bin-2 run is ever made with
+it on and logs `estimate_rho_coord: final rho = [...]`, copy its obj and prb
+entries into all six `rho=` lines by hand.
 
 **What is *not* independent between the halves.** The data is, and the object
 and probe refined from it are. Shared are (i) the positions, by construction,

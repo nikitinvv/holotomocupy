@@ -160,18 +160,6 @@ ndark = lay.ndark
 # Stitched object size (same at all steps that use it: 4, 5), overrideable via --nobj
 nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnifications[-1] / 64)) * 64
 
-# Detector oversampling of the Radon transform (see config.py).  `nobj` above is
-# the STITCHED PROJECTION width and is what steps 4 and 5 work on throughout;
-# only step 5's final FBP produces an object, and that object has to land on the
-# same coarse x/y grid step6 will reconstruct on -- nobj // tomo_upsample.
-tomo_upsample = int(getattr(args, 'tomo_upsample', 1))
-if tomo_upsample not in (1, 2):
-    raise ValueError(f"tomo_upsample must be 1 or 2, got {tomo_upsample}")
-# Step 5 tags its obj_init datasets with the factor so the tomo_upsample=1 and
-# =2 variants can coexist in one <pfile>_obj.h5; factor 1 keeps the historical
-# untagged name.  Reader.__init__ builds the same tag.
-ups_tag = '' if tomo_upsample == 1 else f'_u{tomo_upsample}'
-
 # --- Rotation axis, as ESRF reconstructed it ------------------------------
 # <pfile>_/naburec/*.conf records rotation_axis_position on the <pfile>_rec_
 # grid, which is the axis Peter's own reconstruction focused on -- a stated
@@ -901,19 +889,9 @@ else:
     for bin in range(start_level_rec, nlevels):
         n_bin         = n // (2**bin)
         nobj_bin      = nobj // (2**bin)
-        # object x/y width; z stays at nobj_bin (the projection z), so the
-        # volume is anisotropic exactly as step6 will reconstruct it
-        nobj_red      = nobj_bin // tomo_upsample
-        if nobj_red * tomo_upsample != nobj_bin:
-            raise ValueError(
-                f"nobj_bin={nobj_bin} is not divisible by tomo_upsample={tomo_upsample}")
         voxelsize_bin = voxelsize * (2**bin)
         if rank == 0:
             logger.info(f'Step 5: bin={bin}  n_bin={n_bin}  nobj_bin={nobj_bin}  voxelsize={voxelsize_bin*1e9:.3f} nm')
-            if tomo_upsample > 1:
-                logger.info(f'Step 5: bin={bin}  FBP object [{nobj_bin}, {nobj_red}, '
-                            f'{nobj_red}] from proj [..., {nobj_bin}] '
-                            f'(tomo_upsample={tomo_upsample})')
 
         scale = 1.0 / 2**bin
         r = (cshifts * scale).astype('float32')
@@ -1090,17 +1068,17 @@ else:
         psi_z_c.imag[:] = psi_z / paganin
         del psi_z
 
-        rec_loc = np.zeros((local_nz, nobj_red, nobj_red), dtype='complex64')
+        rec_loc = np.zeros((local_nz, nobj_bin, nobj_bin), dtype='complex64')
 
-        cl_tomo = Tomo(nobj_red, nchunk, theta, mask_r=0.9, nd=nobj_bin)
-        nbytes  = 2 * (ntheta * nchunk * nobj_bin + nchunk * nobj_red**2) * np.dtype('complex64').itemsize
+        cl_tomo = Tomo(nobj_bin, nchunk, theta, mask_r=0.9)
+        nbytes  = 2 * (ntheta * nchunk * nobj_bin + nchunk * nobj_bin**2) * np.dtype('complex64').itemsize
         cl      = Chunking(nbytes, nchunk)
 
         @cl.gpu_batch(axis_out=0, axis_inp=1, nout=1)
         def _fbp(_, rec_loc, psi_z_c):
             rec_loc[:] = cl_tomo.fbp(psi_z_c, 'ramp')
 
-        logger.info(f'step5 bin={bin}: FBP start, local_nz={local_nz}, nobj_bin={nobj_bin}, nobj_red={nobj_red}')
+        logger.info(f'step5 bin={bin}: FBP start, local_nz={local_nz}, nobj_bin={nobj_bin}')
         _fbp(cl, rec_loc, psi_z_c)
         logger.info(f'step5 bin={bin}: FBP done')
         logger.info(f'step5 bin={bin}: rank {rank:4d}  fbp norm = {np.linalg.norm(rec_loc):.6e}')
@@ -1113,12 +1091,12 @@ else:
         comm.Barrier()
 
         # Batch writes to stay under the 2^31-byte MPI-IO transfer limit
-        _wbatch = max(1, (1 << 28) // (nobj_red * nobj_red * 4))
+        _wbatch = max(1, (1 << 28) // (nobj_bin * nobj_bin * 4))
         with h5py.File(fpath_obj, 'a', driver='mpio', comm=comm) as fid:
-            re_ds = fid.create_dataset(f'/exchange/obj_init_re{paganin_tag}_{bin}{ups_tag}',
-                                       shape=(nobj_bin, nobj_red, nobj_red), dtype='float32')
-            im_ds = fid.create_dataset(f'/exchange/obj_init_imag{paganin_tag}_{bin}{ups_tag}',
-                                       shape=(nobj_bin, nobj_red, nobj_red), dtype='float32')
+            re_ds = fid.create_dataset(f'/exchange/obj_init_re{paganin_tag}_{bin}',
+                                       shape=(nobj_bin, nobj_bin, nobj_bin), dtype='float32')
+            im_ds = fid.create_dataset(f'/exchange/obj_init_imag{paganin_tag}_{bin}',
+                                       shape=(nobj_bin, nobj_bin, nobj_bin), dtype='float32')
             for _i0 in range(0, local_nz, _wbatch):
                 _i1 = min(_i0 + _wbatch, local_nz)
                 re_ds[z_start + _i0 : z_start + _i1] = rec_loc[_i0:_i1].real

@@ -16,11 +16,10 @@
 #
 #     qsub polaris_run_u1.sh
 #
-# steps15 is NOT re-run here: this arm reads the untagged
-# /exchange/obj_init_re60_2, which the existing steps15 output already holds.
-# (The u2 arm needs the _u2-tagged datasets, which is why config_steps15.conf
-# carries tomo_upsample=2 and steps15 has to be re-run once, with start_step=5,
-# before the u2 bin-2 stage.)
+# steps15 is NOT re-run here -- its line below is commented out.  Steps 1-5 are
+# shared by the two arms: step 5 knows nothing about tomo_upsample and writes
+# /exchange/obj_init_re60_2 on the projection grid, which this arm reads
+# directly and the u2 arm reads through read_obj's 2x2 x/y average.
 #
 # To run only part of it -- steps 1-5 already done, or resuming after a
 # preemption -- COMMENT OUT the mpiexec lines at the bottom that you do not

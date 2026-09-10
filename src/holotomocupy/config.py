@@ -297,9 +297,6 @@ def parse_args_steps15(config_file):
     # them and keep working off the fallbacks above.
     args.tiles       = cfg.list ("tiles", str)
     args.nzobj       = cfg.int  ("nzobj",       fallback=0)
-    # See parse_args: step 5's FBP has to build its initial object on the same
-    # coarse grid step6 will reconstruct on.
-    args.tomo_upsample = cfg.int("tomo_upsample", fallback=1)
     args.bin         = cfg.int  ("bin",         fallback=0)
     args.ntheta_rec  = cfg.int  ("ntheta_rec",  fallback=0)
     args.nobj_tile   = cfg.int  ("nobj_tile",   fallback=0)

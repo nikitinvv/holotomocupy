@@ -12,7 +12,7 @@ from .tomo import Tomo
 from .propagation import Propagation
 from .shift import Shift
 from .shift_fft import ShiftFFT
-from .chunking import Chunking
+from .chunking import Chunking, _axpby
 from .extra_terms import LaplacianTerm, PrbfitTerm
 from .utils import make_pinned, mshow_approx, redot, reprod, timer
 from .mpi_functions import MPIClass
@@ -205,7 +205,7 @@ class Rec:
         self.allreduce_scalars = self.cl_mpi.allreduce_scalars
         
         # save convergence results
-        self.table = pd.DataFrame(columns=["iter", "err", "time"])
+        self.table = pd.DataFrame(columns=["iter", "err", "time", "dobj2", "dobj_rel"])
 
         # apply_F_from memoization (per-chunk scope; reset in every cascade kernel)
         self._apply_F_cache  = {}
@@ -562,7 +562,10 @@ class Rec:
                 if self.check_approx:
                     self.check_approximation(vars, etas, top, bottom, alpha,
                                              i, writer)
-                self.apply_step(vars, etas, alpha)
+                want = self._is_error_iter(i)
+                res = self.apply_step(vars, etas, alpha, obj_norms=want)
+                if want:
+                    self._record_dobj(res)
                 self.log_iter(vars, i, writer)
 
     def estimate_rho_coord(self, vars, grads, etas, niter_trial=16, max_extend=8):
@@ -613,7 +616,7 @@ class Rec:
                 v[:] = snap_vars[k]
             for buf in grads.values(): buf[:] = 0
             for buf in etas.values():  buf[:] = 0
-            self.table      = pd.DataFrame(columns=["iter", "err", "time"])
+            self.table      = pd.DataFrame(columns=["iter", "err", "time", "dobj2", "dobj_rel"])
             self.start_iter = 0
 
         def _run_trial(rho_vec):
@@ -1011,10 +1014,51 @@ class Rec:
             alpha = top / bottom
         return alpha, top, bottom
 
-    def apply_step(self, vars, etas, alpha):
-        """var ← var + alpha·eta for every variable."""
+    def apply_step(self, vars, etas, alpha, obj_norms=False):
+        """var ← var + alpha·eta for every variable.
+
+        With obj_norms, also returns (‖obj^{n+1} − obj^n‖², ‖obj^{n+1}‖²) as
+        LOCAL sums for the caller to allreduce.  The step is exactly
+        alpha·etas['obj'], which is already resident, so no copy of the previous
+        object is needed; the two reductions ride along inside the object's own
+        update pass, which streams both arrays anyway.  Zero extra memory and no
+        extra host↔device traffic.
+        """
+        out = None
         for v in ("obj", "prb", "pos", "proj", "tp"):
-            self.linear_batch(vars[v], etas[v], 1, alpha)
+            if v == "obj" and obj_norms:
+                out = self._apply_step_obj(vars, etas, alpha)
+            else:
+                self.linear_batch(vars[v], etas[v], 1, alpha)
+        return out
+
+    def _apply_step_obj(self, vars, etas, alpha):
+        """obj <- obj + alpha*eta_obj, accumulating ||eta_obj||^2 and
+        ||obj_new||^2 in the same streaming pass.
+
+        Returns the LOCAL (alpha^2*||eta_obj||^2, ||obj_new||^2); this rank owns
+        only its z slab.  float64 accumulators, unlike the float32 ones in
+        Chunking.redot_batch: this is a sum of ~nzobj/nchunk same-sign chunk
+        norms over up to 3e10 voxels, and float32 would eat ~1e-4 of it.  They
+        are 0-d scalars, so the extra bytes are free -- and 0-d, not (1,), so
+        gpu_batch can never mistake them for chunked outputs."""
+        x, y = vars['obj'], etas['obj']
+        a2 = float(alpha) ** 2
+        if isinstance(x, cp.ndarray):
+            _axpby(x, x, y, 1, alpha)
+            return a2 * float(redot(y, y).get()), float(redot(x, x).get())
+
+        d2 = cp.zeros((), dtype="float64")
+        o2 = cp.zeros((), dtype="float64")
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=3)
+        def _step_obj(self, out, d2, o2, x, y, alpha):
+            _axpby(out, x, y, 1, alpha)
+            d2[...] += redot(y, y)
+            o2[...] += redot(out, out)
+
+        _step_obj(self, x, d2, o2, x, y, alpha)
+        return a2 * float(d2.get()[()]), float(o2.get()[()])
 
     def log_iter(self, vars, i, writer):
         """Error logging + visualization debug for this iter."""
@@ -1865,12 +1909,30 @@ class Rec:
         plt.close(fig)
         logger.info(f"check_approximation plot → {png_path}")
 
+    def _is_error_iter(self, i):
+        """True on the iterations error_debug logs.  _iterate asks this before
+        apply_step so the convergence norms are only computed when they will
+        actually be written."""
+        return self.error_step != -1 and i % self.error_step == 0
+
+    def _record_dobj(self, res):
+        """Turn apply_step's local (norm2 of the step, norm2 of obj) into the
+        numbers logged.
+
+        obj is z-distributed, so both sums are partial and need one allreduce.
+        Inside BH obj carries a 1/norm_const (precalc divides, postcalc
+        multiplies back), so the absolute number is scaled back to physical
+        object units; the relative one is scale-free either way."""
+        d2, o2 = self.allreduce_scalars(*res)
+        self.dobj2 = float(self.norm_const) ** 2 * d2
+        self.dobj_rel = float(np.sqrt(d2 / o2)) if o2 > 0 else float('nan')
+
     def error_debug(self, vars, i):
         """Error logging and CSV checkpoint export. i=-1 is the initial-state call from
         BH (before the loop) and is always logged regardless of error_step."""
-        if i != -1 and not (i % self.error_step == 0 and self.error_step != -1):
+        if i != -1 and not self._is_error_iter(i):
             return
-            
+
         t_min = time.time()
         err = self.min(vars["prb"], vars["obj"], vars["pos"], vars["proj"],
                        vars["tp"])
@@ -1878,11 +1940,20 @@ class Rec:
         if self.rank==0:
             if i==-1:
                 logger.warning(f"Initial {err=:1.5e} ")
-                self.table.loc[len(self.table)] = [i, err, 0]
+                # No step has been taken yet, so there is no ||obj^{n+1}-obj^n||.
+                self.table.loc[len(self.table)] = [i, err, 0, np.nan, np.nan]
             else:
                 ittime = time.time()-self.time_start
-                logger.warning(f"iter={i}: {ittime:.4f}sec (-min={ittime - min_time:.4f}sec) {err=:1.5e} ")
-                self.table.loc[len(self.table)] = [i, err, ittime]
+                # dobj2 = ||obj^{n+1} - obj^n||_2^2 in physical object units,
+                # dobj_rel = ||obj^{n+1} - obj^n|| / ||obj^{n+1}||.  Set by
+                # _record_dobj from the update pass just before this call; nan
+                # if error_debug was reached some other way (a bare call, or a
+                # trial whose apply_step was not asked for them).
+                dobj2 = getattr(self, 'dobj2', np.nan)
+                dobj_rel = getattr(self, 'dobj_rel', np.nan)
+                logger.warning(f"iter={i}: {ittime:.4f}sec (-min={ittime - min_time:.4f}sec) {err=:1.5e} |dobj|^2={dobj2:1.5e} rel={dobj_rel:1.3e}")
+                self.table.loc[len(self.table)] = [i, err, ittime, dobj2, dobj_rel]
+            self.dobj2 = self.dobj_rel = np.nan
             self.time_start = time.time()
             if hasattr(self, 'path_out'):
                 name = f"{self.path_out}/conv.csv"

@@ -157,16 +157,6 @@ nobj = args.nobj if args.nobj is not None else int(np.ceil(n / norm_magnificatio
 
 n_bin         = n // 2**bin
 nobj_bin      = nobj // 2**bin
-# Detector oversampling (see config.py): nobj_bin stays the projection width --
-# the sweep's whole geometry, including the shift being swept, lives there --
-# and only the reconstructed slice comes out on the coarse nobj_red grid, the
-# same one step6 uses.
-tomo_upsample = int(getattr(args, 'tomo_upsample', 1))
-if tomo_upsample not in (1, 2):
-    raise ValueError(f"tomo_upsample must be 1 or 2, got {tomo_upsample}")
-nobj_red      = nobj_bin // tomo_upsample
-if nobj_red * tomo_upsample != nobj_bin:
-    raise ValueError(f"nobj_bin={nobj_bin} not divisible by tomo_upsample={tomo_upsample}")
 voxelsize_bin = voxelsize * 2**bin
 scale         = 1.0 / 2**bin
 zmid          = a.slice if a.slice is not None else nobj_bin // 2
@@ -193,9 +183,6 @@ if rank == 0:
     logger.info(f'  in                   : {fpath}')
     logger.info(f'  out                  : {out_dir}')
     logger.info(f'  bin                  : {bin}   n_bin={n_bin}  nobj_bin={nobj_bin}')
-    if tomo_upsample > 1:
-        logger.info(f'  tomo_upsample        : {tomo_upsample}  '
-                    f'(slice {nobj_red}^2)')
     logger.info(f'  voxel size           : {voxelsize_bin*1e9:.3f} nm')
     logger.info(f'  ndist / ntheta       : {ndist} / {ntheta}')
     logger.info(f'  paganin              : {paganin}')
@@ -391,16 +378,16 @@ if rank == 0:
     psi.imag[:] = psi.real / paganin
     del sino
 
-    rec     = np.zeros((nsh, nobj_red, nobj_red), dtype='complex64')
-    cl_tomo = Tomo(nobj_red, nchunk, theta, mask_r=0.9, nd=nobj_bin)
-    nbytes  = 2 * (ntheta * nchunk * nobj_bin + nchunk * nobj_red**2) * np.dtype('complex64').itemsize
+    rec     = np.zeros((nsh, nobj_bin, nobj_bin), dtype='complex64')
+    cl_tomo = Tomo(nobj_bin, nchunk, theta, mask_r=0.9)
+    nbytes  = 2 * (ntheta * nchunk * nobj_bin + nchunk * nobj_bin**2) * np.dtype('complex64').itemsize
     cl      = Chunking(nbytes, nchunk)
 
     @cl.gpu_batch(axis_out=0, axis_inp=1, nout=1)
     def _fbp(_, rec, psi):
         rec[:] = cl_tomo.fbp(psi, 'ramp')
 
-    logger.info(f'FBP: {nsh} slices of {nobj_red}^2')
+    logger.info(f'FBP: {nsh} slices of {nobj_bin}^2')
     _fbp(cl, rec, psi)
     del psi
 
@@ -419,7 +406,7 @@ if rank == 0:
     write_tiff(np.ascontiguousarray(rec.real), f'{out_dir}/{tag}')
     with open(f'{out_dir}/{tag}.txt', 'w') as f:
         f.write(f'# rotation-centre sweep from {fpath}\n')
-        f.write(f'# bin={bin}  nobj_bin={nobj_bin}  nobj_red={nobj_red}  slice z={zmid}  '
+        f.write(f'# bin={bin}  nobj_bin={nobj_bin}  slice z={zmid}  '
                 f'voxel={voxelsize_bin*1e9:.3f} nm\n')
         f.write(f'# config rotation_center_shift = {args.rotation_center_shift:.6f}\n')
         f.write(f'# stack {tag}.tiff holds all {nsh} slices, shift ascending\n')

@@ -168,13 +168,11 @@ class Reader:
         self.paganin   = paganin
         self.rotation_center_shift = rotation_center_shift
         self.bin       = bin
-        # Step 5 writes its FBP init on the OBJECT grid, nobj_bin/tomo_upsample
-        # wide, and tags the dataset with the factor so the tomo_upsample=1 and
-        # =2 variants can live side by side in one _obj.h5.  Factor 1 keeps the
-        # historical untagged name, so every existing ladder reads what it always
-        # did.
+        # Step 5 is untouched by tomo_upsample: it writes its Paganin+FBP init
+        # on the PROJECTION grid, nobj*tomo_upsample wide, exactly as it always
+        # has, and both arms read the same datasets.  read_obj bins that init
+        # down to the object grid.
         self.tomo_upsample = int(tomo_upsample)
-        self.ups_tag = '' if self.tomo_upsample == 1 else f'_u{self.tomo_upsample}'
 
         # Read acquisition parameters once and store as attributes
         with h5py.File(in_file, 'r', driver="mpio", comm=self.comm) as fid:
@@ -197,28 +195,57 @@ class Reader:
         if not os.path.exists(obj_file):
             obj_file = self.in_file
         logger.info(f"read object from {obj_file}")
+        # Step 5 knows nothing about tomo_upsample: its FBP init is on the
+        # PROJECTION grid, nobj*tomo_upsample wide.  Read that width and bin it
+        # down to the object grid here.  Binning is an AVERAGE, not a sum,
+        # because obj is a mean-valued quantity -- the forward model gives
+        # proj = C * mean_j(obj_j) along the ray, independent of the object
+        # grid, which is also why obj carries between bin levels unrescaled and
+        # why bin_z.py averages.  Both arms therefore read the same datasets and
+        # step 5 never has to be re-run for a change of tomo_upsample.
+        ups  = self.tomo_upsample
+        nread = self.nobj * ups                     # projection-grid width
         with h5py.File(obj_file, 'r', driver="mpio", comm=self.comm) as fid:
-            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}{self.ups_tag}']
-            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}{self.ups_tag}'
+            obj_ds_re = fid[f'/exchange/obj_init_re{self.paganin}_{self.bin}']
+            im_key = f'/exchange/obj_init_im{self.paganin}_{self.bin}'
             obj_ds_im = fid[im_key] if im_key in fid else None
             nzobj0, nobj0 = obj_ds_re.shape[:2]
+            if nread > nobj0:
+                raise ValueError(
+                    f"{obj_ds_re.name} is {nobj0} wide, too small for "
+                    f"nobj={self.nobj} x tomo_upsample={ups} = {nread}")
             stz  = nzobj0 // 2 - self.nzobj // 2
-            stx  = nobj0  // 2 - self.nobj  // 2
-            endx = nobj0  // 2 + self.nobj  // 2
+            stx  = nobj0  // 2 - nread // 2
+            endx = nobj0  // 2 + nread // 2
             local_nz = self.end_obj - self.st_obj
             if out is None:
                 out = np.empty([local_nz, self.nobj, self.nobj], dtype='complex64')
-            batch = max(1, (1 << 28) // (self.nobj * self.nobj * obj_ds_re.dtype.itemsize))
+            if self.rank == 0 and ups > 1:
+                logger.info(
+                    f"obj_init [{self.nzobj}, {nread}, {nread}] -> object grid "
+                    f"[{self.nzobj}, {self.nobj}, {self.nobj}] "
+                    f"(x/y averaged {ups}x{ups}; z untouched)")
+            batch = max(1, (1 << 28) // (nread * nread * obj_ds_re.dtype.itemsize))
             for i0 in range(0, local_nz, batch):
                 i1 = min(i0 + batch, local_nz)
                 sl = (slice(stz + self.st_obj + i0, stz + self.st_obj + i1),
                       slice(stx, endx), slice(stx, endx))
+                re = self._bin_xy(obj_ds_re[sl], ups)
                 if out.dtype == np.complex64:
-                    out[i0:i1].real[:] = obj_ds_re[sl]
-                    out[i0:i1].imag[:] = obj_ds_im[sl] if obj_ds_im is not None else 0
+                    out[i0:i1].real[:] = re
+                    out[i0:i1].imag[:] = (self._bin_xy(obj_ds_im[sl], ups)
+                                          if obj_ds_im is not None else 0)
                 else:
-                    out[i0:i1] = obj_ds_re[sl]
+                    out[i0:i1] = re
         return out
+
+    @staticmethod
+    def _bin_xy(a, ups):
+        """Average-bin the last two axes of a [nz, m*ups, m*ups] block by `ups`."""
+        if ups == 1:
+            return a
+        nz, m = a.shape[0], a.shape[1] // ups
+        return a.reshape(nz, m, ups, m, ups).mean(axis=(2, 4), dtype='float32')
 
     def read_pos(self, out=None):
         """Read initial positions for this rank's theta-slice into out.
